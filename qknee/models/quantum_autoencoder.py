@@ -260,6 +260,24 @@ class QuantumAutoencoder(nn.Module):
         reconstruction loss, without an explicit decoder."""
         return (1.0 - fidelity).mean()
 
+    def compress(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Latent-only convenience wrapper around `forward()`, for callers
+        that just want the compressed representation for downstream
+        classification (e.g. `PipelineRunner.reduce_to_quantum_angles`)
+        and don't need the SWAP-test fidelity — the training-time signal,
+        irrelevant once the encoder is fitted and only inference is
+        happening. Equivalent to `self(embeddings)[0]`.
+
+        Args:
+            embeddings: (B, feature_dim) tensor (raw ResNet18 features).
+
+        Returns:
+            (B, n_latent_qubits) tensor in [0, 2*pi], ready for a
+            downstream angle-encoding VQC.
+        """
+        latent_angles, _fidelity = self.forward(embeddings)
+        return latent_angles
+
 
 if __name__ == "__main__":
     from qknee.config.logging_config import setup_logging
