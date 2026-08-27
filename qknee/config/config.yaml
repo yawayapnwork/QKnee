@@ -7,6 +7,7 @@
 # containers at a bind-mounted checkpoint without rebuilding the image.
 
 paths:
+  data_root: "data"                                  # env: DATA_ROOT_PATH — expects data/{train,val,test}/<class>/*
   pca_artifact: "qknee/artifacts/pca_scaler.pkl"     # env: PCA_ARTIFACT_PATH
   model_checkpoint: "qknee/artifacts/qknee_model.pt" # env: MODEL_CHECKPOINT_PATH
   eval_output_dir: "eval_outputs"
@@ -45,6 +46,9 @@ training:
   n_epochs: 30
   log_every: 5
   optimizer: "adam"
+  val_holdout_fraction: 0.2    # used to carve a validation split out of train/ when no val/ directory exists
+  pca_fit_max_samples: 2000    # cap on ResNet embeddings collected to fit QuantumDimReducer
+  max_train_samples: null      # null = use the full training split for the full-batch VQC training step
 
 gradcam:
   alpha: 0.45

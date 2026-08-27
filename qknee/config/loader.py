@@ -37,6 +37,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 # api.py/app.py's `os.environ.get(...)` calls) already depend on are listed;
 # everything else is config-file-only by design.
 _ENV_OVERRIDES: Dict[str, str] = {
+    "paths.data_root": "DATA_ROOT_PATH",
     "paths.pca_artifact": "PCA_ARTIFACT_PATH",
     "paths.model_checkpoint": "MODEL_CHECKPOINT_PATH",
 }
@@ -48,6 +49,7 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class PathsConfig:
+    data_root: Path
     pca_artifact: Path
     model_checkpoint: Path
     eval_output_dir: Path
@@ -100,6 +102,9 @@ class TrainingConfig:
     n_epochs: int
     log_every: int
     optimizer: str
+    val_holdout_fraction: float
+    pca_fit_max_samples: int
+    max_train_samples: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -178,6 +183,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
     try:
         paths_raw = raw["paths"]
         paths = PathsConfig(
+            data_root=Path(_require(paths_raw, "data_root", "paths")),
             pca_artifact=Path(_require(paths_raw, "pca_artifact", "paths")),
             model_checkpoint=Path(_require(paths_raw, "model_checkpoint", "paths")),
             eval_output_dir=Path(_require(paths_raw, "eval_output_dir", "paths")),

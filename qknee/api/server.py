@@ -1,7 +1,7 @@
 """
-Q-Knee REST API: FastAPI wrapper exposing the QKneeModel inference engine
-(ResNet18 -> PCA -> 4-qubit VQC) to the Streamlit frontend (qknee/ui) or any
-other HTTP client.
+Q-Knee REST API: FastAPI wrapper exposing `qknee.models.pipeline.PipelineRunner`
+(DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM) to the Streamlit frontend
+(qknee/ui) or any other HTTP client.
 
 Run with:
     uvicorn qknee.api.server:app --reload --port 8000
@@ -22,16 +22,14 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger, setup_logging
-from qknee.data.dataset import build_transforms
-from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
-from PIL import Image, UnidentifiedImageError
+from qknee.models.pipeline import PipelineRunner, PipelineValidationError
+from qknee.xai.gradcam import overlay_heatmap
 
 setup_logging()
 logger = get_logger("qknee.api")
@@ -49,7 +47,7 @@ class PredictionResponse(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=1.0, description="Predicted tear risk probability, in [0, 1].")
     diagnosis: str = Field(..., description="'Tear Detected' if risk_score >= 0.5, else 'Normal'.")
     gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
-    backend: str = Field(..., description="'live' if the trained QKneeModel ran, 'mock' if a fallback was used.")
+    backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
 
 
 class HealthResponse(BaseModel):
@@ -64,36 +62,25 @@ class HealthResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class QKneeBackend:
-    """Lazily loads the real QKneeModel + Grad-CAM machinery once, and
-    exposes a single `predict(raw_bytes, filename)` entry point. Falls back
-    to a deterministic mock if the trained artifact isn't available."""
+    """Thin FastAPI-facing wrapper around `PipelineRunner` — the canonical
+    DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM engine. Delegates all
+    actual inference to one `PipelineRunner` instance built at startup, and
+    falls back to a deterministic mock only when that engine fails to
+    initialize (e.g. no fitted PCA artifact yet), so the API stays usable
+    for frontend development without a trained backend."""
 
     def __init__(self, pca_artifact_path: Path = PCA_ARTIFACT_PATH):
         self.backend_ready = False
         self.load_error: Optional[str] = None
-        self.model = None
-        self.gradcam_target_layer = None
-        self.eval_transform = build_transforms(train=False)
-
-        if not pca_artifact_path.exists():
-            self.load_error = f"PCA artifact not found at {pca_artifact_path}"
-            logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
-            return
+        self.runner: Optional[PipelineRunner] = None
 
         try:
-            from qknee.models.qknee_model import QKneeModel
-            from qknee.models.pca_reducer import QuantumDimReducer
-
-            reducer = QuantumDimReducer.load(pca_artifact_path)
-            self.model = QKneeModel(
-                pca_reducer=reducer,
-                n_qubits=_config.quantum.n_qubits,
-                n_layers=_config.quantum.n_layers,
-            )
-            self.model.eval()
-            self.gradcam_target_layer = get_default_target_layer(self.model.resnet)
+            self.runner = PipelineRunner(config=_config, pca_artifact_path=pca_artifact_path)
             self.backend_ready = True
-            logger.info("QKneeBackend loaded live model from %s", pca_artifact_path)
+            logger.info("QKneeBackend loaded live PipelineRunner from %s", pca_artifact_path)
+        except PipelineValidationError as exc:
+            self.load_error = str(exc)
+            logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
         except Exception as exc:  # noqa: BLE001
             self.load_error = str(exc)
             logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
@@ -172,19 +159,11 @@ class QKneeBackend:
 
     def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str]:
         try:
-            pil_image = Image.fromarray(display_slice, mode="L")
-            input_tensor = self.eval_transform(pil_image).unsqueeze(0)  # (1, 3, 224, 224)
-
-            with torch.no_grad():
-                risk_score = float(self.model(input_tensor).item())
-
-            with GradCAM(self.model.resnet, self.gradcam_target_layer) as cam:
-                heatmap = cam.generate(input_tensor)
-
-            overlay = overlay_heatmap(heatmap, display_slice)
+            result = self.runner.run(display_slice)  # DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM
+            overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
             heatmap_b64 = self._encode_png_base64(overlay)
-            return risk_score, heatmap_b64
-        except Exception as exc:  # noqa: BLE001
+            return result.risk_score, heatmap_b64
+        except Exception as exc:  # noqa: BLE001 - PipelineValidationError or any unexpected failure
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
 
     def _predict_mock(self, display_slice: np.ndarray) -> Tuple[float, str]:

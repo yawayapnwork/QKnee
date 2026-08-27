@@ -128,8 +128,7 @@ class PipelineRunner:
         )
         checkpoint_path = Path(vqc_checkpoint_path or self.config.paths.model_checkpoint)
         if checkpoint_path.exists():
-            state_dict = torch.load(checkpoint_path, map_location=self.device)
-            self.vqc.load_state_dict(state_dict.get("vqc_state_dict", state_dict))
+            self._load_vqc_checkpoint(checkpoint_path)
             logger.info("Loaded trained VQC weights from %s", checkpoint_path)
         else:
             logger.warning(
@@ -137,7 +136,7 @@ class PipelineRunner:
                 checkpoint_path,
             )
         self.vqc.to(self.device)
-        self.vqc.eval()
+        self.vqc.eval()  # standard PyTorch inference mode: disables dropout/BatchNorm updates
 
         # --- Stage 5: Grad-CAM ---
         self.gradcam_target_layer = get_default_target_layer(self.feature_extractor)
@@ -149,6 +148,84 @@ class PipelineRunner:
             self.config.quantum.n_qubits,
             self.config.quantum.n_layers,
         )
+
+    # ------------------------------------------------------------------ #
+    # Checkpoint loading
+    # ------------------------------------------------------------------ #
+    _VQC_PREFIX = "vqc."
+
+    def _load_vqc_checkpoint(self, checkpoint_path: Path) -> None:
+        """Loads `self.vqc`'s weights from a checkpoint produced by
+        `qknee.models.qknee_model.save_checkpoint`.
+
+        Accepts two on-disk shapes for that checkpoint dict:
+            - `vqc_state_dict`   (preferred): the VQC's own state dict,
+              unprefixed (e.g. `"readout.weight"`) — written directly by
+              current `save_checkpoint()`.
+            - `model_state_dict` (fallback): the full joint `QKneeModel`
+              state dict, namespaced (e.g. `"vqc.readout.weight"`) — the
+              `vqc.` prefix is stripped so it loads cleanly into a
+              standalone `VQCClassifier`.
+
+        Raises `PipelineValidationError` naming the missing/mismatched keys
+        instead of letting a bad checkpoint surface as a raw
+        `RuntimeError`/`KeyError` from `torch.load`/`load_state_dict`.
+        """
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except Exception as exc:
+            raise PipelineValidationError(f"[VQC checkpoint] failed to read {checkpoint_path}: {exc}") from exc
+
+        if not isinstance(checkpoint, dict):
+            raise PipelineValidationError(
+                f"[VQC checkpoint] expected a dict at {checkpoint_path}, got {type(checkpoint)}"
+            )
+
+        vqc_state_dict = checkpoint.get("vqc_state_dict")
+        if vqc_state_dict is None:
+            model_state_dict = checkpoint.get("model_state_dict")
+            if model_state_dict is None:
+                raise PipelineValidationError(
+                    f"[VQC checkpoint] {checkpoint_path} has neither 'vqc_state_dict' nor "
+                    "'model_state_dict' - this checkpoint was not produced by "
+                    "qknee.models.qknee_model.save_checkpoint() and cannot be loaded."
+                )
+            vqc_state_dict = {
+                key[len(self._VQC_PREFIX):]: value
+                for key, value in model_state_dict.items()
+                if key.startswith(self._VQC_PREFIX)
+            }
+            if not vqc_state_dict:
+                raise PipelineValidationError(
+                    f"[VQC checkpoint] {checkpoint_path}'s 'model_state_dict' has no keys "
+                    f"prefixed '{self._VQC_PREFIX}' - cannot recover VQC weights from it."
+                )
+            logger.debug(
+                "[VQC checkpoint] no 'vqc_state_dict' in %s; recovered %d VQC tensors "
+                "from 'model_state_dict' by stripping the '%s' prefix.",
+                checkpoint_path, len(vqc_state_dict), self._VQC_PREFIX,
+            )
+
+        checkpoint_n_qubits = checkpoint.get("n_qubits")
+        if checkpoint_n_qubits is not None and checkpoint_n_qubits != self.vqc.n_qubits:
+            raise PipelineValidationError(
+                f"[VQC checkpoint] {checkpoint_path} was saved with n_qubits={checkpoint_n_qubits}, "
+                f"but the configured pipeline expects n_qubits={self.vqc.n_qubits}"
+            )
+        checkpoint_n_layers = checkpoint.get("n_layers")
+        if checkpoint_n_layers is not None and checkpoint_n_layers != self.vqc.n_layers:
+            raise PipelineValidationError(
+                f"[VQC checkpoint] {checkpoint_path} was saved with n_layers={checkpoint_n_layers}, "
+                f"but the configured pipeline expects n_layers={self.vqc.n_layers}"
+            )
+
+        try:
+            self.vqc.load_state_dict(vqc_state_dict, strict=True)
+        except RuntimeError as exc:
+            raise PipelineValidationError(
+                f"[VQC checkpoint] state dict from {checkpoint_path} does not match "
+                f"VQCClassifier(n_qubits={self.vqc.n_qubits}, n_layers={self.vqc.n_layers}): {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Stage-level validation helpers

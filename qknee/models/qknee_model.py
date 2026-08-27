@@ -222,6 +222,9 @@ def train_qknee_model(
 # Checkpointing
 # --------------------------------------------------------------------------- #
 
+CHECKPOINT_REQUIRED_KEYS = ("vqc_state_dict", "model_state_dict", "n_qubits", "n_layers")
+
+
 def save_checkpoint(
     model: QKneeModel,
     path: Union[str, Path],
@@ -229,10 +232,22 @@ def save_checkpoint(
     epoch: Optional[int] = None,
     extra: Optional[Dict] = None,
 ) -> Path:
-    """Saves the full joint model (including frozen ResNet/PCA buffers, for
-    a fully self-contained checkpoint) plus optional optimizer state."""
+    """Saves a standardized checkpoint with two state-dict views of the same
+    trained weights:
+
+        - `vqc_state_dict`:   just the VQC's own parameters (unprefixed keys,
+          e.g. `"readout.weight"`), for callers that only need the quantum
+          classifier — this is what `PipelineRunner` loads.
+        - `model_state_dict`: the full joint `QKneeModel` (including frozen
+          ResNet/PCA buffers), for a fully self-contained reload via
+          `load_checkpoint`/`QKneeModel.load_state_dict`.
+
+    Both are always present so a checkpoint produced by this function is
+    unambiguous to load regardless of which consumer reads it.
+    """
     path = Path(path)
     checkpoint = {
+        "vqc_state_dict": model.vqc.state_dict(),
         "model_state_dict": model.state_dict(),
         "n_qubits": model.vqc.n_qubits,
         "n_layers": model.vqc.n_layers,
@@ -243,8 +258,21 @@ def save_checkpoint(
         checkpoint["optimizer_state_dict"] = optimizer.state_dict()
 
     torch.save(checkpoint, path)
-    logger.info("Saved checkpoint to %s", path)
+    logger.info("Saved checkpoint to %s (keys=%s)", path, sorted(checkpoint.keys()))
     return path
+
+
+def _validate_checkpoint_schema(checkpoint: Dict, path: Union[str, Path]) -> None:
+    """Raises a clear `KeyError`-derived error naming every missing key,
+    instead of letting a malformed/legacy checkpoint fail deep inside
+    `load_state_dict()` with an opaque RuntimeError."""
+    missing = [key for key in CHECKPOINT_REQUIRED_KEYS if key not in checkpoint]
+    if missing:
+        raise KeyError(
+            f"Checkpoint at {path} is missing required key(s) {missing}. "
+            f"Expected all of {CHECKPOINT_REQUIRED_KEYS} - this checkpoint may "
+            "have been saved by an older/incompatible version of save_checkpoint()."
+        )
 
 
 def load_checkpoint(
@@ -253,8 +281,11 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     map_location: Optional[str] = None,
 ) -> Dict:
-    """Loads model (and optionally optimizer) state from a checkpoint saved
-    by `save_checkpoint`. Mutates `model` (and `optimizer`, if given) in place.
+    """Loads full model (and optionally optimizer) state from a checkpoint
+    saved by `save_checkpoint`. Mutates `model` (and `optimizer`, if given)
+    in place, and restores standard PyTorch eval-mode semantics by leaving
+    the module's training flag untouched (callers should call `model.eval()`
+    or `model.train()` explicitly afterward, per normal PyTorch convention).
 
     Returns the raw checkpoint dict (useful for reading back `epoch`/`extra`).
     """
@@ -263,11 +294,17 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
     checkpoint = torch.load(path, map_location=map_location or "cpu")
+    _validate_checkpoint_schema(checkpoint, path)
 
-    if checkpoint.get("n_qubits") != model.vqc.n_qubits:
+    if checkpoint["n_qubits"] != model.vqc.n_qubits:
         raise ValueError(
-            f"Checkpoint was saved with n_qubits={checkpoint.get('n_qubits')}, "
+            f"Checkpoint was saved with n_qubits={checkpoint['n_qubits']}, "
             f"but model has n_qubits={model.vqc.n_qubits}"
+        )
+    if checkpoint["n_layers"] != model.vqc.n_layers:
+        raise ValueError(
+            f"Checkpoint was saved with n_layers={checkpoint['n_layers']}, "
+            f"but model has n_layers={model.vqc.n_layers}"
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])

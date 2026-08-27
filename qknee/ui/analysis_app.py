@@ -16,7 +16,7 @@ and shows dual ACL/meniscus scores):
       radial risk gauge and a highlighted quantum-circuit latency figure,
       rather than per-condition risk bars.
 
-Falls back to a deterministic mock pipeline if the trained QKneeModel
+Falls back to a deterministic mock pipeline if the trained PipelineRunner
 backend (pca_scaler.pkl) isn't available, so the UI is fully demoable
 without a live backend.
 
@@ -64,46 +64,30 @@ class AnalysisResult:
 
 @st.cache_resource(show_spinner=False)
 def load_backend():
-    """Loads the real QKneeModel (ResNet18 -> PCA -> VQC) if a fitted PCA
-    artifact is available; returns None otherwise so the UI can fall back
-    to a deterministic mock."""
+    """Loads a `PipelineRunner` (DataIngestion -> ResNet18 -> PCA -> VQC ->
+    GradCAM) if a fitted PCA artifact is available; returns None otherwise
+    so the UI can fall back to a deterministic mock."""
     if not _config.paths.pca_artifact.exists():
         return None
 
     try:
-        from qknee.models.qknee_model import QKneeModel
-        from qknee.models.pca_reducer import QuantumDimReducer
+        from qknee.models.pipeline import PipelineRunner
 
-        reducer = QuantumDimReducer.load(_config.paths.pca_artifact)
-        model = QKneeModel(
-            pca_reducer=reducer,
-            n_qubits=_config.quantum.n_qubits,
-            n_layers=_config.quantum.n_layers,
-        )
-        model.eval()
-        return model
+        return PipelineRunner(config=_config)
     except Exception as exc:  # noqa: BLE001
         st.session_state["_backend_error"] = str(exc)
         return None
 
 
-def run_live_analysis(model, slice_2d: np.ndarray) -> AnalysisResult:
-    import torch
-
-    from qknee.data.dataset import build_transforms
-    from PIL import Image
-
-    transform = build_transforms(train=False)
-    pil_image = Image.fromarray(slice_2d, mode="L")
-    input_tensor = transform(pil_image).unsqueeze(0)
-
+def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
+    """Delegates to `PipelineRunner`'s stage methods so this UI shares the
+    exact same validated ingestion/ResNet18/PCA/VQC path as the API — only
+    the latency split (feature extraction vs. quantum classification) is
+    UI-specific instrumentation."""
     t0 = time.perf_counter()
-    with torch.no_grad():
-        features = model.resnet(input_tensor)
-        angles = model.pca_layer(features)
+    quantum_angles = runner.extract_quantum_features(slice_2d)  # ingest -> ResNet18 -> PCA
     t1 = time.perf_counter()
-    with torch.no_grad():
-        risk_score = float(model.vqc(angles).item())
+    risk_score = runner.classify(quantum_angles)
     t2 = time.perf_counter()
 
     quantum_latency_ms = (t2 - t1) * 1000
@@ -141,9 +125,9 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
 
 
 def run_analysis(slice_2d: np.ndarray) -> AnalysisResult:
-    model = load_backend()
-    if model is not None:
-        return run_live_analysis(model, slice_2d)
+    runner = load_backend()
+    if runner is not None:
+        return run_live_analysis(runner, slice_2d)
     return run_mock_analysis(slice_2d)
 
 
@@ -305,11 +289,11 @@ def render_sidebar() -> tuple[Optional[np.ndarray], int, float]:
         type=["png", "jpg", "jpeg", "npy"],
     )
 
-    backend = load_backend()
+    runner = load_backend()
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚛️ Backend Status")
-    if backend is not None:
-        st.sidebar.markdown("🟢 **Live model loaded** (ResNet18 → PCA → 4-qubit VQC)")
+    if runner is not None:
+        st.sidebar.markdown("🟢 **Live PipelineRunner loaded** (ResNet18 → PCA → 4-qubit VQC)")
     else:
         st.sidebar.markdown("🟡 **Mock mode** — no trained backend found")
         error = st.session_state.get("_backend_error")
