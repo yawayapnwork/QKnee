@@ -249,29 +249,3 @@ requirements.txt                    # runtime dependencies (+ pyyaml)
 requirements-dev.txt                # + pytest
 pytest.ini                          # slow/benchmark markers, testpaths=qknee/tests
 ```
-
----
-
-## Team & roles
-
-Each stage of the pipeline was designed and owned by a distinct role, reflecting how a real cross-functional ML team would divide this build:
-
-| Role | Owns | Key files |
-|---|---|---|
-| **Computer Vision & Data Engineer** | Ingestion, preprocessing, augmentation | `qknee/data/dataset.py`, `qknee/data/ingestion.py` |
-| **Deep Learning Engineer** | Pretrained CNN backbone & feature extraction | `qknee/models/resnet_extractor.py` |
-| **ML Engineer & Quantum Pipeline Integrator** | Classical→quantum dimensionality reduction | `qknee/models/pca_reducer.py` |
-| **ML Systems Architect** | End-to-end inference pipeline wiring | `qknee/models/pipeline.py`, `qknee/models/qknee_model.py` |
-| **Quantum Machine Learning Specialist** | Variational quantum circuit design | `qknee/models/vqc.py` |
-| **Senior Streamlit / Full-Stack Engineer** | Clinical dashboard UI/UX | `qknee/ui/dashboard.py`, `.streamlit/config.toml` |
-| **Explainable AI (XAI) & ML Evaluation Specialist** | Grad-CAM, baseline benchmarking | `qknee/xai/gradcam.py`, `qknee/models/evaluate.py` |
-| **MLOps & QA Engineer** | Test & performance-benchmark suite | `qknee/tests/`, `pytest.ini` |
-| **DevOps & Backend Engineer** | REST API service layer | `qknee/api/server.py` |
-| **DevOps & Infrastructure Engineer** | Containerization & orchestration | `Dockerfile`, `docker-compose.yml` |
-| **ML Systems Presenter & Technical Writer** | Pitch-deck assets, documentation | `scripts/generate_deck_assets.py`, `README.md` |
-
----
-
-## License
-
-Placeholder — add a `LICENSE` file and update this section (e.g. MIT, Apache-2.0) before publishing.
