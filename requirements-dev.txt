@@ -1,0 +1,4 @@
+# Extra dependencies for running the test suite (tests/) — not needed in
+# the production container images built by the Dockerfile.
+-r requirements.txt
+pytest==9.1.1

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -35,7 +36,9 @@ from PIL import Image, UnidentifiedImageError
 logger = logging.getLogger("qknee.api")
 logging.basicConfig(level=logging.INFO)
 
-PCA_ARTIFACT_PATH = Path("pca_scaler.pkl")
+# Overridable via env var so a deployment can point at a checkpoint mounted
+# from a volume (see docker-compose.yml) without rebuilding the image.
+PCA_ARTIFACT_PATH = Path(os.environ.get("PCA_ARTIFACT_PATH", "pca_scaler.pkl"))
 TEAR_RISK_THRESHOLD = 0.5
 
 

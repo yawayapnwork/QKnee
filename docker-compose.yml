@@ -1,0 +1,99 @@
+# Q-Knee local/dev orchestration: FastAPI backend + Streamlit frontend.
+#
+# Both services build from the same image (see Dockerfile) since they share
+# the entire ML dependency stack (PyTorch, PennyLane, OpenCV) — only the
+# startup `command:` differs.
+#
+# Usage:
+#   docker compose up --build       # start both services
+#   docker compose up --build api   # start just the backend
+#
+# The backend is reachable at        http://localhost:8000  (docs at /docs)
+# The Streamlit UI is reachable at   http://localhost:8501
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qknee:latest
+    container_name: qknee-api
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      # Lightweight config — no secrets here; anything sensitive (API keys,
+      # DB creds) belongs in a git-ignored `.env` file referenced via
+      # `env_file:` instead of being inlined below.
+      - PYTHONUNBUFFERED=1
+      - PCA_ARTIFACT_PATH=/app/models/pca_scaler.pkl
+      - MODEL_CHECKPOINT_PATH=/app/models/qknee_model.pt
+      # CPU thread tuning for the PennyLane default.qubit simulator + Torch
+      # backend — keep both containers from oversubscribing the host's
+      # cores. Override to match the deployment host, e.g. `nproc`.
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - TORCH_NUM_THREADS=4
+    volumes:
+      # Model checkpoint storage: the fitted PCA/scaler artifact and any
+      # trained QKneeModel checkpoint live on the host (outside the image)
+      # so a new model can be dropped in and picked up on container
+      # restart, with no image rebuild required.
+      - ./models:/app/models:ro
+      # Grad-CAM / evaluation figures written by gradcam.py / evaluate.py
+      # persist on the host instead of vanishing when the container exits.
+      - ./eval_outputs:/app/eval_outputs
+    healthcheck:
+      # No curl/wget in the slim runtime image (kept out to stay lean) —
+      # a one-line Python check against FastAPI's own /health endpoint
+      # covers the same purpose without adding a package.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - qknee-net
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qknee:latest
+    container_name: qknee-frontend
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PCA_ARTIFACT_PATH=/app/models/pca_scaler.pkl
+      - MODEL_CHECKPOINT_PATH=/app/models/qknee_model.pt
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # The Streamlit UI currently loads QKneeModel in-process rather than
+      # calling the API container over HTTP; this is exposed for a future
+      # refactor to a thin HTTP client without touching the image/compose
+      # wiring again.
+      - QKNEE_API_URL=http://api:8000
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - TORCH_NUM_THREADS=2
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - qknee-net
+
+networks:
+  qknee-net:
+    driver: bridge

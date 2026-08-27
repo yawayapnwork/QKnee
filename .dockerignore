@@ -1,0 +1,31 @@
+# Keep the Docker build context small and the image free of local cruft.
+
+.git/
+.gitignore
+.github/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+.venv/
+venv/
+env/
+
+.vscode/
+.idea/
+
+# Local model artifacts / data — these are bind-mounted at runtime instead
+# of baked into the image (see docker-compose.yml).
+*.pkl
+*.joblib
+*.pt
+*.pth
+data/
+eval_outputs/
+*.npy
+*.nii
+*.nii.gz
+*.dcm
+
+.streamlit/secrets.toml

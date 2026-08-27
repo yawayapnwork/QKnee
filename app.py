@@ -20,6 +20,7 @@ RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,9 @@ import streamlit as st
 # Backend wiring (real pipeline if available, seeded mock fallback otherwise)
 # --------------------------------------------------------------------------- #
 
-PCA_ARTIFACT_PATH = Path("pca_scaler.pkl")
+# Overridable via env var so a deployment can point at a checkpoint mounted
+# from a volume (see docker-compose.yml) without rebuilding the image.
+PCA_ARTIFACT_PATH = Path(os.environ.get("PCA_ARTIFACT_PATH", "pca_scaler.pkl"))
 
 
 @dataclass
