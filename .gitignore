@@ -30,6 +30,9 @@ htmlcov/
 .vscode/
 .idea/
 
+# Streamlit
+.streamlit/secrets.toml
+
 # OS
 .DS_Store
 Thumbs.db
