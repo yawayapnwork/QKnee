@@ -16,3 +16,5 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 requests==2.34.2
+reportlab==5.0.1
+nibabel==5.4.2

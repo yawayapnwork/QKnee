@@ -25,6 +25,7 @@ import hashlib
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -292,26 +293,34 @@ def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) 
 # Volume ingestion + tri-planar slicing
 # --------------------------------------------------------------------------- #
 
-def load_volume(uploaded_file) -> Optional[np.ndarray]:
-    """Loads an uploaded .npy or DICOM (.dcm) file into a 3D (D, H, W) array.
+def load_volume(uploaded_files) -> Optional[np.ndarray]:
+    """Loads uploaded file(s) into a 3D (D, H, W) array via
+    `DataIngestion.load_volume_array` — the same DICOM-series/.nii/
+    .nii.gz/.npy/.dcm loading path used elsewhere in the pipeline, so the
+    dashboard's tri-planar Axial/Coronal/Sagittal slicing (`get_slice`)
+    works consistently over any of those formats.
 
-    Returns None (and shows a Streamlit error) if the file can't be parsed.
+    Args:
+        uploaded_files: A single Streamlit `UploadedFile` (`.npy`,
+            `.dcm`/`.dicom`, or `.nii`/`.nii.gz`), or a list of
+            `UploadedFile`s — a multi-file DICOM series upload, stacked
+            into one volume ordered by InstanceNumber/SliceLocation.
+
+    Returns None (and shows a Streamlit error) if the file(s) can't be parsed.
     """
-    suffix = Path(uploaded_file.name).suffix.lower()
+    from qknee.data.ingestion import DataIngestion, IngestionError
+
+    files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+    source = files if len(files) > 1 else files[0]
+    display_name = f"{len(files)}-file DICOM series" if len(files) > 1 else files[0].name
 
     try:
-        if suffix == ".npy":
-            volume = np.load(uploaded_file)
-        elif suffix in (".dcm", ".dicom"):
-            import pydicom
-
-            dataset = pydicom.dcmread(uploaded_file)
-            volume = dataset.pixel_array
-        else:
-            st.error(f"Unsupported file type '{suffix}'. Upload a .npy or .dcm file.")
-            return None
+        volume = DataIngestion().load_volume_array(source)
+    except IngestionError as exc:
+        st.error(f"Failed to read '{display_name}': {exc}")
+        return None
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Failed to read '{uploaded_file.name}': {exc}")
+        st.error(f"Failed to read '{display_name}': {exc}")
         return None
 
     volume = np.asarray(volume)
@@ -463,6 +472,37 @@ def render_latency_metrics(result: InferenceResult) -> None:
                f"({result.backend} backend)")
 
 
+def render_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
+    """Renders a 'Download PDF Report' button compiling the current slice,
+    Grad-CAM overlay, and ACL/meniscus risk scores into a radiology-style
+    PDF via `qknee.xai.report_generator`. A failed generation degrades to
+    a warning rather than crashing the dashboard."""
+    from qknee.xai.report_generator import PatientMetadata, generate_radiology_report_bytes
+
+    st.markdown("#### Report")
+    try:
+        pdf_bytes = generate_radiology_report_bytes(
+            mri_slice=display_slice,
+            acl_risk=result.acl_risk,
+            meniscus_risk=result.meniscus_risk,
+            gradcam_overlay=result.gradcam_overlay,
+            patient_metadata=PatientMetadata(scan_description="Knee MRI — Q-Knee dashboard session"),
+            backend=result.backend,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed report shouldn't crash the dashboard
+        logger.warning("PDF report generation failed: %s", exc)
+        st.warning("Could not generate the PDF report for this slice.")
+        return
+
+    st.download_button(
+        label="📄 Download PDF Report",
+        data=pdf_bytes,
+        file_name=f"qknee_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
@@ -480,27 +520,34 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Upload MRI Volume")
-    uploaded_file = st.sidebar.file_uploader(
-        "DICOM (.dcm) or NumPy volume (.npy)",
-        type=["dcm", "dicom", "npy"],
-        accept_multiple_files=False,
+    uploaded_files = st.sidebar.file_uploader(
+        "DICOM series (.dcm, select all files), single DICOM, NumPy volume (.npy), or NIfTI (.nii/.nii.gz)",
+        type=["dcm", "dicom", "npy", "nii", "gz"],
+        accept_multiple_files=True,
     )
 
-    if uploaded_file is None:
-        st.info("Upload a `.npy` volume or `.dcm` file from the sidebar to begin, "
-                 "or explore the dashboard below with synthetic demo data.")
+    if not uploaded_files:
+        st.info("Upload a `.npy`/`.nii`/`.nii.gz` volume or one or more `.dcm` files "
+                 "(a full series) from the sidebar to begin, or explore the dashboard "
+                 "below with synthetic demo data.")
         rng = np.random.default_rng(123)
         volume = rng.normal(loc=128, scale=40, size=(24, 224, 224)).clip(0, 255)
         st.sidebar.caption("Currently viewing: synthetic demo volume (24 slices)")
     else:
-        volume = load_volume(uploaded_file)
+        volume = load_volume(uploaded_files)
         if volume is None:
             st.stop()
-        st.sidebar.success(f"Loaded '{uploaded_file.name}' — shape {volume.shape}")
+        display_name = (
+            f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
+        )
+        st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### View Controls")
-    view = st.sidebar.radio("Anatomical Plane", ["Axial", "Coronal", "Sagittal"], horizontal=False)
+    view = st.sidebar.radio(
+        "Anatomical Plane", ["Axial", "Coronal", "Sagittal"], horizontal=False,
+        help="Scroll slice-by-slice through the loaded 3D volume in any of the three anatomical planes.",
+    )
 
     max_index = max(view_axis_size(volume, view) - 1, 0)
     slice_index = st.sidebar.slider("Slice", min_value=0, max_value=max_index, value=max_index // 2)
@@ -536,6 +583,9 @@ def main() -> None:
         render_risk_gauge("Meniscus", result.meniscus_risk)
         st.markdown("---")
         render_latency_metrics(result)
+
+    st.markdown("---")
+    render_report_download(display_slice, result)
 
     st.markdown("---")
     st.caption(
