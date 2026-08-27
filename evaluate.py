@@ -93,22 +93,73 @@ def generate_synthetic_dataset(
     return features.astype(np.float32), labels
 
 
+class PerformanceEvaluator:
+    """Computes ROC-AUC, sensitivity, specificity, and F1-score for a single
+    model's predictions against held-out ground-truth labels.
+
+    Works for any binary classifier's predicted probabilities, including the
+    Quantum VQC's sigmoid output (`model_pipeline.QKneeModel` / `vqc_classifier.VQCClassifier`)
+    and the classical SVM/ResNet-linear baselines below.
+
+    Usage:
+        evaluator = PerformanceEvaluator("Quantum VQC", y_test, vqc_probs)
+        print(evaluator.metrics)          # ModelMetrics(...)
+        print(evaluator.summary())        # one-line human-readable report
+    """
+
+    def __init__(self, name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5):
+        self.name = name
+        self.y_true = np.asarray(y_true)
+        self.y_prob = np.asarray(y_prob)
+        self.threshold = threshold
+        self.metrics = self._compute()
+
+    def _compute(self) -> ModelMetrics:
+        y_pred = (self.y_prob >= self.threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(self.y_true, y_pred, labels=[0, 1]).ravel()
+
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+        return ModelMetrics(
+            name=self.name,
+            y_true=self.y_true,
+            y_prob=self.y_prob,
+            roc_auc=roc_auc_score(self.y_true, self.y_prob),
+            sensitivity=sensitivity,
+            specificity=specificity,
+            f1=f1_score(self.y_true, y_pred),
+        )
+
+    @property
+    def roc_auc(self) -> float:
+        return self.metrics.roc_auc
+
+    @property
+    def sensitivity(self) -> float:
+        return self.metrics.sensitivity
+
+    @property
+    def specificity(self) -> float:
+        return self.metrics.specificity
+
+    @property
+    def f1(self) -> float:
+        return self.metrics.f1
+
+    def summary(self) -> str:
+        return (
+            f"{self.name}: ROC-AUC={self.roc_auc:.3f} "
+            f"Sensitivity={self.sensitivity:.3f} "
+            f"Specificity={self.specificity:.3f} "
+            f"F1={self.f1:.3f}"
+        )
+
+
 def compute_metrics(name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> ModelMetrics:
-    y_pred = (y_prob >= threshold).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
-
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-
-    return ModelMetrics(
-        name=name,
-        y_true=y_true,
-        y_prob=y_prob,
-        roc_auc=roc_auc_score(y_true, y_prob),
-        sensitivity=sensitivity,
-        specificity=specificity,
-        f1=f1_score(y_true, y_pred),
-    )
+    """Functional wrapper around `PerformanceEvaluator` (kept for callers
+    that just want the metrics without instantiating the class directly)."""
+    return PerformanceEvaluator(name, y_true, y_prob, threshold=threshold).metrics
 
 
 def train_svm_baseline(X_train, y_train, X_test) -> np.ndarray:
@@ -237,9 +288,9 @@ if __name__ == "__main__":
     vqc_probs = train_quantum_vqc(X_train, y_train, X_test)
 
     results = [
-        compute_metrics("SVM", y_test, svm_probs),
-        compute_metrics("ResNet-only", y_test, resnet_linear_probs),
-        compute_metrics("Quantum VQC", y_test, vqc_probs),
+        PerformanceEvaluator("SVM", y_test, svm_probs).metrics,
+        PerformanceEvaluator("ResNet-only", y_test, resnet_linear_probs).metrics,
+        PerformanceEvaluator("Quantum VQC", y_test, vqc_probs).metrics,
     ]
 
     print("\n=== Evaluation Results ===")
