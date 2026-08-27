@@ -40,6 +40,8 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "paths.data_root": "DATA_ROOT_PATH",
     "paths.pca_artifact": "PCA_ARTIFACT_PATH",
     "paths.model_checkpoint": "MODEL_CHECKPOINT_PATH",
+    "paths.acl_checkpoint": "ACL_CHECKPOINT_PATH",
+    "paths.meniscus_checkpoint": "MENISCUS_CHECKPOINT_PATH",
 }
 
 
@@ -52,6 +54,8 @@ class PathsConfig:
     data_root: Path
     pca_artifact: Path
     model_checkpoint: Path
+    acl_checkpoint: Path
+    meniscus_checkpoint: Path
     eval_output_dir: Path
     deck_output_dir: Path
 
@@ -186,6 +190,8 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             data_root=Path(_require(paths_raw, "data_root", "paths")),
             pca_artifact=Path(_require(paths_raw, "pca_artifact", "paths")),
             model_checkpoint=Path(_require(paths_raw, "model_checkpoint", "paths")),
+            acl_checkpoint=Path(_require(paths_raw, "acl_checkpoint", "paths")),
+            meniscus_checkpoint=Path(_require(paths_raw, "meniscus_checkpoint", "paths")),
             eval_output_dir=Path(_require(paths_raw, "eval_output_dir", "paths")),
             deck_output_dir=Path(_require(paths_raw, "deck_output_dir", "paths")),
         )

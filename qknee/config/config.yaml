@@ -10,6 +10,8 @@ paths:
   data_root: "data"                                  # env: DATA_ROOT_PATH — expects data/{train,val,test}/<class>/*
   pca_artifact: "qknee/artifacts/pca_scaler.pkl"     # env: PCA_ARTIFACT_PATH
   model_checkpoint: "qknee/artifacts/qknee_model.pt" # env: MODEL_CHECKPOINT_PATH
+  acl_checkpoint: "qknee/artifacts/acl_vqc.pt"           # env: ACL_CHECKPOINT_PATH — condition-specific VQC head
+  meniscus_checkpoint: "qknee/artifacts/meniscus_vqc.pt" # env: MENISCUS_CHECKPOINT_PATH — condition-specific VQC head
   eval_output_dir: "eval_outputs"
   deck_output_dir: "deck_assets"
 

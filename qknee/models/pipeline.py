@@ -39,9 +39,10 @@ from qknee.config.loader import QKneeConfig, load_config
 from qknee.config.logging_config import get_logger
 from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pca_reducer import QuantumDimReducer
+from qknee.models.qknee_model import PCAProjectionLayer
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier
-from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
+from qknee.xai.gradcam import GradCAM, TargetFn, get_default_target_layer, overlay_heatmap
 
 logger = get_logger(__name__)
 
@@ -60,6 +61,93 @@ class PipelineResult:
     risk_score: float                 # in [0, 1]
     quantum_angles: np.ndarray        # (1, n_qubits), in [0, 2*pi]
     gradcam_heatmap: Optional[np.ndarray]  # (H, W) in [0, 1], or None if skip_gradcam=True
+
+
+_VQC_PREFIX = "vqc."
+
+
+def load_vqc_weights(
+    vqc: VQCClassifier,
+    checkpoint_path: Union[str, Path],
+    device: Union[str, torch.device] = "cpu",
+) -> None:
+    """Loads `vqc`'s weights in place from a checkpoint produced by
+    `qknee.models.qknee_model.save_checkpoint`.
+
+    Standalone counterpart of `PipelineRunner`'s internal checkpoint loading,
+    reusable by any caller managing its own `VQCClassifier` instance
+    directly — e.g. the clinical dashboard's separate ACL/meniscus heads,
+    which aren't wrapped in a `PipelineRunner`.
+
+    Accepts two on-disk shapes for the checkpoint dict:
+        - `vqc_state_dict`   (preferred): the VQC's own state dict,
+          unprefixed (e.g. `"readout.weight"`) — written directly by
+          current `save_checkpoint()`.
+        - `model_state_dict` (fallback): the full joint `QKneeModel`
+          state dict, namespaced (e.g. `"vqc.readout.weight"`) — the
+          `vqc.` prefix is stripped so it loads cleanly into a
+          standalone `VQCClassifier`.
+
+    Raises `PipelineValidationError` naming the missing/mismatched keys
+    instead of letting a bad checkpoint surface as a raw
+    `RuntimeError`/`KeyError` from `torch.load`/`load_state_dict`.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    except Exception as exc:
+        raise PipelineValidationError(f"[VQC checkpoint] failed to read {checkpoint_path}: {exc}") from exc
+
+    if not isinstance(checkpoint, dict):
+        raise PipelineValidationError(
+            f"[VQC checkpoint] expected a dict at {checkpoint_path}, got {type(checkpoint)}"
+        )
+
+    vqc_state_dict = checkpoint.get("vqc_state_dict")
+    if vqc_state_dict is None:
+        model_state_dict = checkpoint.get("model_state_dict")
+        if model_state_dict is None:
+            raise PipelineValidationError(
+                f"[VQC checkpoint] {checkpoint_path} has neither 'vqc_state_dict' nor "
+                "'model_state_dict' - this checkpoint was not produced by "
+                "qknee.models.qknee_model.save_checkpoint() and cannot be loaded."
+            )
+        vqc_state_dict = {
+            key[len(_VQC_PREFIX):]: value
+            for key, value in model_state_dict.items()
+            if key.startswith(_VQC_PREFIX)
+        }
+        if not vqc_state_dict:
+            raise PipelineValidationError(
+                f"[VQC checkpoint] {checkpoint_path}'s 'model_state_dict' has no keys "
+                f"prefixed '{_VQC_PREFIX}' - cannot recover VQC weights from it."
+            )
+        logger.debug(
+            "[VQC checkpoint] no 'vqc_state_dict' in %s; recovered %d VQC tensors "
+            "from 'model_state_dict' by stripping the '%s' prefix.",
+            checkpoint_path, len(vqc_state_dict), _VQC_PREFIX,
+        )
+
+    checkpoint_n_qubits = checkpoint.get("n_qubits")
+    if checkpoint_n_qubits is not None and checkpoint_n_qubits != vqc.n_qubits:
+        raise PipelineValidationError(
+            f"[VQC checkpoint] {checkpoint_path} was saved with n_qubits={checkpoint_n_qubits}, "
+            f"but the target VQCClassifier expects n_qubits={vqc.n_qubits}"
+        )
+    checkpoint_n_layers = checkpoint.get("n_layers")
+    if checkpoint_n_layers is not None and checkpoint_n_layers != vqc.n_layers:
+        raise PipelineValidationError(
+            f"[VQC checkpoint] {checkpoint_path} was saved with n_layers={checkpoint_n_layers}, "
+            f"but the target VQCClassifier expects n_layers={vqc.n_layers}"
+        )
+
+    try:
+        vqc.load_state_dict(vqc_state_dict, strict=True)
+    except RuntimeError as exc:
+        raise PipelineValidationError(
+            f"[VQC checkpoint] state dict from {checkpoint_path} does not match "
+            f"VQCClassifier(n_qubits={vqc.n_qubits}, n_layers={vqc.n_layers}): {exc}"
+        ) from exc
 
 
 class PipelineRunner:
@@ -121,6 +209,16 @@ class PipelineRunner:
                 f"config.quantum.n_qubits={self.config.quantum.n_qubits}; these must match."
             )
 
+        # Differentiable re-expression of the fitted (sklearn) reducer, used
+        # only by explain() so Grad-CAM can backprop a risk score all the
+        # way through the PCA stage into the ResNet backbone. classify()
+        # still uses self.reducer.transform() directly for the numerically
+        # exact, non-differentiable inference path.
+        try:
+            self.pca_layer = PCAProjectionLayer.from_reducer(self.reducer).to(self.device)
+        except Exception as exc:
+            raise PipelineValidationError(f"Failed to build differentiable PCA layer for Grad-CAM: {exc}") from exc
+
         # --- Stage 4: VQC ---
         self.vqc = VQCClassifier(
             n_qubits=self.config.quantum.n_qubits,
@@ -152,80 +250,8 @@ class PipelineRunner:
     # ------------------------------------------------------------------ #
     # Checkpoint loading
     # ------------------------------------------------------------------ #
-    _VQC_PREFIX = "vqc."
-
     def _load_vqc_checkpoint(self, checkpoint_path: Path) -> None:
-        """Loads `self.vqc`'s weights from a checkpoint produced by
-        `qknee.models.qknee_model.save_checkpoint`.
-
-        Accepts two on-disk shapes for that checkpoint dict:
-            - `vqc_state_dict`   (preferred): the VQC's own state dict,
-              unprefixed (e.g. `"readout.weight"`) — written directly by
-              current `save_checkpoint()`.
-            - `model_state_dict` (fallback): the full joint `QKneeModel`
-              state dict, namespaced (e.g. `"vqc.readout.weight"`) — the
-              `vqc.` prefix is stripped so it loads cleanly into a
-              standalone `VQCClassifier`.
-
-        Raises `PipelineValidationError` naming the missing/mismatched keys
-        instead of letting a bad checkpoint surface as a raw
-        `RuntimeError`/`KeyError` from `torch.load`/`load_state_dict`.
-        """
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        except Exception as exc:
-            raise PipelineValidationError(f"[VQC checkpoint] failed to read {checkpoint_path}: {exc}") from exc
-
-        if not isinstance(checkpoint, dict):
-            raise PipelineValidationError(
-                f"[VQC checkpoint] expected a dict at {checkpoint_path}, got {type(checkpoint)}"
-            )
-
-        vqc_state_dict = checkpoint.get("vqc_state_dict")
-        if vqc_state_dict is None:
-            model_state_dict = checkpoint.get("model_state_dict")
-            if model_state_dict is None:
-                raise PipelineValidationError(
-                    f"[VQC checkpoint] {checkpoint_path} has neither 'vqc_state_dict' nor "
-                    "'model_state_dict' - this checkpoint was not produced by "
-                    "qknee.models.qknee_model.save_checkpoint() and cannot be loaded."
-                )
-            vqc_state_dict = {
-                key[len(self._VQC_PREFIX):]: value
-                for key, value in model_state_dict.items()
-                if key.startswith(self._VQC_PREFIX)
-            }
-            if not vqc_state_dict:
-                raise PipelineValidationError(
-                    f"[VQC checkpoint] {checkpoint_path}'s 'model_state_dict' has no keys "
-                    f"prefixed '{self._VQC_PREFIX}' - cannot recover VQC weights from it."
-                )
-            logger.debug(
-                "[VQC checkpoint] no 'vqc_state_dict' in %s; recovered %d VQC tensors "
-                "from 'model_state_dict' by stripping the '%s' prefix.",
-                checkpoint_path, len(vqc_state_dict), self._VQC_PREFIX,
-            )
-
-        checkpoint_n_qubits = checkpoint.get("n_qubits")
-        if checkpoint_n_qubits is not None and checkpoint_n_qubits != self.vqc.n_qubits:
-            raise PipelineValidationError(
-                f"[VQC checkpoint] {checkpoint_path} was saved with n_qubits={checkpoint_n_qubits}, "
-                f"but the configured pipeline expects n_qubits={self.vqc.n_qubits}"
-            )
-        checkpoint_n_layers = checkpoint.get("n_layers")
-        if checkpoint_n_layers is not None and checkpoint_n_layers != self.vqc.n_layers:
-            raise PipelineValidationError(
-                f"[VQC checkpoint] {checkpoint_path} was saved with n_layers={checkpoint_n_layers}, "
-                f"but the configured pipeline expects n_layers={self.vqc.n_layers}"
-            )
-
-        try:
-            self.vqc.load_state_dict(vqc_state_dict, strict=True)
-        except RuntimeError as exc:
-            raise PipelineValidationError(
-                f"[VQC checkpoint] state dict from {checkpoint_path} does not match "
-                f"VQCClassifier(n_qubits={self.vqc.n_qubits}, n_layers={self.vqc.n_layers}): {exc}"
-            ) from exc
+        load_vqc_weights(self.vqc, checkpoint_path, device=self.device)
 
     # ------------------------------------------------------------------ #
     # Stage-level validation helpers
@@ -309,15 +335,50 @@ class PipelineRunner:
             raise PipelineValidationError(f"[VQC] risk score {risk_value} outside expected range [0, 1]")
         return risk_value
 
-    def explain(self, single_slice_tensor: torch.Tensor) -> np.ndarray:
-        """Stage 5: `(1, 3, 224, 224)` single-slice tensor -> `(H, W)` Grad-CAM heatmap in `[0, 1]`."""
+    def _risk_target_fn(self, vqc: Optional[VQCClassifier] = None) -> TargetFn:
+        """Builds a Grad-CAM `target_fn` that continues the forward pass from
+        a ResNet embedding through the differentiable PCA layer and `vqc`
+        (defaulting to `self.vqc`) to the scalar predicted risk probability —
+        so backpropagating from it highlights the image regions that
+        actually drove *that* risk score, not just the embedding's energy.
+        """
+        model = vqc or self.vqc
+
+        def risk_target(resnet_output: torch.Tensor) -> torch.Tensor:
+            angles = self.pca_layer(resnet_output)   # (B, n_qubits), differentiable
+            risk = model(angles)                      # (B, 1)
+            return risk.squeeze()                     # 0-dim scalar for .backward()
+
+        return risk_target
+
+    def explain(
+        self,
+        single_slice_tensor: torch.Tensor,
+        vqc: Optional[VQCClassifier] = None,
+        target_fn: Optional[TargetFn] = None,
+    ) -> np.ndarray:
+        """Stage 5: `(1, 3, 224, 224)` single-slice tensor -> `(H, W)` Grad-CAM
+        heatmap in `[0, 1]`, backpropagated from the predicted tear-risk
+        probability (not embedding energy), so the heatmap explains the
+        actual prediction.
+
+        Args:
+            single_slice_tensor: `(1, 3, 224, 224)` preprocessed slice.
+            vqc: Optional VQC head to target instead of `self.vqc` — e.g. the
+                dashboard's separate ACL/meniscus heads, so each condition's
+                heatmap reflects that condition's own prediction.
+            target_fn: Optional full override of the backprop target, for
+                callers that want something other than risk-score Grad-CAM
+                (e.g. embedding-energy, by passing `lambda x: x.pow(2).sum()`).
+        """
         if single_slice_tensor.dim() != 4:
             raise PipelineValidationError(
                 f"[GradCAM] expects a single-slice (1, 3, 224, 224) tensor, got {tuple(single_slice_tensor.shape)}"
             )
+        resolved_target_fn = target_fn or self._risk_target_fn(vqc)
         try:
             with GradCAM(self.feature_extractor, self.gradcam_target_layer) as cam:
-                heatmap = cam.generate(single_slice_tensor.to(self.device))
+                heatmap = cam.generate(single_slice_tensor.to(self.device), target_fn=resolved_target_fn)
         except Exception as exc:
             raise PipelineValidationError(f"[GradCAM] generation failed: {exc}") from exc
 

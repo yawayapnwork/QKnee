@@ -86,21 +86,49 @@ class QKneeBackend:
             logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _load_dicom_slice(raw_bytes: bytes) -> np.ndarray:
+        """Parses DICOM bytes into a calibrated grayscale pixel array.
+
+        Beyond a bare `pixel_array` read, this:
+            - Reads with `force=True` so anonymized/non-conformant exports
+              missing the 128-byte preamble + 'DICM' magic (common from some
+              clinical PACS/de-identification pipelines) still parse instead
+              of raising `InvalidDicomError`.
+            - Applies the Modality LUT (`RescaleSlope`/`RescaleIntercept`, or
+              a full `ModalityLUTSequence` if present) via pydicom, so CT-style
+              DICOMs return calibrated intensities (e.g. Hounsfield units)
+              instead of raw stored pixel values. A no-op when neither is
+              present in the dataset.
+            - Inverts `MONOCHROME1` datasets (where 0 = white, max = black)
+              so intensity semantics match the far more common `MONOCHROME2`
+              convention (0 = black) that the rest of the pipeline assumes.
+        """
+        import io
+
+        import pydicom
+        from pydicom.pixels import apply_modality_lut
+
+        try:
+            dataset = pydicom.dcmread(io.BytesIO(raw_bytes), force=True)
+            array = apply_modality_lut(dataset.pixel_array, dataset)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to parse DICOM file: {exc}") from exc
+
+        if getattr(dataset, "PhotometricInterpretation", None) == "MONOCHROME1":
+            array = np.asarray(array)
+            array = array.max() - array
+            logger.debug("Inverted MONOCHROME1 DICOM slice to MONOCHROME2 intensity convention.")
+
+        return array
+
     def load_slice(self, raw_bytes: bytes, filename: str) -> np.ndarray:
         """Parses uploaded bytes (.dcm/.dicom or .npy) into a single 2D
         grayscale slice array. Multi-slice .npy volumes use their middle slice."""
         suffix = Path(filename).suffix.lower()
 
         if suffix in (".dcm", ".dicom"):
-            import io
-
-            import pydicom
-
-            try:
-                dataset = pydicom.dcmread(io.BytesIO(raw_bytes))
-                array = dataset.pixel_array
-            except Exception as exc:
-                raise HTTPException(status_code=422, detail=f"Failed to parse DICOM file: {exc}") from exc
+            array = self._load_dicom_slice(raw_bytes)
 
         elif suffix == ".npy":
             import io

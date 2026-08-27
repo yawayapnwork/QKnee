@@ -71,10 +71,9 @@ services:
       - MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-      # The Streamlit UI currently loads QKneeModel in-process rather than
-      # calling the API container over HTTP; this is exposed for a future
-      # refactor to a thin HTTP client without touching the image/compose
-      # wiring again.
+      # qknee/ui/dashboard.py queries this over HTTP (POST /predict) when
+      # reachable, falling back to loading PipelineRunner in-process (and
+      # then to a seeded mock) if the API container is unavailable.
       - QKNEE_API_URL=http://api:8000
       - OMP_NUM_THREADS=2
       - MKL_NUM_THREADS=2

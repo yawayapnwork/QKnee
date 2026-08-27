@@ -40,8 +40,10 @@ import numpy as np
 import streamlit as st
 
 from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
 
 _config = load_config()
+logger = get_logger(__name__)
 RISK_THRESHOLD = _config.api.tear_risk_threshold
 
 
@@ -56,6 +58,7 @@ class AnalysisResult:
     quantum_latency_ms: float
     total_latency_ms: float
     backend: str  # "live" or "mock"
+    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8, or None if generation failed
 
 
 # --------------------------------------------------------------------------- #
@@ -79,16 +82,47 @@ def load_backend():
         return None
 
 
+def _mock_gradcam_overlay(slice_2d: np.ndarray) -> np.ndarray:
+    """Cheap, torch-free stand-in Grad-CAM overlay for mock mode (a soft
+    radial gradient blended onto the slice via OpenCV only), so the heatmap
+    panel is exercised in the UI even without a live backend."""
+    import cv2
+
+    display = normalize_uint8(slice_2d)
+    height, width = display.shape[:2]
+    yy, xx = np.mgrid[0:height, 0:width]
+    cy, cx = height / 2, width / 2
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    fake_heatmap = np.clip(1 - radius / radius.max(), 0, 1)
+
+    gray_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+    heatmap_uint8 = (fake_heatmap * 255).astype(np.uint8)
+    color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    return cv2.addWeighted(color_heatmap, 0.45, gray_bgr, 0.55, 0)
+
+
 def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     """Delegates to `PipelineRunner`'s stage methods so this UI shares the
-    exact same validated ingestion/ResNet18/PCA/VQC path as the API — only
-    the latency split (feature extraction vs. quantum classification) is
-    UI-specific instrumentation."""
+    exact same validated ingestion/ResNet18/PCA/VQC path as the API, and
+    generates a Grad-CAM overlay backpropagated from the predicted risk
+    score itself (`PipelineRunner.explain()`) — not embedding energy — so
+    the heatmap explains that prediction."""
+    from qknee.xai.gradcam import overlay_heatmap
+
     t0 = time.perf_counter()
-    quantum_angles = runner.extract_quantum_features(slice_2d)  # ingest -> ResNet18 -> PCA
+    batch = runner.ingest(slice_2d)
+    features = runner.extract_resnet_features(batch)
+    quantum_angles = runner.reduce_to_quantum_angles(features)
     t1 = time.perf_counter()
     risk_score = runner.classify(quantum_angles)
     t2 = time.perf_counter()
+
+    gradcam_overlay: Optional[np.ndarray] = None
+    try:
+        heatmap = runner.explain(batch[:, 0])
+        gradcam_overlay = overlay_heatmap(heatmap, slice_2d)
+    except Exception as exc:  # noqa: BLE001 - a failed heatmap shouldn't hide the risk score
+        logger.warning("Grad-CAM generation failed; showing risk score without an overlay: %s", exc)
 
     quantum_latency_ms = (t2 - t1) * 1000
     total_latency_ms = (t2 - t0) * 1000
@@ -100,6 +134,7 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         quantum_latency_ms=quantum_latency_ms,
         total_latency_ms=total_latency_ms,
         backend="live",
+        gradcam_overlay=gradcam_overlay,
     )
 
 
@@ -121,6 +156,7 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
         quantum_latency_ms=quantum_latency_ms,
         total_latency_ms=total_latency_ms,
         backend="mock",
+        gradcam_overlay=_mock_gradcam_overlay(slice_2d),
     )
 
 
@@ -336,18 +372,19 @@ def main() -> None:
     raw_slice = volume[slice_index]
     display_slice = apply_contrast(normalize_uint8(raw_slice), contrast)
 
-    image_col, action_col = st.columns([1.3, 1])
+    image_col, gradcam_col, action_col = st.columns([1, 1, 1.2])
 
     with image_col:
         st.markdown(f"#### Slice {slice_index + 1} / {volume.shape[0]}")
         st.image(display_slice, use_container_width=True, clamp=True)
+
+    result_key = "last_analysis_result"
 
     with action_col:
         st.markdown("#### Run Analysis")
         st.caption("Runs ResNet18 feature extraction + the 4-qubit quantum classifier on the slice above.")
         run_clicked = st.button("🔬 Run Q-Knee Analysis", type="primary", use_container_width=True)
 
-        result_key = "last_analysis_result"
         if run_clicked:
             with st.spinner("Extracting features and running the quantum circuit..."):
                 st.session_state[result_key] = run_analysis(raw_slice)
@@ -358,19 +395,32 @@ def main() -> None:
             st.info("Click **Run Q-Knee Analysis** to generate a prediction for this slice.")
         else:
             render_prediction_badge(result)
+            st.pyplot(render_risk_gauge(result.risk_score), use_container_width=True)
+            st.metric("Quantum Circuit Latency", f"{result.quantum_latency_ms:.1f} ms")
+            st.metric("Total Pipeline Latency", f"{result.total_latency_ms:.1f} ms")
+            st.caption(f"Backend: **{result.backend}**")
 
-            gauge_col, latency_col = st.columns([1, 1])
-            with gauge_col:
-                st.pyplot(render_risk_gauge(result.risk_score), use_container_width=True)
-            with latency_col:
-                st.metric("Quantum Circuit Latency", f"{result.quantum_latency_ms:.1f} ms")
-                st.metric("Total Pipeline Latency", f"{result.total_latency_ms:.1f} ms")
-                st.caption(f"Backend: **{result.backend}**")
+    with gradcam_col:
+        st.markdown("#### Grad-CAM")
+        result = st.session_state.get(result_key)
+        if result is None:
+            st.info("Run the analysis to generate a Grad-CAM overlay.")
+        elif result.gradcam_overlay is not None:
+            st.image(
+                result.gradcam_overlay,
+                channels="BGR",
+                use_container_width=True,
+                caption="Regions driving the risk prediction",
+            )
+        else:
+            st.info("Grad-CAM overlay unavailable for this slice.")
 
     st.markdown("---")
     st.caption(
         "Pipeline: upload → contrast-adjusted preview → ResNet18 (512-D) → "
-        "PCA → [0, 2π] angle scaling → 4-qubit PennyLane VQC → risk score."
+        "PCA → [0, 2π] angle scaling → 4-qubit PennyLane VQC → risk score. "
+        "Grad-CAM is backpropagated from the risk score itself (not embedding energy), "
+        "so the heatmap explains that prediction."
     )
 
 

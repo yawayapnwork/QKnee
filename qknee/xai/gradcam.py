@@ -6,16 +6,24 @@ Targets the final convolutional block (`layer4`, immediately before
 produces a spatial activation heatmap showing which anatomical regions of
 an MRI slice most influenced the extracted 512-D feature vector.
 
-Because the backbone is a frozen feature extractor (no classification head
-attached before the PCA/quantum stages), there is no single "class logit"
-to differentiate for a standard Grad-CAM. Two targeting modes are supported:
+Because the backbone is a frozen feature extractor, generating a heatmap
+that actually explains a *prediction* (rather than just the embedding)
+requires backpropagating from that prediction, not from the embedding
+itself. Two targeting modes are supported:
 
+    - Custom `target_fn` (preferred, and what `PipelineRunner.explain()`
+      uses): pass any callable `(B, 512) -> scalar tensor` that continues
+      the forward computation through to a real model output — e.g.
+      `qknee.models.pipeline.PipelineRunner`'s risk-score target, which
+      chains the 512-D embedding through the differentiable PCA projection
+      and the VQC to the predicted tear-risk probability, so the resulting
+      heatmap highlights the regions that actually drove *that* prediction.
     - Default ("embedding energy"): backprops the squared L2 norm of the
-      512-D embedding, highlighting regions that drive the overall feature
-      representation most strongly.
-    - Custom `target_fn`: pass any callable `(B, 512) -> scalar tensor`,
-      e.g. a class logit from a classifier head attached downstream of the
-      embedding, for a standard class-discriminative Grad-CAM.
+      512-D embedding when no `target_fn` is given, highlighting regions
+      that drive the overall feature representation most strongly. This is
+      a reasonable fallback for exploring the backbone in isolation, but is
+      not class/prediction-discriminative — prefer a real `target_fn`
+      whenever a trained downstream head is available.
 
 Uses OpenCV for colormap generation and overlay compositing (no TorchCAM
 dependency required).
@@ -83,8 +91,12 @@ class GradCAM:
                 keeps the returned heatmap unambiguous).
             target_fn: Optional callable mapping the model's output
                 (whatever `self.model(input_tensor)` returns) to a scalar
-                tensor to backpropagate. Defaults to the squared L2 norm of
-                the output (embedding-energy Grad-CAM).
+                tensor to backpropagate — e.g. a predicted risk probability
+                continued through a downstream classifier. Must return a
+                single-element tensor (0-dim, or `.numel() == 1`); anything
+                else raises a `ValueError` naming the offending shape rather
+                than failing inside `.backward()`. Defaults to the squared
+                L2 norm of the output (embedding-energy Grad-CAM) when omitted.
 
         Returns:
             (H, W) numpy array, normalized to [0, 1], at the target layer's
@@ -103,7 +115,13 @@ class GradCAM:
         try:
             output = self.model(input_tensor)
             target = target_fn(output) if target_fn is not None else output.pow(2).sum()
-            target.backward()
+            if target.numel() != 1:
+                raise ValueError(
+                    f"target_fn must return a single-element (scalar) tensor to backpropagate "
+                    f"from, got shape {tuple(target.shape)}. Reduce it (e.g. `.squeeze()` or "
+                    f"`.mean()`) before returning it from target_fn."
+                )
+            target.squeeze().backward()
         finally:
             self.model.train(was_training)
 

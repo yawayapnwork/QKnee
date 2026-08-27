@@ -7,9 +7,11 @@ tear-risk scores produced by the ResNet18 -> PCA -> 4-qubit VQC pipeline
 built in `qknee/data`, `qknee/models`, and `qknee/xai`, orchestrated by
 `qknee.models.pipeline.PipelineRunner`.
 
-If the trained backend (PCA artifact, PyTorch/PennyLane models) isn't
-available in the current environment, the dashboard transparently falls
-back to a seeded mock inference engine so the UI remains fully demoable.
+Backend priority: the HTTP API (`$QKNEE_API_URL`, when set and reachable) is
+queried first, per the two-service docker-compose architecture; if that's
+unavailable, an in-process `PipelineRunner` is used; if the PCA artifact
+isn't fitted either, the dashboard falls back to a seeded mock inference
+engine, so the UI remains fully demoable in every case.
 
 Run with:
     streamlit run qknee/ui/dashboard.py
@@ -20,6 +22,7 @@ RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,23 +32,27 @@ import numpy as np
 import streamlit as st
 
 from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
 
 # --------------------------------------------------------------------------- #
-# Backend wiring (real pipeline if available, seeded mock fallback otherwise)
+# Backend wiring: HTTP API (preferred, when $QKNEE_API_URL is set and
+# reachable) -> in-process PipelineRunner -> seeded mock, in that order.
 # --------------------------------------------------------------------------- #
 
 _config = load_config()
+logger = get_logger(__name__)
 
 
 @dataclass
 class InferenceResult:
-    acl_risk: float          # [0, 1]
-    meniscus_risk: float     # [0, 1]
+    acl_risk: float                    # [0, 1]
+    meniscus_risk: Optional[float]     # [0, 1], or None when unavailable (e.g. "api" backend)
     resnet_latency_ms: float
     pca_latency_ms: float
     quantum_latency_ms: float
     total_latency_ms: float
-    backend: str             # "live" or "mock"
+    backend: str             # "live", "mock", or "api"
+    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8, or None if generation failed
 
 
 @st.cache_resource(show_spinner=False)
@@ -62,20 +69,42 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
     try:
         import torch
 
-        from qknee.models.pipeline import PipelineRunner
+        from qknee.models.pipeline import PipelineRunner, PipelineValidationError, load_vqc_weights
         from qknee.models.vqc import VQCClassifier
 
         runner = PipelineRunner(config=_config)
 
         # Two independent quantum heads: one scored for ACL tear risk, one
-        # for meniscus tear risk. NOTE: randomly initialized here — swap in
-        # `VQCClassifier` weights loaded from a trained checkpoint for
-        # real predictions.
+        # for meniscus tear risk. Each loads its own trained checkpoint from
+        # config.yaml's paths.acl_checkpoint / paths.meniscus_checkpoint when
+        # available; a missing/invalid checkpoint falls back to randomly
+        # initialized weights for that head only (not the whole backend).
         torch.manual_seed(42)
         acl_model = VQCClassifier()
+        if _config.paths.acl_checkpoint.exists():
+            try:
+                load_vqc_weights(acl_model, _config.paths.acl_checkpoint)
+                logger.info("Loaded trained ACL VQC weights from %s", _config.paths.acl_checkpoint)
+            except PipelineValidationError as exc:
+                logger.warning("Failed to load ACL checkpoint (%s); using random weights: %s",
+                                _config.paths.acl_checkpoint, exc)
+        else:
+            logger.warning("No ACL checkpoint found at %s; using randomly initialized weights.",
+                            _config.paths.acl_checkpoint)
         acl_model.eval()
+
         torch.manual_seed(7)
         meniscus_model = VQCClassifier()
+        if _config.paths.meniscus_checkpoint.exists():
+            try:
+                load_vqc_weights(meniscus_model, _config.paths.meniscus_checkpoint)
+                logger.info("Loaded trained meniscus VQC weights from %s", _config.paths.meniscus_checkpoint)
+            except PipelineValidationError as exc:
+                logger.warning("Failed to load meniscus checkpoint (%s); using random weights: %s",
+                                _config.paths.meniscus_checkpoint, exc)
+        else:
+            logger.warning("No meniscus checkpoint found at %s; using randomly initialized weights.",
+                            _config.paths.meniscus_checkpoint)
         meniscus_model.eval()
 
         return runner, acl_model, meniscus_model
@@ -84,11 +113,114 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
         return None, None, None
 
 
+# --------------------------------------------------------------------------- #
+# HTTP API client (preferred backend when $QKNEE_API_URL is reachable)
+# --------------------------------------------------------------------------- #
+
+def resolve_api_url() -> Optional[str]:
+    """Reads the FastAPI backend's URL from `$QKNEE_API_URL` (set for the
+    frontend container in docker-compose.yml). Returns None if unset, in
+    which case the dashboard falls back to in-process/mock inference."""
+    return os.environ.get("QKNEE_API_URL") or None
+
+
+def api_is_reachable(api_url: str, timeout: float = 1.5) -> bool:
+    """Cheap reachability probe against the API's `/health` endpoint.
+
+    Returns False (never raises) on any connection error, timeout, or
+    non-2xx response, so a down/unreachable API always degrades to the
+    in-process/mock path rather than hanging the UI.
+    """
+    try:
+        import requests
+
+        response = requests.get(f"{api_url}/health", timeout=timeout)
+        return response.status_code == 200
+    except Exception as exc:  # noqa: BLE001 - any failure just means "not reachable"
+        logger.debug("API health check failed for %s: %s", api_url, exc)
+        return False
+
+
+def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
+    """Delegates inference to the Q-Knee FastAPI backend over HTTP
+    (`POST {api_url}/predict`) instead of running `PipelineRunner`
+    in-process — the two-service (api + frontend) docker-compose
+    architecture's intended data path.
+
+    The API's `QKneeModel` exposes one unified risk score (no separate
+    ACL/meniscus heads), so `meniscus_risk` is left `None` here rather than
+    fabricating a second score; the UI renders that gauge as "N/A" in API mode.
+    Per-stage latency isn't reported by the API either, so only the measured
+    HTTP round-trip is attributed, to `total_latency_ms`.
+
+    Raises on any HTTP/connection failure — callers should catch and fall
+    back to `run_live_inference`/`run_mock_inference`.
+    """
+    import base64
+    import io
+
+    import cv2
+    import requests
+
+    buffer = io.BytesIO()
+    np.save(buffer, slice_2d)
+
+    t0 = time.perf_counter()
+    response = requests.post(
+        f"{api_url}/predict",
+        files={"file": ("slice.npy", buffer.getvalue(), "application/octet-stream")},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total_latency_ms = (time.perf_counter() - t0) * 1000
+
+    gradcam_overlay: Optional[np.ndarray] = None
+    heatmap_b64 = payload.get("gradcam_heatmap")
+    if heatmap_b64:
+        try:
+            png_bytes = base64.b64decode(heatmap_b64)
+            gradcam_overlay = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception as exc:  # noqa: BLE001 - a bad heatmap payload shouldn't hide the risk score
+            logger.warning("Failed to decode Grad-CAM heatmap from API response: %s", exc)
+
+    return InferenceResult(
+        acl_risk=float(payload["risk_score"]),
+        meniscus_risk=None,
+        resnet_latency_ms=0.0,
+        pca_latency_ms=0.0,
+        quantum_latency_ms=0.0,
+        total_latency_ms=total_latency_ms,
+        backend=f"api/{payload.get('backend', 'unknown')}",
+        gradcam_overlay=gradcam_overlay,
+    )
+
+
 def _seed_from_slice(slice_2d: np.ndarray) -> int:
     """Deterministic seed derived from slice content, so mock scores stay
     stable for the same slice/view rather than flickering on every rerun."""
     digest = hashlib.sha256(slice_2d.tobytes()).digest()
     return int.from_bytes(digest[:4], "big")
+
+
+def _mock_gradcam_overlay(slice_2d: np.ndarray) -> np.ndarray:
+    """Cheap, torch-free stand-in Grad-CAM overlay for mock mode (a soft
+    radial gradient blended onto the slice via OpenCV only), so the heatmap
+    panel is exercised in the UI even without a live backend — mirrors
+    `qknee.api.server.QKneeBackend._predict_mock`'s fallback heatmap."""
+    import cv2
+
+    display = normalize_for_display(slice_2d)
+    height, width = display.shape[:2]
+    yy, xx = np.mgrid[0:height, 0:width]
+    cy, cx = height / 2, width / 2
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    fake_heatmap = np.clip(1 - radius / radius.max(), 0, 1)
+
+    gray_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+    heatmap_uint8 = (fake_heatmap * 255).astype(np.uint8)
+    color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    return cv2.addWeighted(color_heatmap, 0.45, gray_bgr, 0.55, 0)
 
 
 def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
@@ -108,27 +240,39 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
         quantum_latency_ms=quantum_ms,
         total_latency_ms=resnet_ms + pca_ms + quantum_ms,
         backend="mock",
+        gradcam_overlay=_mock_gradcam_overlay(slice_2d),
     )
 
 
 def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) -> InferenceResult:
-    """Runs the real ResNet18 -> PCA -> VQC pipeline (via `PipelineRunner`)
-    on one 2D slice, timing each stage."""
-    import torch
+    """Runs the real DataIngestion -> ResNet18 -> PCA -> VQC pipeline (via
+    `PipelineRunner`'s stage methods) on one 2D slice, timing each stage,
+    and generates a Grad-CAM overlay backpropagated from the ACL risk score
+    (`PipelineRunner.explain(..., vqc=acl_model)`) — not embedding energy —
+    so the heatmap reflects what actually drove that prediction.
+    """
+    from qknee.xai.gradcam import overlay_heatmap
 
     t0 = time.perf_counter()
-    quantum_vector = torch.from_numpy(runner.extract_quantum_features(slice_2d)).float()
+    batch = runner.ingest(slice_2d)
+    features = runner.extract_resnet_features(batch)
+    quantum_angles = runner.reduce_to_quantum_angles(features)
     t1 = time.perf_counter()
 
-    with torch.no_grad():
-        acl_score = acl_model(quantum_vector).item()
-        t2 = time.perf_counter()
-        meniscus_score = meniscus_model(quantum_vector).item()
-        t3 = time.perf_counter()
+    acl_score = runner.classify(quantum_angles, vqc=acl_model)
+    t2 = time.perf_counter()
+    meniscus_score = runner.classify(quantum_angles, vqc=meniscus_model)
+    t3 = time.perf_counter()
 
-    # extract_quantum_features already covers ingestion + ResNet18 + PCA, so
-    # that combined time is attributed to "resnet_latency_ms" and the two
-    # quantum head evaluations are split into "quantum_latency_ms".
+    gradcam_overlay: Optional[np.ndarray] = None
+    try:
+        heatmap = runner.explain(batch[:, 0], vqc=acl_model)
+        gradcam_overlay = overlay_heatmap(heatmap, slice_2d)
+    except Exception as exc:  # noqa: BLE001 - a failed heatmap shouldn't hide the risk scores
+        logger.warning("Grad-CAM generation failed; showing risk scores without an overlay: %s", exc)
+
+    # ingest + ResNet18 + PCA time is attributed to "resnet_latency_ms"; the
+    # two quantum head evaluations are split into "quantum_latency_ms".
     feature_ms = (t1 - t0) * 1000
     quantum_ms = (t3 - t1) * 1000
 
@@ -140,6 +284,7 @@ def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) 
         quantum_latency_ms=quantum_ms,
         total_latency_ms=feature_ms + quantum_ms,
         backend="live",
+        gradcam_overlay=gradcam_overlay,
     )
 
 
@@ -250,9 +395,12 @@ def render_header() -> None:
     )
 
 
-def render_quantum_status(backend_ready: bool) -> None:
+def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]) -> None:
     st.sidebar.markdown("### Quantum Backend Status")
-    if backend_ready:
+    if mode == "api":
+        st.sidebar.markdown(f"🔵 **HTTP API Mode** — querying `{api_url}/predict`")
+        st.sidebar.caption("Inference runs in the API container; per-stage latency is not reported this way.")
+    elif backend_ready:
         st.sidebar.markdown(
             "🟢 **NISQ Simulator Active** — PennyLane `default.qubit`, 4 qubits"
         )
@@ -265,8 +413,16 @@ def render_quantum_status(backend_ready: bool) -> None:
         else:
             st.sidebar.caption("No fitted PCA artifact found (pca_scaler.pkl)")
 
+    if api_url and mode != "api":
+        st.sidebar.caption(f"$QKNEE_API_URL is set ({api_url}) but unreachable — using in-process/mock inference.")
 
-def render_risk_gauge(label: str, value: float) -> None:
+
+def render_risk_gauge(label: str, value: Optional[float]) -> None:
+    if value is None:
+        st.metric(label=f"⚪ {label} Tear Risk", value="N/A", delta="unavailable in API mode")
+        st.progress(0.0)
+        return
+
     if value >= 0.66:
         color, tier = "🔴", "HIGH"
     elif value >= 0.33:
@@ -278,8 +434,27 @@ def render_risk_gauge(label: str, value: float) -> None:
     st.progress(min(max(value, 0.0), 1.0))
 
 
+def render_gradcam_panel(result: InferenceResult) -> None:
+    is_api = result.backend.startswith("api")
+    st.markdown(f"#### Grad-CAM ({'unified' if is_api else 'ACL'} risk)")
+    if result.gradcam_overlay is not None:
+        caption = (
+            "Regions driving the predicted risk score"
+            if is_api else
+            "Regions driving the ACL tear-risk prediction"
+        )
+        st.image(result.gradcam_overlay, channels="BGR", use_container_width=True, caption=caption)
+    else:
+        st.info("Grad-CAM overlay unavailable for this slice.")
+
+
 def render_latency_metrics(result: InferenceResult) -> None:
     st.markdown("#### Processing Latency")
+    if result.backend.startswith("api"):
+        st.metric("HTTP Round-Trip", f"{result.total_latency_ms:.1f} ms")
+        st.caption(f"Per-stage timing isn't reported over HTTP ({result.backend} backend).")
+        return
+
     cols = st.columns(3)
     cols[0].metric("Feature Extraction", f"{result.resnet_latency_ms:.1f} ms")
     cols[1].metric("PCA Reduction", f"{result.pca_latency_ms:.1f} ms")
@@ -297,7 +472,11 @@ def main() -> None:
 
     pipeline, acl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
-    render_quantum_status(backend_ready)
+
+    api_url = resolve_api_url()
+    use_api = bool(api_url) and api_is_reachable(api_url)
+    mode = "api" if use_api else ("live" if backend_ready else "mock")
+    render_quantum_status(mode, backend_ready, api_url)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Upload MRI Volume")
@@ -329,20 +508,30 @@ def main() -> None:
     raw_slice = get_slice(volume, view, slice_index)
     display_slice = normalize_for_display(raw_slice)
 
-    image_col, results_col = st.columns([1.1, 1])
+    result: Optional[InferenceResult] = None
+    if use_api:
+        try:
+            result = run_api_inference(raw_slice, api_url)
+        except Exception as exc:  # noqa: BLE001 - a failed request degrades to in-process/mock, not a crash
+            logger.warning("API inference failed (%s); falling back to in-process/mock.", exc)
 
-    with image_col:
-        st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
-        st.image(display_slice, use_container_width=True, clamp=True)
-
-    with results_col:
-        st.markdown("#### Tear Risk Assessment")
-
+    if result is None:
         if backend_ready:
             result = run_live_inference(raw_slice, pipeline, acl_model, meniscus_model)
         else:
             result = run_mock_inference(raw_slice)
 
+    image_col, gradcam_col, results_col = st.columns([1, 1, 1])
+
+    with image_col:
+        st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
+        st.image(display_slice, use_container_width=True, clamp=True)
+
+    with gradcam_col:
+        render_gradcam_panel(result)
+
+    with results_col:
+        st.markdown("#### Tear Risk Assessment")
         render_risk_gauge("ACL", result.acl_risk)
         render_risk_gauge("Meniscus", result.meniscus_risk)
         st.markdown("---")
@@ -352,7 +541,8 @@ def main() -> None:
     st.caption(
         "Pipeline: DICOM/NPY ingestion → torchvision preprocessing → frozen ResNet18 "
         "(512-D) → StandardScaler + PCA(4) → [0, 2π] angle scaling → 4-qubit PennyLane "
-        "VQC → classical readout."
+        "VQC → classical readout. Grad-CAM is backpropagated from the ACL risk score "
+        "itself (not embedding energy), so the heatmap explains that prediction."
     )
 
 
