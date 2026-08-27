@@ -1,0 +1,55 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.joblib
+runs/
+checkpoints/
+logs/
+wandb/
+mlruns/
+
+# Data (MRI scans / large arrays — keep out of git)
+data/
+*.npy
+*.nii
+*.nii.gz
+*.dcm
