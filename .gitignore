@@ -49,6 +49,7 @@ checkpoints/
 logs/
 wandb/
 mlruns/
+eval_outputs/
 
 # Data (MRI scans / large arrays — keep out of git)
 data/
