@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -40,13 +40,19 @@ from qknee.config.logging_config import get_logger
 from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import PCAProjectionLayer
+from qknee.models.quantum_autoencoder import QuantumAutoencoder
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier
+from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 from qknee.xai.gradcam import GradCAM, TargetFn, get_default_target_layer, overlay_heatmap
 
 logger = get_logger(__name__)
 
 InputType = Union[str, Path, np.ndarray, Image.Image]
+
+# Dynamic backbone-selection flags (Stage 3 / Stage 4) — see `PipelineRunner`.
+FeatureBackbone = Literal["pca", "quantum_autoencoder"]
+ClassifierBackbone = Literal["vqc", "data_reuploading"]
 
 
 class PipelineValidationError(RuntimeError):
@@ -156,10 +162,28 @@ class PipelineRunner:
 
     Args:
         config: A pre-loaded `QKneeConfig`; defaults to `load_config()`.
-        pca_artifact_path: Overrides `config.paths.pca_artifact`.
-        vqc_checkpoint_path: Optional path to a trained `VQCClassifier`
-            `state_dict`; if omitted, the VQC is randomly initialized
-            (matches the pre-refactor demo behavior of app.py/qknee_frontend.py).
+        pca_artifact_path: Overrides `config.paths.pca_artifact`. Only used
+            when `feature_backbone="pca"`.
+        vqc_checkpoint_path: Optional path to a trained classifier
+            `state_dict` (works for either `classifier_backbone`, since
+            `VQCClassifier` and `DataReuploadingVQC` share the same
+            `n_qubits`/`n_layers`/`state_dict` shape); if omitted, the
+            classifier is randomly initialized (matches the pre-refactor
+            demo behavior of app.py/qknee_frontend.py).
+        feature_backbone: `"pca"` (default) loads a fitted
+            `QuantumDimReducer` artifact, exactly as before.
+            `"quantum_autoencoder"` instead builds a trainable
+            `QuantumAutoencoder` (SWAP-test Hilbert-space compression) —
+            see `qknee.models.quantum_autoencoder`.
+        classifier_backbone: `"vqc"` (default) builds a `VQCClassifier`
+            (single-shot angle encoding), exactly as before.
+            `"data_reuploading"` instead builds a `DataReuploadingVQC`
+            (re-encodes the input at every layer) — see
+            `qknee.models.vqc_data_reuploading`.
+        quantum_autoencoder_checkpoint_path: Optional path to a trained
+            `QuantumAutoencoder` `state_dict`. Only used when
+            `feature_backbone="quantum_autoencoder"`; if omitted (or the
+            path doesn't exist), the autoencoder is randomly initialized.
         device: Torch device string; defaults to `config.device` or
             CUDA-if-available.
     """
@@ -169,9 +193,21 @@ class PipelineRunner:
         config: Optional[QKneeConfig] = None,
         pca_artifact_path: Optional[Union[str, Path]] = None,
         vqc_checkpoint_path: Optional[Union[str, Path]] = None,
+        feature_backbone: FeatureBackbone = "pca",
+        classifier_backbone: ClassifierBackbone = "vqc",
+        quantum_autoencoder_checkpoint_path: Optional[Union[str, Path]] = None,
         device: Optional[str] = None,
     ) -> None:
+        if feature_backbone not in ("pca", "quantum_autoencoder"):
+            raise ValueError(f"feature_backbone must be 'pca' or 'quantum_autoencoder', got {feature_backbone!r}")
+        if classifier_backbone not in ("vqc", "data_reuploading"):
+            raise ValueError(
+                f"classifier_backbone must be 'vqc' or 'data_reuploading', got {classifier_backbone!r}"
+            )
+
         self.config = config or load_config()
+        self.feature_backbone: FeatureBackbone = feature_backbone
+        self.classifier_backbone: ClassifierBackbone = classifier_backbone
         self.device = torch.device(
             device or self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
         )
@@ -189,49 +225,80 @@ class PipelineRunner:
         except Exception as exc:
             raise PipelineValidationError(f"Failed to initialize ResNet18 backbone: {exc}") from exc
 
-        # --- Stage 3: PCA ---
-        pca_artifact_path = Path(pca_artifact_path or self.config.paths.pca_artifact)
-        if not pca_artifact_path.exists():
-            raise PipelineValidationError(
-                f"PCA artifact not found at {pca_artifact_path}. Fit and save a "
-                "QuantumDimReducer (qknee/models/pca_reducer.py) before running the pipeline."
-            )
-        try:
-            self.reducer = QuantumDimReducer.load(pca_artifact_path)
-        except Exception as exc:
-            raise PipelineValidationError(
-                f"Failed to load PCA artifact from {pca_artifact_path}: {exc}"
-            ) from exc
+        # --- Stage 3: dimensionality reduction (PCA or Quantum Autoencoder) ---
+        self.reducer: Optional[QuantumDimReducer] = None
+        self.pca_layer: Optional[PCAProjectionLayer] = None
+        self.quantum_autoencoder: Optional[QuantumAutoencoder] = None
 
-        if self.reducer.n_components != self.config.quantum.n_qubits:
-            raise PipelineValidationError(
-                f"PCA artifact produces {self.reducer.n_components}-D output but "
-                f"config.quantum.n_qubits={self.config.quantum.n_qubits}; these must match."
-            )
+        if feature_backbone == "pca":
+            pca_artifact_path = Path(pca_artifact_path or self.config.paths.pca_artifact)
+            if not pca_artifact_path.exists():
+                raise PipelineValidationError(
+                    f"PCA artifact not found at {pca_artifact_path}. Fit and save a "
+                    "QuantumDimReducer (qknee/models/pca_reducer.py) before running the pipeline."
+                )
+            try:
+                self.reducer = QuantumDimReducer.load(pca_artifact_path)
+            except Exception as exc:
+                raise PipelineValidationError(
+                    f"Failed to load PCA artifact from {pca_artifact_path}: {exc}"
+                ) from exc
 
-        # Differentiable re-expression of the fitted (sklearn) reducer, used
-        # only by explain() so Grad-CAM can backprop a risk score all the
-        # way through the PCA stage into the ResNet backbone. classify()
-        # still uses self.reducer.transform() directly for the numerically
-        # exact, non-differentiable inference path.
-        try:
-            self.pca_layer = PCAProjectionLayer.from_reducer(self.reducer).to(self.device)
-        except Exception as exc:
-            raise PipelineValidationError(f"Failed to build differentiable PCA layer for Grad-CAM: {exc}") from exc
+            if self.reducer.n_components != self.config.quantum.n_qubits:
+                raise PipelineValidationError(
+                    f"PCA artifact produces {self.reducer.n_components}-D output but "
+                    f"config.quantum.n_qubits={self.config.quantum.n_qubits}; these must match."
+                )
 
-        # --- Stage 4: VQC ---
-        self.vqc = VQCClassifier(
+            # Differentiable re-expression of the fitted (sklearn) reducer, used
+            # only by explain() so Grad-CAM can backprop a risk score all the
+            # way through the PCA stage into the ResNet backbone. classify()
+            # still uses self.reducer.transform() directly for the numerically
+            # exact, non-differentiable inference path.
+            try:
+                self.pca_layer = PCAProjectionLayer.from_reducer(self.reducer).to(self.device)
+            except Exception as exc:
+                raise PipelineValidationError(f"Failed to build differentiable PCA layer for Grad-CAM: {exc}") from exc
+        else:  # feature_backbone == "quantum_autoencoder"
+            try:
+                self.quantum_autoencoder = QuantumAutoencoder(
+                    feature_dim=self.config.resnet.feature_dim,
+                    n_latent_qubits=self.config.quantum.n_qubits,
+                )
+            except Exception as exc:
+                raise PipelineValidationError(f"Failed to initialize QuantumAutoencoder: {exc}") from exc
+
+            qae_checkpoint_path = Path(quantum_autoencoder_checkpoint_path) if quantum_autoencoder_checkpoint_path else None
+            if qae_checkpoint_path and qae_checkpoint_path.exists():
+                try:
+                    self.quantum_autoencoder.load_state_dict(torch.load(qae_checkpoint_path, map_location=self.device))
+                    logger.info("Loaded trained QuantumAutoencoder weights from %s", qae_checkpoint_path)
+                except Exception as exc:
+                    raise PipelineValidationError(
+                        f"Failed to load QuantumAutoencoder checkpoint from {qae_checkpoint_path}: {exc}"
+                    ) from exc
+            else:
+                logger.warning(
+                    "No QuantumAutoencoder checkpoint found at %s; using randomly initialized weights.",
+                    qae_checkpoint_path,
+                )
+            self.quantum_autoencoder.to(self.device)
+            self.quantum_autoencoder.eval()
+
+        # --- Stage 4: classifier (VQC or Data-Re-Uploading VQC) ---
+        classifier_cls = VQCClassifier if classifier_backbone == "vqc" else DataReuploadingVQC
+        self.vqc = classifier_cls(
             n_qubits=self.config.quantum.n_qubits,
             n_layers=self.config.quantum.n_layers,
         )
         checkpoint_path = Path(vqc_checkpoint_path or self.config.paths.model_checkpoint)
         if checkpoint_path.exists():
             self._load_vqc_checkpoint(checkpoint_path)
-            logger.info("Loaded trained VQC weights from %s", checkpoint_path)
+            logger.info("Loaded trained %s weights from %s", classifier_cls.__name__, checkpoint_path)
         else:
             logger.warning(
-                "No VQC checkpoint found at %s; using randomly initialized weights.",
-                checkpoint_path,
+                "No %s checkpoint found at %s; using randomly initialized weights.",
+                classifier_cls.__name__, checkpoint_path,
             )
         self.vqc.to(self.device)
         self.vqc.eval()  # standard PyTorch inference mode: disables dropout/BatchNorm updates
@@ -240,9 +307,10 @@ class PipelineRunner:
         self.gradcam_target_layer = get_default_target_layer(self.feature_extractor)
 
         logger.info(
-            "PipelineRunner ready (device=%s, pca_artifact=%s, n_qubits=%d, n_layers=%d)",
+            "PipelineRunner ready (device=%s, feature_backbone=%s, classifier_backbone=%s, n_qubits=%d, n_layers=%d)",
             self.device,
-            pca_artifact_path,
+            feature_backbone,
+            classifier_backbone,
             self.config.quantum.n_qubits,
             self.config.quantum.n_layers,
         )
@@ -303,23 +371,33 @@ class PipelineRunner:
         return features.cpu().numpy()
 
     def reduce_to_quantum_angles(self, features_512d: np.ndarray) -> np.ndarray:
-        """Stage 3: `(1, 512)` ResNet features -> `(1, n_qubits)` angles in `[0, 2*pi]`."""
+        """Stage 3: `(1, 512)` ResNet features -> `(1, n_qubits)` angles in
+        `[0, 2*pi]`, via whichever `feature_backbone` this runner was built
+        with (`"pca"` -> `QuantumDimReducer.transform`, or
+        `"quantum_autoencoder"` -> `QuantumAutoencoder`'s forward pass)."""
+        stage_name = "PCA" if self.feature_backbone == "pca" else "QuantumAutoencoder"
         try:
-            angles = self.reducer.transform(features_512d)
+            if self.feature_backbone == "pca":
+                angles = self.reducer.transform(features_512d)
+            else:
+                with torch.no_grad():
+                    features_tensor = torch.from_numpy(features_512d).float().to(self.device)
+                    latent_angles, _fidelity = self.quantum_autoencoder(features_tensor)
+                angles = latent_angles.cpu().numpy()
         except Exception as exc:
-            raise PipelineValidationError(f"[PCA] transform failed: {exc}") from exc
+            raise PipelineValidationError(f"[{stage_name}] transform failed: {exc}") from exc
 
         self._validate_stage_output(
-            angles, expected_ndim=2, expected_last_dim=self.config.quantum.n_qubits, stage_name="PCA"
+            angles, expected_ndim=2, expected_last_dim=self.config.quantum.n_qubits, stage_name=stage_name
         )
         low, high = self.config.pca.angle_range
         if angles.min() < low - 1e-6 or angles.max() > high + 1e-6:
             raise PipelineValidationError(
-                f"[PCA] output {angles.min():.4f}..{angles.max():.4f} outside expected range [{low}, {high}]"
+                f"[{stage_name}] output {angles.min():.4f}..{angles.max():.4f} outside expected range [{low}, {high}]"
             )
         return angles
 
-    def classify(self, quantum_angles: np.ndarray, vqc: Optional[VQCClassifier] = None) -> float:
+    def classify(self, quantum_angles: np.ndarray, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> float:
         """Stage 4: `(1, n_qubits)` angles -> scalar risk probability in `[0, 1]`."""
         model = vqc or self.vqc
         angles_tensor = torch.from_numpy(quantum_angles).float().to(self.device)
@@ -335,7 +413,7 @@ class PipelineRunner:
             raise PipelineValidationError(f"[VQC] risk score {risk_value} outside expected range [0, 1]")
         return risk_value
 
-    def _risk_target_fn(self, vqc: Optional[VQCClassifier] = None) -> TargetFn:
+    def _risk_target_fn(self, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> TargetFn:
         """Builds a Grad-CAM `target_fn` that continues the forward pass from
         a ResNet embedding through the differentiable PCA layer and `vqc`
         (defaulting to `self.vqc`) to the scalar predicted risk probability —
@@ -345,7 +423,10 @@ class PipelineRunner:
         model = vqc or self.vqc
 
         def risk_target(resnet_output: torch.Tensor) -> torch.Tensor:
-            angles = self.pca_layer(resnet_output)   # (B, n_qubits), differentiable
+            if self.feature_backbone == "pca":
+                angles = self.pca_layer(resnet_output)          # (B, n_qubits), differentiable
+            else:
+                angles, _fidelity = self.quantum_autoencoder(resnet_output)  # natively differentiable
             risk = model(angles)                      # (B, 1)
             return risk.squeeze()                     # 0-dim scalar for .backward()
 
@@ -354,7 +435,7 @@ class PipelineRunner:
     def explain(
         self,
         single_slice_tensor: torch.Tensor,
-        vqc: Optional[VQCClassifier] = None,
+        vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None,
         target_fn: Optional[TargetFn] = None,
     ) -> np.ndarray:
         """Stage 5: `(1, 3, 224, 224)` single-slice tensor -> `(H, W)` Grad-CAM
