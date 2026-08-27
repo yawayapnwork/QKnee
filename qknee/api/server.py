@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger, setup_logging
+from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pipeline import PipelineRunner, PipelineValidationError
 from qknee.xai.gradcam import overlay_heatmap
 
@@ -73,6 +74,7 @@ class QKneeBackend:
         self.backend_ready = False
         self.load_error: Optional[str] = None
         self.runner: Optional[PipelineRunner] = None
+        self._ingestion = DataIngestion(train=False)
 
         try:
             self.runner = PipelineRunner(config=_config, pca_artifact_path=pca_artifact_path)
@@ -124,7 +126,11 @@ class QKneeBackend:
 
     def load_slice(self, raw_bytes: bytes, filename: str) -> np.ndarray:
         """Parses uploaded bytes (.dcm/.dicom or .npy) into a single 2D
-        grayscale slice array. Multi-slice .npy volumes use their middle slice."""
+        grayscale slice array. Multi-slice/multi-frame volumes (3D `(D,H,W)`
+        or 4D `(D,H,W,C)` color arrays) are reduced to their central slice
+        via `DataIngestion`, the same ingestion path used everywhere else in
+        the pipeline — so a color multi-frame DICOM or a 4D `.npy` volume is
+        decomposed consistently instead of being rejected outright."""
         suffix = Path(filename).suffix.lower()
 
         if suffix in (".dcm", ".dicom"):
@@ -144,16 +150,27 @@ class QKneeBackend:
                 detail=f"Unsupported file type '{suffix}'. Upload a .dcm/.dicom or .npy file.",
             )
 
-        array = np.asarray(array)
-        if array.ndim == 3:
-            array = array[array.shape[0] // 2]  # middle slice of a volume
-        elif array.ndim != 2:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Expected a 2D slice or 3D volume, got array of shape {array.shape}.",
-            )
+        return self._to_central_2d_slice(np.asarray(array))
 
-        return array
+    def _to_central_2d_slice(self, array: np.ndarray) -> np.ndarray:
+        """Reduces a 2D/3D/4D array to one representative 2D grayscale slice.
+
+        2D arrays pass through unchanged. 3D `(D, H, W)` and 4D `(D, H, W, C)`
+        arrays are decomposed via `DataIngestion._array_to_pil_slices` (the
+        same slice-extraction + color-averaging logic used for `.npy` volume
+        ingestion elsewhere in the pipeline) and reduced to the central slice
+        — the anatomical midpoint of the stack, consistent with
+        `PipelineRunner.run()`'s own central-slice Grad-CAM selection.
+        """
+        if array.ndim == 2:
+            return array
+
+        try:
+            slices = self._ingestion.load_slices_as_pil(array)
+        except IngestionError as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to decompose array into slices: {exc}") from exc
+
+        return np.array(slices[len(slices) // 2])
 
     @staticmethod
     def _normalize_uint8(slice_2d: np.ndarray) -> np.ndarray:

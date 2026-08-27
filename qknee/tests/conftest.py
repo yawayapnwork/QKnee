@@ -10,6 +10,8 @@ test assertions.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -61,3 +63,40 @@ def dummy_resnet_features() -> np.ndarray:
     """Deterministic (N, 512) array standing in for real ResNet18 embeddings."""
     rng = np.random.default_rng(7)
     return rng.normal(size=(64, RESNET_FEATURE_DIM)).astype(np.float32)
+
+
+@pytest.fixture
+def dummy_slice_2d() -> np.ndarray:
+    """Deterministic (224, 224) uint8 array standing in for one MRI slice."""
+    rng = np.random.default_rng(99)
+    return rng.integers(0, 255, size=(224, 224), dtype=np.uint8)
+
+
+@pytest.fixture(scope="session")
+def pca_artifact_path(tmp_path_factory: pytest.TempPathFactory, fitted_reducer: QuantumDimReducer) -> Path:
+    """Persists the shared `fitted_reducer` to a session-scoped temp file, so
+    `PipelineRunner`/API tests can point at a real, valid PCA artifact
+    without re-fitting one per test."""
+    path = tmp_path_factory.mktemp("artifacts") / "pca_scaler.pkl"
+    fitted_reducer.save(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def missing_checkpoint_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A path that is guaranteed not to exist, so tests that build a
+    `PipelineRunner`/`QKneeBackend` get deterministic randomly-initialized
+    VQC weights instead of accidentally picking up a real checkpoint left
+    on disk at the default `config.yaml` location."""
+    return tmp_path_factory.mktemp("no-checkpoint") / "qknee_model.pt"
+
+
+@pytest.fixture(scope="session")
+def pipeline_runner(pca_artifact_path: Path, missing_checkpoint_path: Path):
+    """A real `PipelineRunner` (ResNet18 + fitted PCA + randomly-initialized
+    VQC), built once per session — constructing it loads a full ResNet18
+    backbone and compiles a PennyLane QNode, which isn't free."""
+    from qknee.models.pipeline import PipelineRunner
+
+    torch.manual_seed(0)
+    return PipelineRunner(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)

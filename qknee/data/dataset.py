@@ -41,7 +41,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 from PIL import Image, UnidentifiedImageError
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, default_collate
 from torchvision import transforms
 
 from qknee.config.loader import load_config
@@ -233,20 +233,29 @@ class MRIDataset(Dataset):
 
         return Image.fromarray(slice_array, mode="L")
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, index: int) -> Optional[Tuple[torch.Tensor, int]]:
+        """Returns `(tensor, label)`, or `None` if the sample fails to load
+        at runtime (e.g. a file corrupted/truncated after index-build time).
+
+        Returning `None` rather than a placeholder tensor is deliberate: a
+        zero-tensor stand-in would silently train the model on a fabricated
+        `(blank image, real label)` pair. Pair this dataset with
+        `collate_skip_invalid` (or any collate_fn that filters `None`
+        entries) so invalid samples are dropped from the batch instead of
+        poisoning it.
+        """
         sample = self.samples[index]
         try:
             pil_image = self._load_pil_image(sample)
         except (UnidentifiedImageError, OSError, ValueError, IndexError) as exc:
             logger.error(
                 "Failed to load sample %s (slice %s) at runtime: %s. "
-                "Returning a zero tensor placeholder instead of crashing the batch.",
+                "Returning None so a skip-invalid collate_fn can drop it from the batch.",
                 sample.path,
                 sample.slice_index,
                 exc,
             )
-            placeholder = torch.zeros(3, *TARGET_SIZE)
-            return placeholder, sample.label
+            return None
 
         if self.transform is not None:
             tensor = self.transform(pil_image)
@@ -254,6 +263,34 @@ class MRIDataset(Dataset):
             tensor = transforms.functional.to_tensor(pil_image)
 
         return tensor, sample.label
+
+
+def collate_skip_invalid(
+    batch: List[Optional[Tuple[torch.Tensor, int]]]
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """`collate_fn` for `MRIDataset`: drops any `None` entries (samples that
+    failed to load at runtime — see `MRIDataset.__getitem__`) before
+    batching the rest with the standard `default_collate`.
+
+    Returns `None` if every sample in the batch was invalid (fully filtered
+    out) — callers iterating a `DataLoader` built with this collate_fn
+    should skip a `None` batch rather than treat it as data, e.g.:
+
+        for batch in loader:
+            if batch is None:
+                continue
+            images, labels = batch
+    """
+    valid_samples = [item for item in batch if item is not None]
+    if not valid_samples:
+        logger.warning("collate_skip_invalid: entire batch of %d samples was invalid; skipping.", len(batch))
+        return None
+    if len(valid_samples) < len(batch):
+        logger.warning(
+            "collate_skip_invalid: dropped %d/%d invalid sample(s) from batch.",
+            len(batch) - len(valid_samples), len(batch),
+        )
+    return default_collate(valid_samples)
 
 
 def build_dataloaders(
@@ -293,6 +330,7 @@ def build_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=is_train,
+            collate_fn=collate_skip_invalid,
         )
 
         logger.info(
@@ -327,5 +365,9 @@ if __name__ == "__main__":
     )
 
     for split_name, loader in loaders.items():
-        images, labels = next(iter(loader))
+        batch = next((b for b in loader if b is not None), None)
+        if batch is None:
+            logger.warning("[%s] every batch was invalid (collate_skip_invalid dropped everything)", split_name)
+            continue
+        images, labels = batch
         logger.info("[%s] batch shape: %s, labels: %s", split_name, tuple(images.shape), labels.tolist())

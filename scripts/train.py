@@ -115,7 +115,10 @@ def collect_resnet_features(
 
     extractor.eval()
     with torch.no_grad():
-        for images, batch_labels in loader:
+        for batch in loader:
+            if batch is None:  # collate_skip_invalid: every sample in this batch was corrupted
+                continue
+            images, batch_labels = batch
             images = images.to(device)
             batch_features = extractor(images).cpu().numpy()
             features.append(batch_features)
@@ -151,7 +154,10 @@ def collect_image_tensor(
     images_list, labels_list = [], []
     collected = 0
 
-    for images, batch_labels in loader:
+    for batch in loader:
+        if batch is None:  # collate_skip_invalid: every sample in this batch was corrupted
+            continue
+        images, batch_labels = batch
         images_list.append(images)
         labels_list.append(batch_labels)
         collected += images.shape[0]

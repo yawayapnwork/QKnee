@@ -50,10 +50,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+from qknee.config.loader import load_config
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.vqc import VQCClassifier
 
-OUTPUT_DIR = Path("eval_outputs")
+_config = load_config()
+OUTPUT_DIR = _config.paths.eval_output_dir
+RISK_THRESHOLD = _config.api.tear_risk_threshold
 
 
 @dataclass
@@ -68,7 +71,7 @@ class ModelMetrics:
 
 
 def generate_synthetic_dataset(
-    n_samples: int = 800, n_features: int = 512, seed: int = 0
+    n_samples: int = 800, n_features: int = _config.resnet.feature_dim, seed: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
     """Synthetic stand-in for (ResNet18 512-D embeddings, binary tear label).
 
@@ -107,7 +110,7 @@ class PerformanceEvaluator:
         print(evaluator.summary())        # one-line human-readable report
     """
 
-    def __init__(self, name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5):
+    def __init__(self, name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = RISK_THRESHOLD):
         self.name = name
         self.y_true = np.asarray(y_true)
         self.y_prob = np.asarray(y_prob)
@@ -156,7 +159,7 @@ class PerformanceEvaluator:
         )
 
 
-def compute_metrics(name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> ModelMetrics:
+def compute_metrics(name: str, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = RISK_THRESHOLD) -> ModelMetrics:
     """Functional wrapper around `PerformanceEvaluator` (kept for callers
     that just want the metrics without instantiating the class directly)."""
     return PerformanceEvaluator(name, y_true, y_prob, threshold=threshold).metrics
@@ -182,15 +185,17 @@ def train_resnet_linear_baseline(X_train, y_train, X_test) -> np.ndarray:
 
 
 def train_quantum_vqc(
-    X_train, y_train, X_test, n_epochs: int = 60, lr: float = 0.05
+    X_train, y_train, X_test,
+    n_epochs: int = _config.training.n_epochs,
+    lr: float = _config.training.learning_rate,
 ) -> np.ndarray:
-    """StandardScaler -> PCA(4) -> [0, 2*pi] -> 4-qubit VQC, trained with a
-    standard PyTorch optimizer loop."""
-    reducer = QuantumDimReducer(use_incremental_pca=False)
+    """StandardScaler -> PCA(n_qubits) -> [0, 2*pi] -> n-qubit VQC, trained
+    with a standard PyTorch optimizer loop."""
+    reducer = QuantumDimReducer(use_incremental_pca=_config.pca.use_incremental_pca)
     quantum_train = reducer.fit_transform(X_train)
     quantum_test = reducer.transform(X_test)
 
-    model = VQCClassifier(n_qubits=4, n_layers=3)
+    model = VQCClassifier(n_qubits=_config.quantum.n_qubits, n_layers=_config.quantum.n_layers)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.BCELoss()
 
@@ -219,7 +224,7 @@ def plot_confusion_matrices(results: list[ModelMetrics], output_dir: Path) -> Pa
         axes = [axes]
 
     for ax, result in zip(axes, results):
-        y_pred = (result.y_prob >= 0.5).astype(int)
+        y_pred = (result.y_prob >= RISK_THRESHOLD).astype(int)
         cm = confusion_matrix(result.y_true, y_pred, labels=[0, 1])
         ConfusionMatrixDisplay(cm, display_labels=["No Tear", "Tear"]).plot(
             ax=ax, colorbar=False, cmap="Blues"

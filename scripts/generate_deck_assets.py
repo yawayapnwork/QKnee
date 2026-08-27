@@ -21,7 +21,12 @@ Run with:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+# Allow `python scripts/generate_deck_assets.py` to resolve the `qknee`
+# package without requiring the caller to set PYTHONPATH or use `python -m`.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import matplotlib
@@ -35,6 +40,7 @@ import seaborn as sns
 import torch
 from sklearn.model_selection import train_test_split
 
+from qknee.config.loader import load_config
 from qknee.models.evaluate import (
     compute_metrics,
     generate_synthetic_dataset,
@@ -46,7 +52,8 @@ from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import N_QUBITS, build_qnode
 
-OUTPUT_DIR = Path("deck_assets")
+_config = load_config()
+OUTPUT_DIR = _config.paths.deck_output_dir
 
 # A consistent, presentation-friendly palette shared by every figure in
 # this script — keeps the deck visually coherent slide to slide.
@@ -67,7 +74,7 @@ def generate_performance_comparison_figure(output_dir: Path, seed: int = 0) -> P
     renders a grouped bar chart (metric on the x-axis, model as hue) of
     ROC-AUC / Sensitivity / Specificity."""
     print("Training models for the performance comparison chart...")
-    features, labels = generate_synthetic_dataset(n_samples=800, n_features=512, seed=seed)
+    features, labels = generate_synthetic_dataset(n_samples=800, seed=seed)
     X_train, X_test, y_train, y_test = train_test_split(
         features, labels, test_size=0.25, stratify=labels, random_state=seed
     )
@@ -161,11 +168,12 @@ def _render_circuit_diagram(output_dir: Path) -> tuple[Path, np.ndarray]:
     Returns the saved path and the rendered image as an RGB array (for
     embedding in the composite figure).
     """
-    circuit = build_qnode(n_qubits=N_QUBITS, n_layers=3)
+    n_layers = _config.quantum.n_layers
+    circuit = build_qnode(n_qubits=N_QUBITS, n_layers=n_layers)
 
     generator = torch.Generator().manual_seed(0)
     dummy_inputs = torch.rand(N_QUBITS, generator=generator) * 2 * torch.pi
-    dummy_weights = torch.rand(3, N_QUBITS, 3, generator=generator) * 2 * torch.pi
+    dummy_weights = torch.rand(n_layers, N_QUBITS, 3, generator=generator) * 2 * torch.pi
 
     fig, _ = qml.draw_mpl(circuit, style="pennylane")(dummy_inputs, dummy_weights)
     fig.suptitle("Q-Knee 4-Qubit Variational Circuit", fontsize=14, fontweight="bold")
@@ -228,7 +236,7 @@ def generate_slice_gradcam_circuit_assets(output_dir: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     generate_performance_comparison_figure(OUTPUT_DIR)
     generate_slice_gradcam_circuit_assets(OUTPUT_DIR)

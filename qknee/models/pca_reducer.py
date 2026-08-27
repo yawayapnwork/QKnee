@@ -83,20 +83,40 @@ class QuantumDimReducer:
         if features.shape[0] < self.n_components:
             raise ValueError(
                 f"Need at least {self.n_components} samples to fit "
-                f"{self.n_components} PCA components, got {features.shape[0]}"
+                f"{self.n_components} PCA components, got {features.shape[0]} samples"
+            )
+        if features.shape[1] < self.n_components:
+            raise ValueError(
+                f"Need at least {self.n_components} feature dimensions to fit "
+                f"{self.n_components} PCA components, got {features.shape[1]}-D input"
             )
 
         scaled = self.standard_scaler.fit_transform(features)
 
         if self.use_incremental_pca:
             batch_size = batch_size or max(5 * self.n_components, 128)
-            for start in range(0, scaled.shape[0], batch_size):
-                batch = scaled[start:start + batch_size]
-                if batch.shape[0] < self.n_components:
-                    # IncrementalPCA requires each batch >= n_components;
-                    # fold a too-small trailing batch into the previous one.
-                    continue
-                self.pca.partial_fit(batch)
+            if batch_size < self.n_components:
+                raise ValueError(
+                    f"batch_size ({batch_size}) must be >= n_components ({self.n_components}) "
+                    "for IncrementalPCA.partial_fit - each batch needs enough rows to estimate "
+                    "all requested components."
+                )
+
+            n_samples = scaled.shape[0]
+            # Split points for contiguous batches of `batch_size` rows, with
+            # the dataset's true end appended (`n_samples` may not be an
+            # exact multiple of `batch_size`, leaving a smaller final chunk).
+            batch_bounds = list(range(0, n_samples, batch_size)) + [n_samples]
+            # If that trailing chunk is smaller than `n_components`,
+            # IncrementalPCA.partial_fit can't run on it in isolation; merge
+            # it into the previous chunk instead of silently dropping those
+            # rows (only the single trailing chunk can ever be undersized,
+            # since every other chunk is exactly `batch_size >= n_components`).
+            if len(batch_bounds) > 2 and (batch_bounds[-1] - batch_bounds[-2]) < self.n_components:
+                del batch_bounds[-2]
+
+            for start, end in zip(batch_bounds[:-1], batch_bounds[1:]):
+                self.pca.partial_fit(scaled[start:end])
             pca_output = self.pca.transform(scaled)
         else:
             pca_output = self.pca.fit_transform(scaled)

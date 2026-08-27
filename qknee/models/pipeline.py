@@ -415,10 +415,13 @@ class PipelineRunner:
 
         heatmap = None
         if not skip_gradcam:
-            # Grad-CAM needs a single (1, 3, 224, 224) slice; use the first
-            # slice of the batch (multi-slice volumes are averaged upstream
-            # for classification, but Grad-CAM visualizes one representative slice).
-            single_slice = batch[:, 0]
+            # Grad-CAM needs a single (1, 3, 224, 224) slice; use the central
+            # slice of the volume (multi-slice volumes are averaged upstream
+            # for classification, but Grad-CAM visualizes one representative
+            # slice) — the anatomical midpoint is a more representative choice
+            # than an arbitrary edge slice for a multi-slice MRI stack.
+            central_slice_index = batch.shape[1] // 2
+            single_slice = batch[:, central_slice_index]
             heatmap = self.explain(single_slice)
 
         logger.info("PipelineRunner.run: risk_score=%.4f, source=%r", risk_score, source)
