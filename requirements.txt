@@ -9,6 +9,8 @@ joblib==1.5.3
 streamlit==1.62.0
 pydicom==3.0.2
 matplotlib==3.11.1
+seaborn==0.13.2
+pandas==3.0.5
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32

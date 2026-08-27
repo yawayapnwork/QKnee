@@ -50,6 +50,7 @@ logs/
 wandb/
 mlruns/
 eval_outputs/
+deck_assets/
 
 # Data (MRI scans / large arrays — keep out of git)
 data/
