@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import torch
 
-from model_pipeline import QKneeModel
-from vqc_classifier import VQCClassifier
+from qknee.models.qknee_model import QKneeModel
+from qknee.models.vqc import VQCClassifier
 
 pytestmark = []
 
@@ -63,7 +63,7 @@ class TestForwardPassDeterminism:
 
 class TestTrainingDeterminism:
     def test_training_loop_is_reproducible_with_fixed_seed(self, fitted_reducer):
-        from model_pipeline import train_qknee_model
+        from qknee.models.qknee_model import train_qknee_model
 
         image = torch.rand(6, 3, 224, 224, generator=torch.Generator().manual_seed(0))
         labels = torch.tensor([0, 1, 0, 1, 1, 0])

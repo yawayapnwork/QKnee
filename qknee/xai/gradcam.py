@@ -23,7 +23,6 @@ dependency required).
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Callable, Optional
 
 import cv2
@@ -32,7 +31,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from resnet_feature_extractor import ResNet18FeatureExtractor
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+
+logger = get_logger(__name__)
+_config = load_config()
 
 TargetFn = Callable[[torch.Tensor], torch.Tensor]
 
@@ -125,8 +129,8 @@ class GradCAM:
 def overlay_heatmap(
     heatmap: np.ndarray,
     original_image: np.ndarray,
-    alpha: float = 0.45,
-    colormap: int = cv2.COLORMAP_JET,
+    alpha: float = _config.gradcam.alpha,
+    colormap: int = getattr(cv2, _config.gradcam.colormap),
 ) -> np.ndarray:
     """Resizes `heatmap` to match `original_image` and alpha-blends a
     color-mapped version on top.
@@ -169,16 +173,22 @@ def get_default_target_layer(extractor: ResNet18FeatureExtractor) -> nn.Module:
 
 
 if __name__ == "__main__":
+    from qknee.config.logging_config import setup_logging
+
+    setup_logging()
     torch.manual_seed(0)
 
-    output_dir = Path("eval_outputs")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = _config.paths.eval_output_dir
+    output_dir.mkdir(exist_ok=True, parents=True)
 
     extractor = ResNet18FeatureExtractor(freeze_backbone=True)
     extractor.eval()
     target_layer = get_default_target_layer(extractor)
-    print(f"Target layer for Grad-CAM: {target_layer.__class__.__name__} "
-          f"(ResNet18 layer4, {sum(p.numel() for p in target_layer.parameters())} params)")
+    logger.info(
+        "Target layer for Grad-CAM: %s (ResNet18 layer4, %d params)",
+        target_layer.__class__.__name__,
+        sum(p.numel() for p in target_layer.parameters()),
+    )
 
     # --- Dummy MRI-like slice (grayscale ring pattern so the CAM has visible structure) ---
     yy, xx = np.mgrid[0:224, 0:224]
@@ -192,8 +202,10 @@ if __name__ == "__main__":
     with GradCAM(extractor, target_layer) as cam:
         heatmap = cam.generate(input_tensor)
 
-    print(f"Raw Grad-CAM shape: {heatmap.shape} (native layer4 resolution), "
-          f"range [{heatmap.min():.3f}, {heatmap.max():.3f}]")
+    logger.info(
+        "Raw Grad-CAM shape: %s (native layer4 resolution), range [%.3f, %.3f]",
+        heatmap.shape, heatmap.min(), heatmap.max(),
+    )
     assert heatmap.ndim == 2
     assert 0.0 <= heatmap.min() and heatmap.max() <= 1.0
 
@@ -202,5 +214,5 @@ if __name__ == "__main__":
 
     out_path = output_dir / "gradcam_demo_overlay.png"
     cv2.imwrite(str(out_path), overlaid)
-    print(f"Saved Grad-CAM overlay to {out_path.resolve()}")
-    print("Grad-CAM smoke test passed.")
+    logger.info("Saved Grad-CAM overlay to %s", out_path.resolve())
+    logger.info("Grad-CAM smoke test passed.")

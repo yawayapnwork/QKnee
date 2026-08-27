@@ -30,18 +30,24 @@ Architecture:
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import pennylane as qml
 import torch
 import torch.nn as nn
 
-N_QUBITS = 4
-DEFAULT_N_LAYERS = 3
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+
+logger = get_logger(__name__)
+_config = load_config()
+
+N_QUBITS = _config.quantum.n_qubits
+DEFAULT_N_LAYERS = _config.quantum.n_layers
 DEFAULT_TARGET_QUBIT = 0
 
 
-def angle_encoding(features: torch.Tensor, wires: list[int]) -> None:
+def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
     """Continuous angle encoding: each input scalar (in [0, 2*pi]) is loaded
     onto its own qubit via RX followed by RY.
 
@@ -75,10 +81,10 @@ def build_qnode(
     if not 0 <= target_qubit < n_qubits:
         raise ValueError(f"target_qubit must be in [0, {n_qubits - 1}], got {target_qubit}")
 
-    device = qml.device("default.qubit", wires=n_qubits)
+    device = qml.device(_config.quantum.device, wires=n_qubits)
     wires = list(range(n_qubits))
 
-    @qml.qnode(device, interface="torch", diff_method="backprop")
+    @qml.qnode(device, interface="torch", diff_method=_config.quantum.diff_method)
     def circuit(inputs: torch.Tensor, weights: torch.Tensor):
         angle_encoding(inputs, wires)
         qml.StronglyEntanglingLayers(weights, wires=wires)
@@ -87,7 +93,7 @@ def build_qnode(
     return circuit
 
 
-def weight_shape(n_qubits: int = N_QUBITS, n_layers: int = DEFAULT_N_LAYERS) -> tuple[int, int, int]:
+def weight_shape(n_qubits: int = N_QUBITS, n_layers: int = DEFAULT_N_LAYERS) -> Tuple[int, int, int]:
     """Returns the `(n_layers, n_qubits, 3)` shape PennyLane's
     `StronglyEntanglingLayers` expects for its trainable weight tensor
     (3 rotation angles per qubit per layer)."""
@@ -121,7 +127,7 @@ class VQCModel(nn.Module):
         n_qubits: int = N_QUBITS,
         n_layers: int = DEFAULT_N_LAYERS,
         target_qubit: int = DEFAULT_TARGET_QUBIT,
-        weight_init_range: tuple[float, float] = (0.0, 2 * torch.pi),
+        weight_init_range: Tuple[float, float] = (0.0, 2 * torch.pi),
         seed: Optional[int] = None,
     ):
         super().__init__()
@@ -155,35 +161,40 @@ class VQCModel(nn.Module):
 
 
 if __name__ == "__main__":
+    from qknee.config.logging_config import setup_logging
+
+    setup_logging()
     torch.manual_seed(0)
 
     model = VQCModel(n_qubits=N_QUBITS, n_layers=DEFAULT_N_LAYERS, target_qubit=0, seed=42)
 
-    print(f"Device: default.qubit, {N_QUBITS} wires")
-    print(f"Entangling block: StronglyEntanglingLayers, depth={DEFAULT_N_LAYERS}")
-    print(f"Trainable weight tensor shape: {tuple(model.quantum_layer.weights.shape)}")
-    print(f"Weight init range: [0, 2*pi] -> sample min={model.quantum_layer.weights.min():.3f}, "
-          f"max={model.quantum_layer.weights.max():.3f}")
+    logger.info("Device: %s, %d wires", _config.quantum.device, N_QUBITS)
+    logger.info("Entangling block: StronglyEntanglingLayers, depth=%d", DEFAULT_N_LAYERS)
+    logger.info("Trainable weight tensor shape: %s", tuple(model.quantum_layer.weights.shape))
+    logger.info(
+        "Weight init range: [0, 2*pi] -> sample min=%.3f, max=%.3f",
+        model.quantum_layer.weights.min(), model.quantum_layer.weights.max(),
+    )
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable parameters: {trainable}")
+    logger.info("Total trainable parameters: %d", trainable)
 
     # --- Forward pass smoke test ---
     batch_size = 5
     dummy_input = torch.rand(batch_size, N_QUBITS) * 2 * torch.pi
     output = model(dummy_input)
 
-    print(f"\nInput shape:  {tuple(dummy_input.shape)}")
-    print(f"Output shape: {tuple(output.shape)}")
+    logger.info("Input shape:  %s", tuple(dummy_input.shape))
+    logger.info("Output shape: %s", tuple(output.shape))
     assert output.shape == (batch_size,)
     assert torch.all(output >= -1.0) and torch.all(output <= 1.0)
-    print(f"Output (Pauli-Z expvals on qubit {model.target_qubit}): {output.detach().tolist()}")
+    logger.info("Output (Pauli-Z expvals on qubit %d): %s", model.target_qubit, output.detach().tolist())
 
     # --- Standard PyTorch training loop integration test ---
     # Raw PauliZ expectation values live in [-1, 1], not [0, 1], so a
     # regression loss (MSE) against a [-1, 1] target is the natural fit for
     # this variant's un-post-processed output.
-    print("\nRunning a short training loop on synthetic targets...")
+    logger.info("Running a short training loop on synthetic targets...")
     dummy_targets = torch.empty(batch_size).uniform_(-1, 1)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.2)
@@ -200,9 +211,9 @@ if __name__ == "__main__":
         if epoch == 0:
             initial_loss = loss.item()
         if epoch % 5 == 0 or epoch == 19:
-            print(f"  epoch {epoch:2d} | loss = {loss.item():.4f}")
+            logger.debug("  epoch %2d | loss = %.4f", epoch, loss.item())
 
     final_loss = loss.item()
-    print(f"\nInitial loss: {initial_loss:.4f} -> Final loss: {final_loss:.4f}")
+    logger.info("Initial loss: %.4f -> Final loss: %.4f", initial_loss, final_loss)
     assert final_loss < initial_loss, "Expected loss to decrease after training on synthetic data"
-    print("Gradients flowed through the quantum layer and loss decreased. All checks passed.")
+    logger.info("Gradients flowed through the quantum layer and loss decreased. All checks passed.")

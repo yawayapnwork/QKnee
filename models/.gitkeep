@@ -1,7 +1,0 @@
-Place fitted model checkpoints here for the Docker deployment to pick up:
-  - pca_scaler.pkl      (see quantum_dim_reduction.py)
-  - qknee_model.pt      (see model_pipeline.py's save_checkpoint())
-
-This directory is bind-mounted read-only into both containers at
-/app/models (see docker-compose.yml), so new checkpoints can be dropped in
-and picked up on container restart without rebuilding the image.

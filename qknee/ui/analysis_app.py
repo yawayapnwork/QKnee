@@ -27,7 +27,6 @@ Run with:
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,8 +39,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 
-PCA_ARTIFACT_PATH = Path(os.environ.get("PCA_ARTIFACT_PATH", "pca_scaler.pkl"))
-RISK_THRESHOLD = 0.5
+from qknee.config.loader import load_config
+
+_config = load_config()
+RISK_THRESHOLD = _config.api.tear_risk_threshold
 
 
 # --------------------------------------------------------------------------- #
@@ -66,15 +67,19 @@ def load_backend():
     """Loads the real QKneeModel (ResNet18 -> PCA -> VQC) if a fitted PCA
     artifact is available; returns None otherwise so the UI can fall back
     to a deterministic mock."""
-    if not PCA_ARTIFACT_PATH.exists():
+    if not _config.paths.pca_artifact.exists():
         return None
 
     try:
-        from model_pipeline import QKneeModel
-        from quantum_dim_reduction import QuantumDimReducer
+        from qknee.models.qknee_model import QKneeModel
+        from qknee.models.pca_reducer import QuantumDimReducer
 
-        reducer = QuantumDimReducer.load(PCA_ARTIFACT_PATH)
-        model = QKneeModel(pca_reducer=reducer, n_qubits=4, n_layers=3)
+        reducer = QuantumDimReducer.load(_config.paths.pca_artifact)
+        model = QKneeModel(
+            pca_reducer=reducer,
+            n_qubits=_config.quantum.n_qubits,
+            n_layers=_config.quantum.n_layers,
+        )
         model.eval()
         return model
     except Exception as exc:  # noqa: BLE001
@@ -85,7 +90,7 @@ def load_backend():
 def run_live_analysis(model, slice_2d: np.ndarray) -> AnalysisResult:
     import torch
 
-    from mri_dataset import build_transforms
+    from qknee.data.dataset import build_transforms
     from PIL import Image
 
     transform = build_transforms(train=False)

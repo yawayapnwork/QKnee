@@ -1,0 +1,11 @@
+Place fitted model checkpoints here for local runs and Docker deployment to pick up:
+  - pca_scaler.pkl   (see qknee/models/pca_reducer.py -> QuantumDimReducer)
+  - qknee_model.pt   (see qknee/models/qknee_model.py -> save_checkpoint())
+
+This directory is bind-mounted read-only into both containers at
+/app/qknee/artifacts (see docker-compose.yml), so new checkpoints can be
+dropped in and picked up on container restart without rebuilding the image.
+
+Paths for these two artifacts are controlled centrally by qknee/config/config.yaml
+(paths.pca_artifact / paths.model_checkpoint), overridable via env vars
+PCA_ARTIFACT_PATH / MODEL_CHECKPOINT_PATH.

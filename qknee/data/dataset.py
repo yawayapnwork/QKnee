@@ -34,10 +34,9 @@ pass `labeled=False` and the dataset will assign label -1 to every sample.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -45,14 +44,18 @@ from PIL import Image, UnidentifiedImageError
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-logger = logging.getLogger(__name__)
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
-VOLUME_EXTENSIONS = {".npy"}
+logger = get_logger(__name__)
+_config = load_config()
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
-TARGET_SIZE = (224, 224)
+IMAGE_EXTENSIONS = set(_config.data.image_extensions)
+VOLUME_EXTENSIONS = set(_config.data.volume_extensions)
+
+IMAGENET_MEAN = _config.data.imagenet_mean
+IMAGENET_STD = _config.data.imagenet_std
+TARGET_SIZE = _config.data.image_size
 
 
 class GaussianNoise:
@@ -77,22 +80,26 @@ def build_transforms(train: bool) -> transforms.Compose:
     Pipeline order matters: resize/grayscale-to-RGB happen on the PIL image,
     then ToTensor converts to [0,1] float, then noise (train only) is added
     in tensor space, then ImageNet normalization is applied last.
+
+    Augmentation parameters (rotation degrees, flip probability, noise std)
+    are read from `config.yaml`'s `data.train_augmentation` section.
     """
-    pipeline = [
+    augmentation = _config.data.train_augmentation
+    pipeline: List[Callable] = [
         transforms.Resize(TARGET_SIZE),
         transforms.Grayscale(num_output_channels=3),
     ]
 
     if train:
         pipeline += [
-            transforms.RandomRotation(degrees=10),
-            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=augmentation.random_rotation_degrees),
+            transforms.RandomHorizontalFlip(p=augmentation.horizontal_flip_prob),
         ]
 
     pipeline.append(transforms.ToTensor())
 
     if train:
-        pipeline.append(GaussianNoise(mean=0.0, std=0.02))
+        pipeline.append(GaussianNoise(mean=0.0, std=augmentation.gaussian_noise_std))
 
     pipeline.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
 
@@ -120,10 +127,10 @@ class MRIDataset(Dataset):
 
     def __init__(
         self,
-        root: str | Path,
+        root: Union[str, Path],
         transform: Optional[Callable] = None,
         labeled: bool = True,
-        extensions: Optional[set[str]] = None,
+        extensions: Optional[Set[str]] = None,
     ):
         self.root = Path(root)
         if not self.root.exists():
@@ -133,9 +140,9 @@ class MRIDataset(Dataset):
         self.labeled = labeled
         self.extensions = extensions or (IMAGE_EXTENSIONS | VOLUME_EXTENSIONS)
 
-        self.classes: list[str] = []
-        self.class_to_idx: dict[str, int] = {}
-        self.samples: list[Sample] = []
+        self.classes: List[str] = []
+        self.class_to_idx: Dict[str, int] = {}
+        self.samples: List[Sample] = []
 
         self._build_index()
 
@@ -226,7 +233,7 @@ class MRIDataset(Dataset):
 
         return Image.fromarray(slice_array, mode="L")
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         sample = self.samples[index]
         try:
             pil_image = self._load_pil_image(sample)
@@ -250,12 +257,12 @@ class MRIDataset(Dataset):
 
 
 def build_dataloaders(
-    data_root: str | Path,
-    batch_size: int = 32,
-    num_workers: int = 4,
+    data_root: Union[str, Path],
+    batch_size: int = _config.data.batch_size,
+    num_workers: int = _config.data.num_workers,
     labeled: bool = True,
     pin_memory: bool = True,
-) -> dict[str, DataLoader]:
+) -> Dict[str, DataLoader]:
     """Builds Train/Val/Test DataLoaders from `data_root/{train,val,test}`.
 
     Any split directory that doesn't exist is silently skipped, so this also
@@ -268,7 +275,7 @@ def build_dataloaders(
         "test": False,
     }
 
-    dataloaders: dict[str, DataLoader] = {}
+    dataloaders: Dict[str, DataLoader] = {}
 
     for split, is_train in split_config.items():
         split_dir = data_root / split
@@ -299,9 +306,11 @@ def build_dataloaders(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
     import argparse
+
+    from qknee.config.logging_config import setup_logging
+
+    setup_logging()
 
     parser = argparse.ArgumentParser(description="Sanity-check MRI dataloaders")
     parser.add_argument("data_root", type=str, help="Path with train/val/test subfolders")
@@ -319,4 +328,4 @@ if __name__ == "__main__":
 
     for split_name, loader in loaders.items():
         images, labels = next(iter(loader))
-        print(f"[{split_name}] batch shape: {tuple(images.shape)}, labels: {labels.tolist()}")
+        logger.info("[%s] batch shape: %s, labels: %s", split_name, tuple(images.shape), labels.tolist())

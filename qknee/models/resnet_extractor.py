@@ -19,19 +19,24 @@ import torch
 import torch.nn as nn
 from torchvision.models import ResNet18_Weights, resnet18
 
+from qknee.config.loader import load_config
+
+_config = load_config()
+
 
 class ResNet18FeatureExtractor(nn.Module):
     """Frozen, pretrained ResNet18 backbone that outputs 512-D feature vectors.
 
     Args:
-        freeze_backbone: If True (default), all backbone parameters have
+        freeze_backbone: If True (default, from `config.yaml`'s
+            `resnet.freeze_backbone`), all backbone parameters have
             `requires_grad = False` set, so the pretrained weights are not
             updated during training (feature extraction / linear-probe use).
     """
 
-    FEATURE_DIM = 512
+    FEATURE_DIM = _config.resnet.feature_dim
 
-    def __init__(self, freeze_backbone: bool = True):
+    def __init__(self, freeze_backbone: bool = _config.resnet.freeze_backbone):
         super().__init__()
 
         backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
@@ -117,6 +122,11 @@ class ResNet18FeatureExtractor(nn.Module):
 
 
 if __name__ == "__main__":
+    from qknee.config.logging_config import get_logger, setup_logging
+
+    setup_logging()
+    logger = get_logger(__name__)
+
     torch.manual_seed(0)
 
     extractor = ResNet18FeatureExtractor(freeze_backbone=True)
@@ -124,20 +134,20 @@ if __name__ == "__main__":
 
     trainable = sum(p.numel() for p in extractor.parameters() if p.requires_grad)
     total = sum(p.numel() for p in extractor.parameters())
-    print(f"Trainable params: {trainable} / {total} (expect 0 trainable when frozen)")
+    logger.info("Trainable params: %d / %d (expect 0 trainable when frozen)", trainable, total)
 
     # --- Per-slice test: (B, 3, 224, 224) -> (B, 512) ---
     dummy_slices = torch.randn(4, 3, 224, 224)
     with torch.no_grad():
         slice_features = extractor(dummy_slices)
-    print(f"Per-slice input {tuple(dummy_slices.shape)} -> output {tuple(slice_features.shape)}")
+    logger.info("Per-slice input %s -> output %s", tuple(dummy_slices.shape), tuple(slice_features.shape))
     assert slice_features.shape == (4, 512)
 
     # --- Per-volume test: (B, S, 3, 224, 224) -> (B, 512) ---
     dummy_volume = torch.randn(2, 10, 3, 224, 224)  # 2 volumes, 10 slices each
     with torch.no_grad():
         volume_features = extractor(dummy_volume)
-    print(f"Per-volume input {tuple(dummy_volume.shape)} -> output {tuple(volume_features.shape)}")
+    logger.info("Per-volume input %s -> output %s", tuple(dummy_volume.shape), tuple(volume_features.shape))
     assert volume_features.shape == (2, 512)
 
     # Sanity check: manually average slice features and compare to forward_volume
@@ -145,4 +155,4 @@ if __name__ == "__main__":
         manual_features = extractor.forward_slice(dummy_volume[0])  # (10, 512)
         manual_mean = manual_features.mean(dim=0)  # (512,)
     torch.testing.assert_close(manual_mean, volume_features[0], rtol=1e-4, atol=1e-4)
-    print("Manual per-slice averaging matches forward_volume output. All tests passed.")
+    logger.info("Manual per-slice averaging matches forward_volume output. All tests passed.")

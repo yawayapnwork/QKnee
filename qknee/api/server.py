@@ -1,10 +1,10 @@
 """
 Q-Knee REST API: FastAPI wrapper exposing the QKneeModel inference engine
-(ResNet18 -> PCA -> 4-qubit VQC) to the Streamlit frontend (app.py) or any
+(ResNet18 -> PCA -> 4-qubit VQC) to the Streamlit frontend (qknee/ui) or any
 other HTTP client.
 
 Run with:
-    uvicorn api:app --reload --port 8000
+    uvicorn qknee.api.server:app --reload --port 8000
 
 Endpoints:
     GET  /health   - liveness/readiness probe, reports whether the real
@@ -17,10 +17,8 @@ Endpoints:
 from __future__ import annotations
 
 import base64
-import logging
-import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -29,17 +27,18 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from gradcam import GradCAM, get_default_target_layer, overlay_heatmap
-from mri_dataset import build_transforms
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger, setup_logging
+from qknee.data.dataset import build_transforms
+from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
 from PIL import Image, UnidentifiedImageError
 
-logger = logging.getLogger("qknee.api")
-logging.basicConfig(level=logging.INFO)
+setup_logging()
+logger = get_logger("qknee.api")
 
-# Overridable via env var so a deployment can point at a checkpoint mounted
-# from a volume (see docker-compose.yml) without rebuilding the image.
-PCA_ARTIFACT_PATH = Path(os.environ.get("PCA_ARTIFACT_PATH", "pca_scaler.pkl"))
-TEAR_RISK_THRESHOLD = 0.5
+_config = load_config()
+PCA_ARTIFACT_PATH = _config.paths.pca_artifact
+TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 
 
 # --------------------------------------------------------------------------- #
@@ -82,11 +81,15 @@ class QKneeBackend:
             return
 
         try:
-            from model_pipeline import QKneeModel
-            from quantum_dim_reduction import QuantumDimReducer
+            from qknee.models.qknee_model import QKneeModel
+            from qknee.models.pca_reducer import QuantumDimReducer
 
             reducer = QuantumDimReducer.load(pca_artifact_path)
-            self.model = QKneeModel(pca_reducer=reducer, n_qubits=4, n_layers=3)
+            self.model = QKneeModel(
+                pca_reducer=reducer,
+                n_qubits=_config.quantum.n_qubits,
+                n_layers=_config.quantum.n_layers,
+            )
             self.model.eval()
             self.gradcam_target_layer = get_default_target_layer(self.model.resnet)
             self.backend_ready = True
@@ -167,7 +170,7 @@ class QKneeBackend:
             backend=backend,
         )
 
-    def _predict_live(self, display_slice: np.ndarray) -> tuple[float, str]:
+    def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str]:
         try:
             pil_image = Image.fromarray(display_slice, mode="L")
             input_tensor = self.eval_transform(pil_image).unsqueeze(0)  # (1, 3, 224, 224)
@@ -184,7 +187,7 @@ class QKneeBackend:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
 
-    def _predict_mock(self, display_slice: np.ndarray) -> tuple[float, str]:
+    def _predict_mock(self, display_slice: np.ndarray) -> Tuple[float, str]:
         import hashlib
 
         digest = hashlib.sha256(display_slice.tobytes()).digest()
@@ -222,7 +225,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],  # default Streamlit dev port
+    allow_origins=_config.api.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -256,4 +259,4 @@ async def predict(file: UploadFile = File(..., description="DICOM (.dcm/.dicom) 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("qknee.api.server:app", host=_config.api.host, port=_config.api.port, reload=True)

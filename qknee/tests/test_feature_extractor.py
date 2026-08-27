@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from quantum_dim_reduction import N_QUANTUM_DIMS, QuantumDimReducer
+from qknee.models.pca_reducer import N_QUANTUM_DIMS, QuantumDimReducer
 
 
 class TestResNetFeatureExtractorShape:

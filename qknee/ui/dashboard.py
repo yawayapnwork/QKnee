@@ -4,15 +4,15 @@ Q-Knee: interactive clinical diagnostic dashboard (Streamlit).
 Lets a clinician/researcher upload a DICOM or .npy MRI volume, scroll through
 slices in any of the three anatomical planes, and see real-time ACL/meniscus
 tear-risk scores produced by the ResNet18 -> PCA -> 4-qubit VQC pipeline
-built in mri_dataset.py / resnet_feature_extractor.py / quantum_dim_reduction.py
-/ pipeline.py / vqc_classifier.py.
+built in `qknee/data`, `qknee/models`, and `qknee/xai`, orchestrated by
+`qknee.models.pipeline.PipelineRunner`.
 
 If the trained backend (PCA artifact, PyTorch/PennyLane models) isn't
 available in the current environment, the dashboard transparently falls
 back to a seeded mock inference engine so the UI remains fully demoable.
 
 Run with:
-    streamlit run app.py
+    streamlit run qknee/ui/dashboard.py
 
 RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 """
@@ -20,22 +20,21 @@ RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import streamlit as st
+
+from qknee.config.loader import load_config
 
 # --------------------------------------------------------------------------- #
 # Backend wiring (real pipeline if available, seeded mock fallback otherwise)
 # --------------------------------------------------------------------------- #
 
-# Overridable via env var so a deployment can point at a checkpoint mounted
-# from a volume (see docker-compose.yml) without rebuilding the image.
-PCA_ARTIFACT_PATH = Path(os.environ.get("PCA_ARTIFACT_PATH", "pca_scaler.pkl"))
+_config = load_config()
 
 
 @dataclass
@@ -50,23 +49,23 @@ class InferenceResult:
 
 
 @st.cache_resource(show_spinner=False)
-def load_backend():
+def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]]:
     """Attempts to load the real ResNet18 -> PCA -> VQC pipeline.
 
-    Returns a tuple (pipeline, acl_model, meniscus_model) or (None, None, None)
+    Returns a tuple (runner, acl_model, meniscus_model) or (None, None, None)
     if any dependency (torch, pennylane, or the fitted PCA artifact) is
     unavailable — the caller falls back to mock inference in that case.
     """
-    if not PCA_ARTIFACT_PATH.exists():
+    if not _config.paths.pca_artifact.exists():
         return None, None, None
 
     try:
         import torch
 
-        from pipeline import MRIQuantumPipeline
-        from vqc_classifier import VQCClassifier
+        from qknee.models.pipeline import PipelineRunner
+        from qknee.models.vqc import VQCClassifier
 
-        quantum_pipeline = MRIQuantumPipeline(pca_artifact_path=PCA_ARTIFACT_PATH)
+        runner = PipelineRunner(config=_config)
 
         # Two independent quantum heads: one scored for ACL tear risk, one
         # for meniscus tear risk. NOTE: randomly initialized here — swap in
@@ -79,7 +78,7 @@ def load_backend():
         meniscus_model = VQCClassifier()
         meniscus_model.eval()
 
-        return quantum_pipeline, acl_model, meniscus_model
+        return runner, acl_model, meniscus_model
     except Exception as exc:  # noqa: BLE001 - surface any backend failure as "unavailable"
         st.session_state.setdefault("_backend_error", str(exc))
         return None, None, None
@@ -112,13 +111,13 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     )
 
 
-def run_live_inference(slice_2d: np.ndarray, pipeline, acl_model, meniscus_model) -> InferenceResult:
-    """Runs the real ResNet18 -> PCA -> VQC pipeline on one 2D slice,
-    timing each stage."""
+def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) -> InferenceResult:
+    """Runs the real ResNet18 -> PCA -> VQC pipeline (via `PipelineRunner`)
+    on one 2D slice, timing each stage."""
     import torch
 
     t0 = time.perf_counter()
-    quantum_vector = pipeline.extract_quantum_features(slice_2d, as_tensor=True, verbose=False)
+    quantum_vector = torch.from_numpy(runner.extract_quantum_features(slice_2d)).float()
     t1 = time.perf_counter()
 
     with torch.no_grad():
@@ -127,10 +126,9 @@ def run_live_inference(slice_2d: np.ndarray, pipeline, acl_model, meniscus_model
         meniscus_score = meniscus_model(quantum_vector).item()
         t3 = time.perf_counter()
 
-    # extract_quantum_features already covers ResNet18 + PCA; we don't have
-    # separate sub-timers without modifying pipeline.py, so attribute the
-    # combined ingestion+ResNet+PCA time to "resnet_latency_ms" and split
-    # the two quantum head evaluations into "quantum_latency_ms".
+    # extract_quantum_features already covers ingestion + ResNet18 + PCA, so
+    # that combined time is attributed to "resnet_latency_ms" and the two
+    # quantum head evaluations are split into "quantum_latency_ms".
     feature_ms = (t1 - t0) * 1000
     quantum_ms = (t3 - t1) * 1000
 

@@ -14,10 +14,10 @@ import numpy as np
 import pytest
 import torch
 
-from model_pipeline import QKneeModel
-from quantum_dim_reduction import QuantumDimReducer
-from resnet_feature_extractor import ResNet18FeatureExtractor
-from vqc_classifier import VQCClassifier
+from qknee.models.qknee_model import QKneeModel
+from qknee.models.pca_reducer import QuantumDimReducer
+from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+from qknee.models.vqc import VQCClassifier
 
 RESNET_FEATURE_DIM = 512
 N_QUBITS = 4

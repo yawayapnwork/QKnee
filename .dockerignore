@@ -21,7 +21,7 @@ env/
 *.joblib
 *.pt
 *.pth
-data/
+/data/
 eval_outputs/
 *.npy
 *.nii

@@ -50,8 +50,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from quantum_dim_reduction import QuantumDimReducer
-from vqc_classifier import VQCClassifier
+from qknee.models.pca_reducer import QuantumDimReducer
+from qknee.models.vqc import VQCClassifier
 
 OUTPUT_DIR = Path("eval_outputs")
 

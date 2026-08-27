@@ -2,16 +2,17 @@
 #
 # Q-Knee container image.
 #
-# One shared multi-stage image serves BOTH the FastAPI backend (api.py) and
-# the Streamlit frontend (app.py) — they share the exact same heavy ML
-# dependency stack (PyTorch, PennyLane, OpenCV, scikit-learn), so building
-# two separate images would just duplicate multiple GB of identical layers
-# for no benefit. docker-compose.yml runs two containers *from this one
-# image*, each with a different `command:` override.
+# One shared multi-stage image serves BOTH the FastAPI backend
+# (qknee/api/server.py) and the Streamlit frontend (qknee/ui/dashboard.py) —
+# they share the exact same heavy ML dependency stack (PyTorch, PennyLane,
+# OpenCV, scikit-learn), so building two separate images would just
+# duplicate multiple GB of identical layers for no benefit.
+# docker-compose.yml runs two containers *from this one image*, each with a
+# different `command:` override.
 #
 # Build:   docker build -t qknee:latest .
 # Run API: docker run -p 8000:8000 qknee:latest
-# Run UI:  docker run -p 8501:8501 qknee:latest streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+# Run UI:  docker run -p 8501:8501 qknee:latest streamlit run qknee/ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -94,8 +95,8 @@ ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=4 \
     MKL_NUM_THREADS=4 \
     TORCH_NUM_THREADS=4 \
-    PCA_ARTIFACT_PATH=/app/models/pca_scaler.pkl \
-    MODEL_CHECKPOINT_PATH=/app/models/qknee_model.pt
+    PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl \
+    MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
 
 USER qknee
 
@@ -105,4 +106,4 @@ EXPOSE 8000 8501
 
 # Default command runs the FastAPI backend; docker-compose.yml overrides
 # this with the Streamlit `command:` for the frontend service.
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "qknee.api.server:app", "--host", "0.0.0.0", "--port", "8000"]

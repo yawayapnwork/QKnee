@@ -1,0 +1,66 @@
+# Q-Knee central configuration.
+#
+# Loaded via qknee.config.loader.load_config(). Any key here can be
+# overridden at runtime by an environment variable of the same name in
+# UPPER_SNAKE_CASE (e.g. `paths.pca_artifact` -> $PCA_ARTIFACT_PATH), which
+# is how the Docker deployment (see docker-compose.yml) points the API/UI
+# containers at a bind-mounted checkpoint without rebuilding the image.
+
+paths:
+  pca_artifact: "qknee/artifacts/pca_scaler.pkl"     # env: PCA_ARTIFACT_PATH
+  model_checkpoint: "qknee/artifacts/qknee_model.pt" # env: MODEL_CHECKPOINT_PATH
+  eval_output_dir: "eval_outputs"
+  deck_output_dir: "deck_assets"
+
+data:
+  image_size: [224, 224]
+  imagenet_mean: [0.485, 0.456, 0.406]
+  imagenet_std: [0.229, 0.224, 0.225]
+  image_extensions: [".png", ".jpg", ".jpeg"]
+  volume_extensions: [".npy"]
+  batch_size: 32
+  num_workers: 4
+  train_augmentation:
+    random_rotation_degrees: 10
+    horizontal_flip_prob: 0.5
+    gaussian_noise_std: 0.02
+
+resnet:
+  feature_dim: 512
+  freeze_backbone: true
+
+pca:
+  n_components: 4
+  use_incremental_pca: false
+  angle_range: [0.0, 6.283185307179586]  # [0, 2*pi], radians
+
+quantum:
+  n_qubits: 4
+  n_layers: 3
+  device: "default.qubit"
+  diff_method: "backprop"
+
+training:
+  learning_rate: 0.01
+  n_epochs: 30
+  log_every: 5
+  optimizer: "adam"
+
+gradcam:
+  alpha: 0.45
+  colormap: "COLORMAP_JET"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins:
+    - "http://localhost:8501"
+    - "http://127.0.0.1:8501"
+  tear_risk_threshold: 0.5
+
+device: null  # null -> auto-detect ("cuda" if available, else "cpu")
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  datefmt: "%Y-%m-%d %H:%M:%S"

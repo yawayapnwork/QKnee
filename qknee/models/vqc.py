@@ -27,15 +27,23 @@ parameters (`self.q_weights` inside the layer) are ordinary
 
 from __future__ import annotations
 
+from typing import List
+
 import pennylane as qml
 import torch
 import torch.nn as nn
 
-N_QUBITS = 4
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+
+logger = get_logger(__name__)
+_config = load_config()
+
+N_QUBITS = _config.quantum.n_qubits
 ROTATIONS_PER_QUBIT_PER_LAYER = 3  # RX, RY, RZ
 
 
-def angle_encoding(features: torch.Tensor, wires: list[int]) -> None:
+def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
     """Continuous angle encoding: maps each input scalar (in [0, 2*pi]) onto
     one qubit via RX followed by RY.
 
@@ -48,7 +56,7 @@ def angle_encoding(features: torch.Tensor, wires: list[int]) -> None:
         qml.RY(features[..., i], wires=wire)
 
 
-def variational_block(weights: torch.Tensor, wires: list[int]) -> None:
+def variational_block(weights: torch.Tensor, wires: List[int]) -> None:
     """One trainable variational layer: per-qubit RX/RY/RZ rotations
     followed by a ring of CNOT entangling gates (wire i -> wire i+1, with
     the last wire wrapping back to the first).
@@ -68,16 +76,16 @@ def variational_block(weights: torch.Tensor, wires: list[int]) -> None:
         qml.CNOT(wires=[wires[i], wires[(i + 1) % n]])
 
 
-def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = 3):
+def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
     """Constructs the PennyLane QNode: angle encoding -> `n_layers`
     variational blocks -> Pauli-Z expectation values on every qubit.
 
     Uses PennyLane's `default.qubit` state-vector simulator.
     """
-    dev = qml.device("default.qubit", wires=n_qubits)
+    dev = qml.device(_config.quantum.device, wires=n_qubits)
     wires = list(range(n_qubits))
 
-    @qml.qnode(dev, interface="torch", diff_method="backprop")
+    @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
     def circuit(inputs: torch.Tensor, weights: torch.Tensor):
         angle_encoding(inputs, wires)
         for layer in range(n_layers):
@@ -100,7 +108,7 @@ class VQCClassifier(nn.Module):
         returns: (B, 1) tensor, values in [0, 1] — probability-like risk score.
     """
 
-    def __init__(self, n_qubits: int = N_QUBITS, n_layers: int = 3):
+    def __init__(self, n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
@@ -128,27 +136,30 @@ class VQCClassifier(nn.Module):
 
 
 if __name__ == "__main__":
+    from qknee.config.logging_config import setup_logging
+
+    setup_logging()
     torch.manual_seed(0)
 
     model = VQCClassifier(n_qubits=N_QUBITS, n_layers=3)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable parameters: {trainable}")
+    logger.info("Trainable parameters: %d", trainable)
     for name, param in model.named_parameters():
-        print(f"  {name}: {tuple(param.shape)}")
+        logger.info("  %s: %s", name, tuple(param.shape))
 
     # --- Forward pass smoke test with a batch of angle-encoded vectors ---
     batch_size = 6
     dummy_input = torch.rand(batch_size, N_QUBITS) * 2 * torch.pi  # simulate pipeline output
     scores = model(dummy_input)
-    print(f"\nInput shape:  {tuple(dummy_input.shape)}")
-    print(f"Output shape: {tuple(scores.shape)}")
+    logger.info("Input shape:  %s", tuple(dummy_input.shape))
+    logger.info("Output shape: %s", tuple(scores.shape))
     assert scores.shape == (batch_size, 1)
     assert torch.all(scores >= 0.0) and torch.all(scores <= 1.0)
-    print(f"Output scores: {scores.detach().flatten().tolist()}")
+    logger.info("Output scores: %s", scores.detach().flatten().tolist())
 
     # --- Standard PyTorch training loop integration test ---
-    print("\nRunning a short training loop on synthetic labels...")
+    logger.info("Running a short training loop on synthetic labels...")
     dummy_labels = torch.randint(0, 2, (batch_size, 1)).float()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
@@ -165,9 +176,9 @@ if __name__ == "__main__":
         if epoch == 0:
             initial_loss = loss.item()
         if epoch % 5 == 0 or epoch == 19:
-            print(f"  epoch {epoch:2d} | loss = {loss.item():.4f}")
+            logger.debug("  epoch %2d | loss = %.4f", epoch, loss.item())
 
     final_loss = loss.item()
-    print(f"\nInitial loss: {initial_loss:.4f} -> Final loss: {final_loss:.4f}")
+    logger.info("Initial loss: %.4f -> Final loss: %.4f", initial_loss, final_loss)
     assert final_loss < initial_loss, "Expected loss to decrease after training on synthetic data"
-    print("Gradients flowed through the quantum layer and loss decreased. All checks passed.")
+    logger.info("Gradients flowed through the quantum layer and loss decreased. All checks passed.")

@@ -20,8 +20,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from model_pipeline import QKneeModel
-from vqc_classifier import VQCClassifier
+from qknee.models.qknee_model import QKneeModel
+from qknee.models.vqc import VQCClassifier
 
 
 class SimulatorResourceLimitError(RuntimeError):

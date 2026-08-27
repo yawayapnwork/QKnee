@@ -18,7 +18,7 @@ services:
       dockerfile: Dockerfile
     image: qknee:latest
     container_name: qknee-api
-    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "qknee.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     environment:
@@ -26,8 +26,8 @@ services:
       # DB creds) belongs in a git-ignored `.env` file referenced via
       # `env_file:` instead of being inlined below.
       - PYTHONUNBUFFERED=1
-      - PCA_ARTIFACT_PATH=/app/models/pca_scaler.pkl
-      - MODEL_CHECKPOINT_PATH=/app/models/qknee_model.pt
+      - PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl
+      - MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
       # CPU thread tuning for the PennyLane default.qubit simulator + Torch
       # backend — keep both containers from oversubscribing the host's
       # cores. Override to match the deployment host, e.g. `nproc`.
@@ -39,7 +39,7 @@ services:
       # trained QKneeModel checkpoint live on the host (outside the image)
       # so a new model can be dropped in and picked up on container
       # restart, with no image rebuild required.
-      - ./models:/app/models:ro
+      - ./qknee/artifacts:/app/qknee/artifacts:ro
       # Grad-CAM / evaluation figures written by gradcam.py / evaluate.py
       # persist on the host instead of vanishing when the container exits.
       - ./eval_outputs:/app/eval_outputs
@@ -62,13 +62,13 @@ services:
       dockerfile: Dockerfile
     image: qknee:latest
     container_name: qknee-frontend
-    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: ["streamlit", "run", "qknee/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     environment:
       - PYTHONUNBUFFERED=1
-      - PCA_ARTIFACT_PATH=/app/models/pca_scaler.pkl
-      - MODEL_CHECKPOINT_PATH=/app/models/qknee_model.pt
+      - PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl
+      - MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       # The Streamlit UI currently loads QKneeModel in-process rather than
@@ -80,7 +80,7 @@ services:
       - MKL_NUM_THREADS=2
       - TORCH_NUM_THREADS=2
     volumes:
-      - ./models:/app/models:ro
+      - ./qknee/artifacts:/app/qknee/artifacts:ro
     depends_on:
       api:
         condition: service_healthy

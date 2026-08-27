@@ -53,7 +53,8 @@ eval_outputs/
 deck_assets/
 
 # Data (MRI scans / large arrays — keep out of git)
-data/
+# Root-anchored so this doesn't also match the qknee/data/ *package*.
+/data/
 *.npy
 *.nii
 *.nii.gz

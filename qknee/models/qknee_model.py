@@ -15,10 +15,10 @@ Why the PCA stage is a torch layer, not sklearn:
     CNN and the quantum layer.
 
 `QKneeModel` composes:
-    1. `ResNet18FeatureExtractor` (frozen backbone, from resnet_feature_extractor.py)
+    1. `ResNet18FeatureExtractor` (frozen backbone, from qknee/models/resnet_extractor.py)
     2. `PCAProjectionLayer`       (frozen, built from a pre-fitted QuantumDimReducer)
     3. `VQCClassifier`            (trainable quantum layer + sigmoid readout,
-                                   from vqc_classifier.py)
+                                   from qknee/models/vqc.py)
 
 Only the VQC's quantum-circuit weights and its classical readout layer are
 trainable — the ResNet backbone and PCA projection are both frozen, so
@@ -28,19 +28,21 @@ trainable — the ResNet backbone and PCA projection are both frozen, so
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from quantum_dim_reduction import ANGLE_RANGE, QuantumDimReducer
-from resnet_feature_extractor import ResNet18FeatureExtractor
-from vqc_classifier import N_QUBITS, VQCClassifier
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+from qknee.models.pca_reducer import ANGLE_RANGE, QuantumDimReducer
+from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+from qknee.models.vqc import N_QUBITS, VQCClassifier
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+_config = load_config()
 
 
 class PCAProjectionLayer(nn.Module):
@@ -119,8 +121,8 @@ class QKneeModel(nn.Module):
         self,
         pca_reducer: QuantumDimReducer,
         n_qubits: int = N_QUBITS,
-        n_layers: int = 3,
-        freeze_resnet: bool = True,
+        n_layers: int = _config.quantum.n_layers,
+        freeze_resnet: bool = _config.resnet.freeze_backbone,
     ):
         super().__init__()
 
@@ -169,11 +171,11 @@ def train_qknee_model(
     model: QKneeModel,
     inputs: torch.Tensor,
     labels: torch.Tensor,
-    n_epochs: int = 30,
-    lr: float = 0.01,
+    n_epochs: int = _config.training.n_epochs,
+    lr: float = _config.training.learning_rate,
     device: Optional[str] = None,
-    log_every: int = 5,
-) -> list[float]:
+    log_every: int = _config.training.log_every,
+) -> List[float]:
     """Trains `model`'s trainable parameters (VQC weights + readout) with
     Binary Cross-Entropy loss and the Adam optimizer.
 
@@ -201,7 +203,7 @@ def train_qknee_model(
     optimizer = torch.optim.Adam(model.trainable_parameters(), lr=lr)
     loss_fn = nn.BCELoss()
 
-    history: list[float] = []
+    history: List[float] = []
     for epoch in range(n_epochs):
         optimizer.zero_grad()
         predictions = model(inputs)
@@ -222,10 +224,10 @@ def train_qknee_model(
 
 def save_checkpoint(
     model: QKneeModel,
-    path: str | Path,
+    path: Union[str, Path],
     optimizer: Optional[torch.optim.Optimizer] = None,
     epoch: Optional[int] = None,
-    extra: Optional[dict] = None,
+    extra: Optional[Dict] = None,
 ) -> Path:
     """Saves the full joint model (including frozen ResNet/PCA buffers, for
     a fully self-contained checkpoint) plus optional optimizer state."""
@@ -247,10 +249,10 @@ def save_checkpoint(
 
 def load_checkpoint(
     model: QKneeModel,
-    path: str | Path,
+    path: Union[str, Path],
     optimizer: Optional[torch.optim.Optimizer] = None,
     map_location: Optional[str] = None,
-) -> dict:
+) -> Dict:
     """Loads model (and optionally optimizer) state from a checkpoint saved
     by `save_checkpoint`. Mutates `model` (and `optimizer`, if given) in place.
 
@@ -282,13 +284,15 @@ def load_checkpoint(
 # --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from qknee.config.logging_config import setup_logging
+
+    setup_logging()
     torch.manual_seed(0)
     np.random.seed(0)
 
     # --- Fit a PCA reducer on dummy 512-D features (stand-in for a real
     #     corpus of ResNet18 embeddings fit offline) ---
-    print("Fitting QuantumDimReducer on dummy 512-D features...")
+    logger.info("Fitting QuantumDimReducer on dummy 512-D features...")
     dummy_512d_corpus = np.random.randn(300, 512).astype(np.float32)
     reducer = QuantumDimReducer().fit(dummy_512d_corpus)
 
@@ -297,37 +301,37 @@ if __name__ == "__main__":
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.trainable_parameters())
-    print(f"\nTotal parameters:     {total_params}")
-    print(f"Trainable parameters: {trainable_params} (VQC weights + readout only)")
+    logger.info("Total parameters:     %d", total_params)
+    logger.info("Trainable parameters: %d (VQC weights + readout only)", trainable_params)
     for name, param in model.named_parameters():
         if param.requires_grad:
-            print(f"  trainable: {name} {tuple(param.shape)}")
+            logger.debug("  trainable: %s %s", name, tuple(param.shape))
 
     # --- Full forward-pass validation ---
-    print("\nValidating forward pass...")
+    logger.info("Validating forward pass...")
     batch_size = 5
     dummy_images = torch.rand(batch_size, 3, 224, 224)
     output = model(dummy_images)
 
     assert output.shape == (batch_size, 1), f"Unexpected output shape {output.shape}"
     assert torch.all(output >= 0.0) and torch.all(output <= 1.0), "Output must be in [0, 1]"
-    print(f"  Single-slice input {tuple(dummy_images.shape)} -> output {tuple(output.shape)}")
-    print(f"  Sample risk probabilities: {output.detach().flatten().tolist()}")
+    logger.info("  Single-slice input %s -> output %s", tuple(dummy_images.shape), tuple(output.shape))
+    logger.info("  Sample risk probabilities: %s", output.detach().flatten().tolist())
 
     dummy_volume = torch.rand(2, 6, 3, 224, 224)  # 2 volumes, 6 slices each
     volume_output = model(dummy_volume)
     assert volume_output.shape == (2, 1)
-    print(f"  Multi-slice volume input {tuple(dummy_volume.shape)} -> output {tuple(volume_output.shape)}")
+    logger.info("  Multi-slice volume input %s -> output %s", tuple(dummy_volume.shape), tuple(volume_output.shape))
 
     # --- Training loop utility ---
-    print("\nRunning training-loop utility on synthetic labels...")
+    logger.info("Running training-loop utility on synthetic labels...")
     dummy_labels = torch.randint(0, 2, (batch_size,))
     history = train_qknee_model(model, dummy_images, dummy_labels, n_epochs=25, lr=0.05, log_every=5)
     assert history[-1] < history[0], "Expected loss to decrease during training"
-    print(f"  Loss: {history[0]:.4f} -> {history[-1]:.4f}")
+    logger.info("  Loss: %.4f -> %.4f", history[0], history[-1])
 
     # --- Checkpoint save/load round-trip ---
-    print("\nValidating checkpoint save/load...")
+    logger.info("Validating checkpoint save/load...")
     checkpoint_path = Path("qknee_model.pt")
     model.eval()
     with torch.no_grad():
@@ -343,7 +347,7 @@ if __name__ == "__main__":
         post_load_output = reloaded_model(dummy_images)
 
     torch.testing.assert_close(pre_save_output, post_load_output, rtol=1e-5, atol=1e-6)
-    print("  Reloaded model produces identical output to the saved model.")
+    logger.info("  Reloaded model produces identical output to the saved model.")
 
     checkpoint_path.unlink()
-    print("\nAll model_pipeline.py validations passed.")
+    logger.info("All qknee_model.py validations passed.")

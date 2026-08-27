@@ -35,16 +35,16 @@ import seaborn as sns
 import torch
 from sklearn.model_selection import train_test_split
 
-from evaluate import (
+from qknee.models.evaluate import (
     compute_metrics,
     generate_synthetic_dataset,
     train_quantum_vqc,
     train_resnet_linear_baseline,
     train_svm_baseline,
 )
-from gradcam import GradCAM, get_default_target_layer, overlay_heatmap
-from resnet_feature_extractor import ResNet18FeatureExtractor
-from vqc_classifier import N_QUBITS, build_qnode
+from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
+from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+from qknee.models.vqc import N_QUBITS, build_qnode
 
 OUTPUT_DIR = Path("deck_assets")
 
