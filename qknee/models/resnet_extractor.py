@@ -15,13 +15,19 @@ Two usage modes:
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import List, Optional, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 from torchvision.models import ResNet18_Weights, resnet18
 
 from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
 
 _config = load_config()
+logger = get_logger(__name__)
 
 
 class ResNet18FeatureExtractor(nn.Module):
@@ -121,11 +127,131 @@ class ResNet18FeatureExtractor(nn.Module):
             )
 
 
+class ONNXFeatureExtractor:
+    """onnxruntime-accelerated drop-in for `ResNet18FeatureExtractor`'s
+    inference path (`forward_slice` / `forward_volume` / `forward` /
+    `__call__`), for deployments that prefer ONNX Runtime's graph-optimized
+    CPU/GPU execution over eager PyTorch.
+
+    Load a graph exported by `scripts/export_onnx.py` — a
+    `(B, 3, 224, 224) -> (B, 512)` ONNX model with a dynamic batch axis.
+
+    Not an `nn.Module` — no PyTorch autograd runs through it (ONNX Runtime
+    is inference-only here), so it's for the frozen-backbone inference
+    path only; Grad-CAM's `explain()` needs real PyTorch gradients through
+    the backbone and must keep using `ResNet18FeatureExtractor`.
+
+    Args:
+        onnx_path: Path to a `.onnx` file exported by
+            `scripts/export_onnx.py`.
+        providers: onnxruntime execution providers, in priority order.
+            Defaults to GPU-if-available (`CUDAExecutionProvider`),
+            falling back to `CPUExecutionProvider` — pass an explicit list
+            to pin one provider regardless of what's installed/available.
+    """
+
+    FEATURE_DIM = _config.resnet.feature_dim
+
+    def __init__(
+        self,
+        onnx_path: Union[str, Path],
+        providers: Optional[List[str]] = None,
+    ) -> None:
+        import onnxruntime as ort
+
+        onnx_path = Path(onnx_path)
+        if not onnx_path.exists():
+            raise FileNotFoundError(
+                f"ONNX model not found at {onnx_path}. Export one first via "
+                "`python scripts/export_onnx.py`."
+            )
+
+        if providers is None:
+            available = ort.get_available_providers()
+            providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in available else [])
+            providers.append("CPUExecutionProvider")
+
+        self.onnx_path = onnx_path
+        self.providers = providers
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self._input_name = self.session.get_inputs()[0].name
+        self._output_name = self.session.get_outputs()[0].name
+
+        logger.info(
+            "ONNXFeatureExtractor loaded %s (active provider: %s)",
+            onnx_path, self.session.get_providers()[0],
+        )
+
+    def forward_slice(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract features from a batch of 2D images via ONNX Runtime.
+
+        Args:
+            x: Tensor of shape (B, 3, 224, 224), on any device — moved to
+                CPU/numpy for the ONNX Runtime session regardless of
+                `x`'s original device, then returned on that same device.
+
+        Returns:
+            Tensor of shape (B, 512).
+        """
+        if x.dim() != 4 or x.shape[1] != 3:
+            raise ValueError(f"Expected input shape (B, 3, H, W), got {tuple(x.shape)}")
+
+        input_array = x.detach().cpu().numpy().astype(np.float32)
+        output_array = self.session.run([self._output_name], {self._input_name: input_array})[0]
+        return torch.from_numpy(output_array).to(x.device)
+
+    def forward_volume(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract a single global embedding per multi-slice MRI volume by
+        averaging per-slice ONNX Runtime features — same slice-averaging
+        semantics as `ResNet18FeatureExtractor.forward_volume`.
+
+        Args:
+            x: Tensor of shape (B, S, 3, 224, 224).
+
+        Returns:
+            Tensor of shape (B, 512).
+        """
+        if x.dim() != 5 or x.shape[2] != 3:
+            raise ValueError(f"Expected input shape (B, S, 3, H, W), got {tuple(x.shape)}")
+
+        batch_size, num_slices = x.shape[0], x.shape[1]
+        flat_slices = x.reshape(batch_size * num_slices, *x.shape[2:])
+        slice_features = self.forward_slice(flat_slices)  # (B*S, 512)
+
+        slice_features = slice_features.reshape(batch_size, num_slices, self.FEATURE_DIM)
+        return slice_features.mean(dim=1)  # (B, 512)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Dispatches to per-slice or per-volume extraction based on input
+        rank — mirrors `ResNet18FeatureExtractor.forward`."""
+        if x.dim() == 4:
+            return self.forward_slice(x)
+        elif x.dim() == 5:
+            return self.forward_volume(x)
+        else:
+            raise ValueError(f"Expected 4D (B,3,H,W) or 5D (B,S,3,H,W) input, got {x.dim()}D")
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward(x)
+
+    def eval(self) -> "ONNXFeatureExtractor":
+        """No-op, provided for interface parity with
+        `ResNet18FeatureExtractor.eval()` — an ONNX Runtime inference
+        session has no train/eval mode to toggle."""
+        return self
+
+    def to(self, device: Union[str, torch.device]) -> "ONNXFeatureExtractor":
+        """No-op, provided for interface parity with `nn.Module.to()`.
+        ONNX Runtime's device placement is controlled by `providers` at
+        construction time (e.g. `CUDAExecutionProvider`), not by moving
+        tensors onto a device here."""
+        return self
+
+
 if __name__ == "__main__":
-    from qknee.config.logging_config import get_logger, setup_logging
+    from qknee.config.logging_config import setup_logging
 
     setup_logging()
-    logger = get_logger(__name__)
 
     torch.manual_seed(0)
 

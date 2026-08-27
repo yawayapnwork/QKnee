@@ -1,0 +1,67 @@
+# Local development overrides.
+#
+# Auto-merged by `docker compose up` whenever this file sits next to
+# docker-compose.yml — no extra flag needed. What it adds over the base
+# (production-shaped) compose file:
+#
+#   - Bind-mounts the live `qknee/` and `scripts/` source trees into both
+#     containers, so an edit on the host is picked up without an image
+#     rebuild.
+#   - Runs uvicorn with `--reload` (watches `/app/qknee` for changes)
+#     instead of the production command.
+#   - Streamlit's dev server already file-watches and hot-reloads by
+#     default once it can see source changes — the bind mount above is
+#     the only thing it needs; `--server.runOnSave` just makes that
+#     explicit rather than relying on the default.
+#   - Shortens healthcheck intervals so `docker compose up` reflects
+#     container readiness faster during iterative dev.
+#   - Points MLflow at a local, host-visible SQLite/artifact directory
+#     (`./mlflow-data`) instead of the production named volume, so a
+#     developer can poke at run data directly on disk.
+#
+# Usage:
+#   docker compose up --build                 # base + this override (default)
+#   docker compose -f docker-compose.yml up    # base only, no dev overrides
+
+services:
+  api:
+    command:
+      - "uvicorn"
+      - "qknee.api.server:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+      - "--reload-dir"
+      - "/app/qknee"
+    volumes:
+      - ./qknee:/app/qknee
+      - ./scripts:/app/scripts
+    environment:
+      - LOG_LEVEL=DEBUG
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  ui:
+    command:
+      - "streamlit"
+      - "run"
+      - "qknee/ui/dashboard.py"
+      - "--server.port=8501"
+      - "--server.address=0.0.0.0"
+      - "--server.runOnSave=true"
+    volumes:
+      - ./qknee:/app/qknee
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  mlflow:
+    volumes:
+      - ./mlflow-data:/mlflow

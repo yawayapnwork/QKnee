@@ -120,7 +120,7 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
 
 def resolve_api_url() -> Optional[str]:
     """Reads the FastAPI backend's URL from `$QKNEE_API_URL` (set for the
-    frontend container in docker-compose.yml). Returns None if unset, in
+    `ui` container in docker-compose.yml). Returns None if unset, in
     which case the dashboard falls back to in-process/mock inference."""
     return os.environ.get("QKNEE_API_URL") or None
 
@@ -145,7 +145,7 @@ def api_is_reachable(api_url: str, timeout: float = 1.5) -> bool:
 def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     """Delegates inference to the Q-Knee FastAPI backend over HTTP
     (`POST {api_url}/predict`) instead of running `PipelineRunner`
-    in-process — the two-service (api + frontend) docker-compose
+    in-process — the two-service (api + ui) docker-compose
     architecture's intended data path.
 
     The API's `QKneeModel` exposes one unified risk score (no separate

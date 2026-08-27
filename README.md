@@ -133,7 +133,8 @@ This starts:
 | Service    | URL                          | Description |
 |------------|-------------------------------|---|
 | `api`      | http://localhost:8000/docs   | FastAPI backend |
-| `frontend` | http://localhost:8501         | Streamlit dashboard |
+| `ui`       | http://localhost:8501         | Streamlit dashboard |
+| `mlflow`   | http://localhost:5000         | MLflow tracking server |
 
 See [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) for the CPU-optimized multi-stage build details.
 
@@ -236,11 +237,13 @@ qknee/
 └── artifacts/                      # fitted pca_scaler.pkl / qknee_model.pt (gitignored)
 
 scripts/
-└── generate_deck_assets.py         # pitch-deck figures (bar charts, slice/CAM/circuit triptych)
+├── generate_deck_assets.py         # pitch-deck figures (bar charts, slice/CAM/circuit triptych)
+└── export_onnx.py                  # exports ResNet18FeatureExtractor to ONNX (see ONNXFeatureExtractor)
 
 .streamlit/config.toml              # dark theme config
 Dockerfile                          # multi-stage, CPU-only PyTorch, non-root runtime
-docker-compose.yml                  # api + frontend services, shared image
+docker-compose.yml                  # api + ui + mlflow services, shared app image
+docker-compose.override.yml         # local-dev overrides: source bind mounts + hot reload
 .dockerignore
 requirements.txt                    # runtime dependencies (+ pyyaml)
 requirements-dev.txt                # + pytest
