@@ -56,6 +56,14 @@ gradcam:
   alpha: 0.45
   colormap: "COLORMAP_JET"
 
+evaluation:
+  synthetic_n_samples: 800   # size of the synthetic dataset used by evaluate.py / generate_deck_assets.py
+  test_size: 0.25            # train/test split fraction held out for evaluation
+  random_seed: 0             # seed for synthetic data generation, model init, and train/test split
+  classical_max_iter: 2000   # max_iter for the sklearn LogisticRegression baseline
+  figure_dpi: 150            # dpi for evaluate.py's saved confusion-matrix/ROC figures
+  deck_figure_dpi: 200       # dpi for generate_deck_assets.py's saved figures
+
 api:
   host: "0.0.0.0"
   port: 8000

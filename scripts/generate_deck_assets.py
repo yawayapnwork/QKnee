@@ -69,14 +69,16 @@ sns.set_theme(style="whitegrid", context="talk")
 # 1. Comparative performance bar chart
 # --------------------------------------------------------------------------- #
 
-def generate_performance_comparison_figure(output_dir: Path, seed: int = 0) -> Path:
+def generate_performance_comparison_figure(
+    output_dir: Path, seed: int = _config.evaluation.random_seed
+) -> Path:
     """Trains the three models from evaluate.py on one synthetic dataset and
     renders a grouped bar chart (metric on the x-axis, model as hue) of
     ROC-AUC / Sensitivity / Specificity."""
     print("Training models for the performance comparison chart...")
-    features, labels = generate_synthetic_dataset(n_samples=800, seed=seed)
+    features, labels = generate_synthetic_dataset(seed=seed)
     X_train, X_test, y_train, y_test = train_test_split(
-        features, labels, test_size=0.25, stratify=labels, random_state=seed
+        features, labels, test_size=_config.evaluation.test_size, stratify=labels, random_state=seed
     )
 
     resnet_probs = train_resnet_linear_baseline(X_train, y_train, X_test)
@@ -121,7 +123,7 @@ def generate_performance_comparison_figure(output_dir: Path, seed: int = 0) -> P
     fig.tight_layout()
 
     output_path = output_dir / "performance_comparison.png"
-    fig.savefig(output_path, dpi=200)
+    fig.savefig(output_path, dpi=_config.evaluation.deck_figure_dpi)
     plt.close(fig)
     print(f"  saved {output_path}")
     return output_path
@@ -134,19 +136,20 @@ def generate_performance_comparison_figure(output_dir: Path, seed: int = 0) -> P
 def _make_sample_slice() -> np.ndarray:
     """Synthetic MRI-like slice (concentric ring, standing in for a real
     knee MRI sample) so this script runs standalone without a dataset."""
-    yy, xx = np.mgrid[0:224, 0:224]
-    center = 112
-    radius = np.sqrt((yy - center) ** 2 + (xx - center) ** 2)
+    height, width = _config.data.image_size
+    yy, xx = np.mgrid[0:height, 0:width]
+    center_y, center_x = height / 2, width / 2
+    radius = np.sqrt((yy - center_y) ** 2 + (xx - center_x) ** 2)
     ring = 255 * np.clip(1 - np.abs(radius - 70) / 40, 0, 1)
-    rng = np.random.default_rng(0)
-    texture = rng.normal(scale=8, size=(224, 224))
+    rng = np.random.default_rng(_config.evaluation.random_seed)
+    texture = rng.normal(scale=8, size=(height, width))
     return np.clip(ring + texture, 0, 255).astype(np.uint8)
 
 
 def _render_gradcam_overlay(sample_slice: np.ndarray) -> np.ndarray:
     """Runs the sample slice through the frozen ResNet18 backbone and
     returns an RGB Grad-CAM overlay (gradcam.py)."""
-    torch.manual_seed(0)
+    torch.manual_seed(_config.evaluation.random_seed)
     extractor = ResNet18FeatureExtractor(freeze_backbone=True)
     extractor.eval()
     target_layer = get_default_target_layer(extractor)
@@ -171,7 +174,7 @@ def _render_circuit_diagram(output_dir: Path) -> tuple[Path, np.ndarray]:
     n_layers = _config.quantum.n_layers
     circuit = build_qnode(n_qubits=N_QUBITS, n_layers=n_layers)
 
-    generator = torch.Generator().manual_seed(0)
+    generator = torch.Generator().manual_seed(_config.evaluation.random_seed)
     dummy_inputs = torch.rand(N_QUBITS, generator=generator) * 2 * torch.pi
     dummy_weights = torch.rand(n_layers, N_QUBITS, 3, generator=generator) * 2 * torch.pi
 
@@ -179,7 +182,7 @@ def _render_circuit_diagram(output_dir: Path) -> tuple[Path, np.ndarray]:
     fig.suptitle("Q-Knee 4-Qubit Variational Circuit", fontsize=14, fontweight="bold")
 
     output_path = output_dir / "circuit_diagram.png"
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, dpi=_config.evaluation.deck_figure_dpi, bbox_inches="tight")
 
     fig.canvas.draw()
     image_array = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
@@ -224,7 +227,7 @@ def generate_slice_gradcam_circuit_assets(output_dir: Path) -> Path:
     fig.tight_layout()
 
     composite_path = output_dir / "slice_gradcam_circuit_composite.png"
-    fig.savefig(composite_path, dpi=200)
+    fig.savefig(composite_path, dpi=_config.evaluation.deck_figure_dpi)
     plt.close(fig)
     print(f"  saved {composite_path}")
 

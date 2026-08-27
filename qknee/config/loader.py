@@ -118,6 +118,16 @@ class GradCAMConfig:
 
 
 @dataclass(frozen=True)
+class EvaluationConfig:
+    synthetic_n_samples: int
+    test_size: float
+    random_seed: int
+    classical_max_iter: int
+    figure_dpi: int
+    deck_figure_dpi: int
+
+
+@dataclass(frozen=True)
 class APIConfig:
     host: str
     port: int
@@ -141,6 +151,7 @@ class QKneeConfig:
     quantum: QuantumConfig
     training: TrainingConfig
     gradcam: GradCAMConfig
+    evaluation: EvaluationConfig
     api: APIConfig
     logging: LoggingConfig
     device: Optional[str] = None
@@ -219,6 +230,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         quantum = QuantumConfig(**raw["quantum"])
         training = TrainingConfig(**raw["training"])
         gradcam = GradCAMConfig(**raw["gradcam"])
+        evaluation = EvaluationConfig(**raw["evaluation"])
         api = APIConfig(**raw["api"])
         logging_cfg = LoggingConfig(**raw["logging"])
     except (KeyError, TypeError) as exc:
@@ -238,6 +250,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         quantum=quantum,
         training=training,
         gradcam=gradcam,
+        evaluation=evaluation,
         api=api,
         logging=logging_cfg,
         device=raw.get("device"),

@@ -71,7 +71,9 @@ class ModelMetrics:
 
 
 def generate_synthetic_dataset(
-    n_samples: int = 800, n_features: int = _config.resnet.feature_dim, seed: int = 0
+    n_samples: int = _config.evaluation.synthetic_n_samples,
+    n_features: int = _config.resnet.feature_dim,
+    seed: int = _config.evaluation.random_seed,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Synthetic stand-in for (ResNet18 512-D embeddings, binary tear label).
 
@@ -170,7 +172,9 @@ def train_svm_baseline(X_train, y_train, X_test) -> np.ndarray:
     scaler = StandardScaler().fit(X_train)
     # SVC's own probability=True is deprecated; calibrate an SVC decision
     # function into probabilities explicitly instead.
-    model = CalibratedClassifierCV(SVC(kernel="rbf", random_state=0), method="sigmoid", ensemble=False)
+    model = CalibratedClassifierCV(
+        SVC(kernel="rbf", random_state=_config.evaluation.random_seed), method="sigmoid", ensemble=False
+    )
     model.fit(scaler.transform(X_train), y_train)
     return model.predict_proba(scaler.transform(X_test))[:, 1]
 
@@ -179,7 +183,9 @@ def train_resnet_linear_baseline(X_train, y_train, X_test) -> np.ndarray:
     """'ResNet-only' baseline: a linear (logistic regression) probe directly
     on the 512-D ResNet features, with no PCA or quantum stage."""
     scaler = StandardScaler().fit(X_train)
-    model = LogisticRegression(max_iter=2000, random_state=0)
+    model = LogisticRegression(
+        max_iter=_config.evaluation.classical_max_iter, random_state=_config.evaluation.random_seed
+    )
     model.fit(scaler.transform(X_train), y_train)
     return model.predict_proba(scaler.transform(X_test))[:, 1]
 
@@ -235,7 +241,7 @@ def plot_confusion_matrices(results: list[ModelMetrics], output_dir: Path) -> Pa
     fig.tight_layout()
 
     output_path = output_dir / "confusion_matrices.png"
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=_config.evaluation.figure_dpi)
     plt.close(fig)
     return output_path
 
@@ -253,7 +259,7 @@ def plot_roc_curves(results: list[ModelMetrics], output_dir: Path) -> Path:
     fig.tight_layout()
 
     output_path = output_dir / "roc_curves.png"
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=_config.evaluation.figure_dpi)
     plt.close(fig)
     return output_path
 
@@ -270,15 +276,19 @@ def print_results_table(results: list[ModelMetrics]) -> None:
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(_config.evaluation.random_seed)
+    np.random.seed(_config.evaluation.random_seed)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     print("Generating synthetic ResNet-feature dataset (swap in real embeddings + labels)...")
-    features, labels = generate_synthetic_dataset(n_samples=800, n_features=512, seed=0)
+    features, labels = generate_synthetic_dataset()
     X_train, X_test, y_train, y_test = train_test_split(
-        features, labels, test_size=0.25, stratify=labels, random_state=0
+        features,
+        labels,
+        test_size=_config.evaluation.test_size,
+        stratify=labels,
+        random_state=_config.evaluation.random_seed,
     )
     print(f"Train: {X_train.shape[0]} samples | Test: {X_test.shape[0]} samples "
           f"| positive rate: {labels.mean():.2f}\n")
