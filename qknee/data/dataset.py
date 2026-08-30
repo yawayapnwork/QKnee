@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -56,6 +56,14 @@ VOLUME_EXTENSIONS = set(_config.data.volume_extensions)
 IMAGENET_MEAN = _config.data.imagenet_mean
 IMAGENET_STD = _config.data.imagenet_std
 TARGET_SIZE = _config.data.image_size
+
+# Target size for the MRNet-style multi-plane standardization pipeline
+# (`standardize_slice` / `qknee.data.ingestion.MultiPlaneViewSelector`) —
+# deliberately separate from `TARGET_SIZE`/`IMAGENET_MEAN`/`IMAGENET_STD`
+# above, which stay wired to the ResNet18 backbone's 224x224 ImageNet-
+# normalized input. Nothing in `build_transforms`/`MRIDataset` below reads
+# this constant, so it changes independently of the ResNet pipeline.
+MRNET_TARGET_SIZE: Tuple[int, int] = (128, 128)  # (height, width)
 
 
 class GaussianNoise:
@@ -104,6 +112,83 @@ def build_transforms(train: bool) -> transforms.Compose:
     pipeline.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
 
     return transforms.Compose(pipeline)
+
+
+# --------------------------------------------------------------------------- #
+# MRNet-style multi-plane standardization: resize to (3, 128, 128) + z-score
+# --------------------------------------------------------------------------- #
+
+def zscore_normalize(slice_2d: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    """Per-slice z-score standardization: `(x - mean(x)) / (std(x) + eps)`.
+
+    Per-slice (rather than dataset-wide, precomputed) statistics are
+    deliberate: unlike CT's calibrated Hounsfield units, raw MRI intensities
+    carry no fixed physical scale — they vary by scanner, coil, and sequence
+    — so a fixed global mean/std computed on one dataset doesn't transfer
+    cleanly to another. Per-slice normalization is the standard choice for
+    MRNet-style multi-plane pipelines for exactly this reason.
+
+    Args:
+        slice_2d: A 2D array of any real dtype.
+        eps: Added to the standard deviation to avoid a divide-by-zero on a
+            constant (zero-variance) slice.
+
+    Returns:
+        `float32` array of the same shape, zero mean / unit variance
+        (before `eps`).
+    """
+    array = np.asarray(slice_2d, dtype=np.float32)
+    mean, std = float(array.mean()), float(array.std())
+    return (array - mean) / (std + eps)
+
+
+def standardize_slice(
+    slice_2d: np.ndarray,
+    target_size: Tuple[int, int] = MRNET_TARGET_SIZE,
+) -> torch.Tensor:
+    """Resizes one 2D grayscale MRI slice to `target_size` and z-score
+    normalizes it into a `(3, H, W)` tensor — the standardization step for
+    the MRNet-style multi-plane pipeline (`qknee.data.ingestion.
+    MultiPlaneViewSelector`), independent of `build_transforms()`'s
+    224x224/ImageNet-normalized pipeline used by the ResNet18 backbone.
+
+    Pipeline: resize (bilinear, on the original intensity scale) ->
+    per-slice z-score normalize (`zscore_normalize`) -> replicate to 3
+    channels (matching a pretrained CNN's expected input arity, the same
+    way `build_transforms`'s `Grayscale(num_output_channels=3)` does).
+
+    Args:
+        slice_2d: `(H, W)` array, or `(H, W, C)` with `C` in `{3, 4}`
+            (collapsed to grayscale by averaging the first 3 channels).
+        target_size: `(height, width)` to resize to; defaults to
+            `MRNET_TARGET_SIZE` = `(128, 128)`.
+
+    Returns:
+        `(3, height, width)` `float32` tensor.
+
+    Raises:
+        ValueError: if `slice_2d` isn't 2D after channel collapsing.
+    """
+    array = np.asarray(slice_2d)
+    if array.ndim == 3:
+        if array.shape[-1] in (3, 4):
+            array = array[..., :3].mean(axis=-1)
+        else:
+            raise ValueError(f"Expected a 2D slice or (H, W, {{3,4}}), got shape {array.shape}")
+    if array.ndim != 2:
+        raise ValueError(f"Expected a 2D slice (or (H, W, C)), got shape {array.shape}")
+
+    height, width = target_size
+    # PIL's 'F' (32-bit float) mode resizes on the slice's real intensity
+    # scale (no premature uint8 clipping) — important for MRI, whose raw
+    # pixel values are often well outside [0, 255].
+    pil_image = Image.fromarray(array.astype(np.float32), mode="F")
+    resized = pil_image.resize((width, height), resample=Image.Resampling.BILINEAR)
+    resized_array = np.asarray(resized, dtype=np.float32)
+
+    normalized = zscore_normalize(resized_array)
+    channeled = np.repeat(normalized[np.newaxis, :, :], 3, axis=0)  # (3, H, W)
+    return torch.from_numpy(channeled.copy())
 
 
 @dataclass(frozen=True)
@@ -341,6 +426,99 @@ def build_dataloaders(
         )
 
     return dataloaders
+
+
+# --------------------------------------------------------------------------- #
+# Mock Stanford MRNet dataset generator — for tests that need a real,
+# readable on-disk dataset tree without the full (multi-GB, credentialed)
+# Stanford MRNet raw dataset download.
+# --------------------------------------------------------------------------- #
+
+MRNET_PLANES: Tuple[str, str, str] = ("axial", "coronal", "sagittal")
+
+
+def generate_mock_mrnet_volume(
+    num_slices: int = 8, size: int = 64, seed: int = 0,
+) -> np.ndarray:
+    """Returns one synthetic `(num_slices, size, size)` `uint16` volume
+    standing in for a single Stanford-MRNet-style per-plane `.npy` file
+    (MRNet stores one `(S, 256, 256)`-ish volume per case per plane).
+    Deterministic given `seed`."""
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 4096, size=(num_slices, size, size), dtype=np.uint16)
+
+
+def generate_mock_mrnet_dataset(
+    root: Union[str, Path],
+    case_ids: Sequence[str] = ("0000", "0001", "0002", "0003"),
+    planes: Sequence[str] = MRNET_PLANES,
+    condition: str = "acl",
+    split: str = "train",
+    num_slices: int = 8,
+    size: int = 64,
+    seed: int = 0,
+) -> Path:
+    """Builds a miniature, on-disk mock of the Stanford MRNet dataset's
+    directory/label layout, so the test suite (and any local pipeline
+    smoke-test) can exercise the multi-plane DICOM/NPY ingestion path
+    end-to-end without the real dataset, which is multi-GB and requires a
+    signed data-use agreement to download.
+
+    Layout written (matches the real MRNet release's shape):
+
+        root/
+            {split}/
+                axial/{case_id}.npy      (num_slices, size, size) uint16
+                coronal/{case_id}.npy
+                sagittal/{case_id}.npy
+            {split}-{condition}.csv      "{case_id},{label}" per line, no header
+
+    Labels are a deterministic pseudo-random 0/1 per case (seeded by
+    `seed` and the case id), not clinically meaningful — this mock is for
+    exercising the *data pipeline*, not for training a real model.
+
+    Args:
+        root: Directory to build the mock dataset tree under (created if
+            missing).
+        case_ids: Case identifiers; one `.npy` volume is written per
+            `(case_id, plane)` pair.
+        planes: Which of `MRNET_PLANES` to generate; defaults to all three.
+        condition: Which MRNet label CSV to generate — real MRNet ships
+            `train-abnormal.csv`, `train-acl.csv`, `train-meniscus.csv`.
+        split: Split name (`"train"`, `"valid"`, ...), used as the
+            directory/CSV-filename prefix, matching MRNet's own layout.
+        num_slices: Slices per volume.
+        size: Height/width per slice (kept small — this is a test fixture,
+            not a realistic-resolution volume).
+        seed: RNG seed; same seed reproduces the same volumes and labels.
+
+    Returns:
+        `root`, for chaining straight into a `MultiPlaneViewSelector`/
+        `MRIDataset` built on top of it.
+    """
+    root = Path(root)
+    split_dir = root / split
+    label_rows: List[str] = []
+
+    for case_offset, case_id in enumerate(case_ids):
+        case_seed = seed + case_offset
+        for plane in planes:
+            plane_dir = split_dir / plane
+            plane_dir.mkdir(parents=True, exist_ok=True)
+            volume = generate_mock_mrnet_volume(num_slices=num_slices, size=size, seed=case_seed)
+            np.save(plane_dir / f"{case_id}.npy", volume)
+
+        label = int(np.random.default_rng(case_seed).integers(0, 2))
+        label_rows.append(f"{case_id},{label}")
+
+    label_csv_path = root / f"{split}-{condition}.csv"
+    label_csv_path.write_text("\n".join(label_rows) + "\n", encoding="utf-8")
+
+    logger.debug(
+        "generate_mock_mrnet_dataset: wrote %d case(s) x %d plane(s) under %s, labels in %s",
+        len(case_ids), len(planes), split_dir, label_csv_path,
+    )
+    return root
 
 
 if __name__ == "__main__":

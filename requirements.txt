@@ -18,5 +18,6 @@ python-multipart==0.0.32
 requests==2.34.2
 reportlab==5.0.1
 nibabel==5.4.2
+SimpleITK==2.5.6
 onnx==1.22.0
 onnxruntime==1.29.0
