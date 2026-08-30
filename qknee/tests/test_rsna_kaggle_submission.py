@@ -258,6 +258,14 @@ class TestGenerateSubmissionEndToEnd:
 
         return csv_path, series_dir, uids
 
+    def _write_constant_train_csv(self, tmp_path: Path, value: float, name: str = "train_priors.csv") -> Path:
+        """A train.csv whose every row has the same value for every target
+        column, so `compute_class_priors` (the column mean) resolves to
+        exactly `value` — lets tests assert an exact class-prior fallback
+        without depending on FLAT_CLASS_PRIOR."""
+        rows = [_full_target_row(f"prior-uid-{i}", **{c: value for c in RSNA_TARGET_COLUMNS}) for i in range(3)]
+        return _write_csv(tmp_path / name, rows)
+
     def test_generate_submission_produces_valid_csv(self, synthetic_test_set, tmp_path: Path):
         from scripts.generate_kaggle_submission import generate_submission
 
@@ -265,8 +273,7 @@ class TestGenerateSubmissionEndToEnd:
         output_path = tmp_path / "submission.csv"
 
         result_path = generate_submission(
-            test_csv=csv_path, series_dir=series_dir, output_path=output_path,
-            aggregation="mean", default_probability=0.1,
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_path, aggregation="mean", num_workers=0,
         )
 
         assert result_path == output_path
@@ -280,38 +287,38 @@ class TestGenerateSubmissionEndToEnd:
             assert submission[column].notna().all()
             assert (submission[column] >= 0.0).all() and (submission[column] <= 1.0).all()
 
-    def test_study_with_no_series_falls_back_to_default_probability(self, synthetic_test_set, tmp_path: Path):
+    def test_study_with_no_series_falls_back_to_class_prior(self, synthetic_test_set, tmp_path: Path):
         from scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
-        default_probability = 0.37
+        prior_value = 0.37
+        train_csv = self._write_constant_train_csv(tmp_path, prior_value)
 
         generate_submission(
-            test_csv=csv_path, series_dir=series_dir, output_path=output_path,
-            default_probability=default_probability,
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_path, train_csv=train_csv, num_workers=0,
         )
 
         submission = pd.read_csv(output_path)
         no_series_row = submission[submission[RSNA_UID_COLUMN] == "uid-no-series"].iloc[0]
         for column in RSNA_TARGET_COLUMNS:
-            assert no_series_row[column] == pytest.approx(default_probability)
+            assert no_series_row[column] == pytest.approx(prior_value)
 
-    def test_placeholder_columns_equal_default_probability(self, synthetic_test_set, tmp_path: Path):
+    def test_placeholder_columns_equal_class_prior(self, synthetic_test_set, tmp_path: Path):
         from scripts.generate_kaggle_submission import PLACEHOLDER_COLUMNS, generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
-        default_probability = 0.42
+        prior_value = 0.42
+        train_csv = self._write_constant_train_csv(tmp_path, prior_value)
 
         generate_submission(
-            test_csv=csv_path, series_dir=series_dir, output_path=output_path,
-            default_probability=default_probability,
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_path, train_csv=train_csv, num_workers=0,
         )
 
         submission = pd.read_csv(output_path)
         for column in PLACEHOLDER_COLUMNS:
-            assert submission[column].tolist() == pytest.approx([default_probability] * len(submission))
+            assert submission[column].tolist() == pytest.approx([prior_value] * len(submission))
 
     def test_medial_and_lateral_meniscus_share_the_same_score(self, synthetic_test_set, tmp_path: Path):
         from scripts.generate_kaggle_submission import generate_submission
@@ -319,7 +326,7 @@ class TestGenerateSubmissionEndToEnd:
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
 
-        generate_submission(test_csv=csv_path, series_dir=series_dir, output_path=output_path)
+        generate_submission(input_csv=csv_path, images_dir=series_dir, output_csv=output_path, num_workers=0)
 
         submission = pd.read_csv(output_path)
         pd.testing.assert_series_equal(
@@ -332,8 +339,44 @@ class TestGenerateSubmissionEndToEnd:
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
 
-        generate_submission(test_csv=csv_path, series_dir=series_dir, output_path=output_path, limit=1)
+        generate_submission(input_csv=csv_path, images_dir=series_dir, output_csv=output_path, limit=1, num_workers=0)
 
         submission = pd.read_csv(output_path)
         assert len(submission) == 1
         assert submission.iloc[0][RSNA_UID_COLUMN] == uids[0]
+
+    def test_compress_flag_writes_gzip_file(self, synthetic_test_set, tmp_path: Path):
+        from scripts.generate_kaggle_submission import generate_submission
+
+        csv_path, series_dir, uids = synthetic_test_set
+        output_path = tmp_path / "submission.csv"
+
+        result_path = generate_submission(
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_path, compress=True, limit=1, num_workers=0,
+        )
+
+        assert result_path.suffix == ".gz"
+        assert result_path.exists()
+        submission = pd.read_csv(result_path, compression="gzip")
+        assert list(submission.columns) == [RSNA_UID_COLUMN, *RSNA_TARGET_COLUMNS]
+
+    def test_batch_size_and_num_workers_do_not_change_results(self, synthetic_test_set, tmp_path: Path):
+        """DataLoader batching/prefetching is purely an execution-strategy
+        change — the scored values for a given (deterministic seed) run
+        should be identical regardless of --batch_size/--num_workers."""
+        from scripts.generate_kaggle_submission import generate_submission
+
+        csv_path, series_dir, uids = synthetic_test_set
+
+        output_a = tmp_path / "a.csv"
+        generate_submission(
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_a, batch_size=1, num_workers=0,
+        )
+        output_b = tmp_path / "b.csv"
+        generate_submission(
+            input_csv=csv_path, images_dir=series_dir, output_csv=output_b, batch_size=8, num_workers=0,
+        )
+
+        submission_a = pd.read_csv(output_a).sort_values(RSNA_UID_COLUMN).reset_index(drop=True)
+        submission_b = pd.read_csv(output_b).sort_values(RSNA_UID_COLUMN).reset_index(drop=True)
+        pd.testing.assert_frame_equal(submission_a, submission_b)
