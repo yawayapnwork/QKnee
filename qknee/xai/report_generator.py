@@ -1,33 +1,60 @@
 """
-Single-page clinical radiology PDF report generation for Q-Knee predictions.
+Standardized, professional clinical radiology PDF report generation for
+Q-Knee predictions.
 
 Compiles the analyzed MRI slice, its risk-targeted Grad-CAM overlay,
-patient/study metadata, and ACL/meniscus tear-risk scores into one
-letter-size page — the source for the Streamlit dashboards' "Download
-Report" button (`qknee.ui.dashboard.render_report_download`).
+patient/study metadata, per-condition tear-risk scores, and (when supplied)
+the 4-qubit VQC's raw quantum measurements into a structured, multi-section
+report — the source for the Streamlit dashboards' "Download Report" button
+(`qknee.ui.dashboard.render_report_download`) and for
+`qknee/artifacts/demo_radiology_report.pdf`.
 
-RESEARCH PROTOTYPE — every generated report carries a "not for clinical
-use" disclaimer footer; this module produces a demo/prototype artifact,
-not a validated diagnostic report, and the "digital signature" is a
-placeholder hash, not a cryptographic attestation.
+Five sections, laid out across up to two letter-size pages:
+    1. Header       - clinic/system branding, generated timestamp, and an
+                       anonymized Study ID (never the patient's name/DOB).
+    2. Clinical      - overall risk score, predicted condition (Normal /
+       Impression      ACL Tear / Meniscal Tear), and a confidence interval.
+    3. Visual        - side-by-side original MRI slice + Grad-CAM overlay.
+       Evidence
+    4. Quantum       - per-qubit Pauli-Z expectation values and (when
+       Feature          supplied) the trained readout layer's per-qubit
+       Attribution      impact weights / weighted contributions.
+    5. Disclaimer    - a standard automated NISQ-screening-AI disclosure
+                       notice, plus a timestamped signature placeholder.
+
+RESEARCH PROTOTYPE — every generated report carries the Section 5
+disclaimer; this module produces a demo/prototype artifact, not a
+validated diagnostic report, the "clinic branding" is a placeholder
+name (no real hospital/institution is implied), and the "digital
+signature" is a placeholder hash, not a cryptographic attestation.
 
 Built directly on a `reportlab.pdfgen.canvas.Canvas` (rather than a
-`SimpleDocTemplate` flowable story) so the page is guaranteed to be
-exactly one page: every element is placed at an explicit y-coordinate
-computed top-down, so there is no flowing/paginating content that could
-silently spill onto a second page. `Table` flowables are still used for
-the tabular sections (metadata banner, diagnostic breakdown) and drawn
-onto the canvas via `wrapOn`/`drawOn`, combining canvas-level layout
-control with flowables for anything genuinely tabular.
+`SimpleDocTemplate` flowable story): every element is placed at an
+explicit y-coordinate computed top-down within each page, and page breaks
+happen only at the two fixed points this module controls itself (never
+from flowable content silently overflowing), so the report is always
+exactly two pages — deterministic, not "however many pages the content
+happens to need." `Table`/`Paragraph` flowables are still used for
+anything genuinely tabular/wrapping text, drawn onto the canvas via
+`wrapOn`/`drawOn`.
+
+Two entry points:
+    - `generate_radiology_report(output_path, ...)` - returns raw PDF bytes
+      (for `st.download_button(data=...)`), and also writes them to
+      `output_path` when one is given (e.g.
+      `qknee/artifacts/demo_radiology_report.pdf`) — pass `output_path=None`
+      for an in-memory-only report.
+    - `generate_radiology_text_snippet(...)` - a short plain-text summary
+      of the same prediction, for callers that don't need a full PDF.
 """
 
 from __future__ import annotations
 
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from PIL import Image as PILImage
@@ -45,6 +72,13 @@ logger = get_logger(__name__)
 
 PAGE_WIDTH, PAGE_HEIGHT = LETTER
 MARGIN = 0.6 * inch
+CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
+
+# Demo/placeholder branding — this module implies no real hospital or
+# clinical institution; override via metadata["clinic_name"] if a specific
+# deployment needs its own (still placeholder, non-legal) letterhead text.
+DEFAULT_CLINIC_NAME = "Q-KNEE QUANTUM DIAGNOSTICS CENTER"
+DEFAULT_CLINIC_SUBTITLE = "Quantum-Assisted Musculoskeletal MRI Screening"
 
 # Risk-tier thresholds/colors — matches qknee.ui.dashboard.render_risk_gauge's
 # LOW/MODERATE/HIGH bands, so the report and the live dashboard agree.
@@ -58,9 +92,15 @@ _TIER_COLORS = {
 }
 _INK = colors.HexColor("#16222A")
 
+# Heuristic confidence-interval half-width used when a caller doesn't
+# supply an explicit `acl_risk_ci`/`meniscus_risk_ci`/`overall_risk_ci` —
+# see `_confidence_interval`'s docstring for why this is a heuristic, not a
+# statistically derived interval.
+DEFAULT_CI_MARGIN = 0.08
+
 
 # --------------------------------------------------------------------------- #
-# Small formatting helpers
+# Small formatting / clinical-derivation helpers
 # --------------------------------------------------------------------------- #
 def _risk_tier(risk: Optional[float]) -> str:
     if risk is None:
@@ -94,6 +134,92 @@ def _get(d: Optional[Dict[str, Any]], key: str, default: Any = None) -> Any:
     return default if not d else d.get(key, default)
 
 
+def _predicted_condition(acl_risk: Optional[float], meniscus_risk: Optional[float]) -> str:
+    """Single overall predicted condition across the three demo categories
+    — Normal / ACL Tear / Meniscal Tear — for the Clinical Impression
+    section, derived from the two per-condition risk scores at the
+    standard 0.5 classification threshold. If both cross threshold, both
+    are named (a real dual pathology is clinically possible)."""
+    acl_positive = acl_risk is not None and acl_risk >= 0.5
+    meniscus_positive = meniscus_risk is not None and meniscus_risk >= 0.5
+
+    if acl_risk is None and meniscus_risk is None:
+        return "N/A (insufficient data)"
+    if acl_positive and meniscus_positive:
+        return "ACL Tear & Meniscal Tear"
+    if acl_positive:
+        return "ACL Tear"
+    if meniscus_positive:
+        return "Meniscal Tear"
+    return "Normal"
+
+
+def _overall_risk(acl_risk: Optional[float], meniscus_risk: Optional[float]) -> Optional[float]:
+    """Overall risk score for the Clinical Impression header: the higher
+    of the two condition-specific risks (worst-case/triage framing — the
+    report should not understate risk by averaging a clear positive
+    finding against an unrelated negative one)."""
+    candidates = [r for r in (acl_risk, meniscus_risk) if r is not None]
+    return max(candidates) if candidates else None
+
+
+def _confidence_interval(
+    risk: Optional[float],
+    explicit_ci: Optional[Sequence[float]],
+    margin: float = DEFAULT_CI_MARGIN,
+) -> Optional[Tuple[float, float]]:
+    """Resolves a `(low, high)` confidence interval for one risk score.
+
+    The trained VQC (`qknee.models.vqc.VQCClassifier`) produces a single
+    deterministic point estimate from an exact state-vector simulation
+    (`default.qubit`, no shot noise) — there is no sampling distribution to
+    derive a statistical confidence interval from without additional
+    machinery (e.g. an ensemble of checkpoints, bootstrap resampling, or a
+    real shot-based NISQ backend). So:
+
+        - If the caller supplies `explicit_ci` (e.g. computed upstream
+          from such an ensemble/bootstrap), it's used directly.
+        - Otherwise, a symmetric `±margin` heuristic band is used instead,
+          and every place this interval is rendered is labeled
+          "(heuristic)" so it is never mistaken for a statistically
+          derived interval.
+    """
+    if risk is None:
+        return None
+    if explicit_ci is not None:
+        low, high = explicit_ci
+        return max(0.0, float(low)), min(1.0, float(high))
+    return max(0.0, risk - margin), min(1.0, risk + margin)
+
+
+def _format_ci(ci: Optional[Tuple[float, float]]) -> str:
+    return "N/A" if ci is None else f"{ci[0] * 100:.1f}%–{ci[1] * 100:.1f}%"
+
+
+def _anonymized_study_id(metadata: Dict[str, Any]) -> str:
+    """Resolves the header's de-identified Study ID: an explicit
+    `study_id`/`patient_id` from `metadata` if present (assumed already
+    de-identified by the caller, e.g. `"DEMO-001"`), else a short
+    deterministic pseudonymous ID derived by hashing whatever identifying
+    fields *are* present — so the header never displays a real name/DOB
+    even when the fuller metadata table below (patient-facing, not
+    de-identified) does."""
+    explicit = _get(metadata, "study_id") or _get(metadata, "patient_id")
+    if explicit:
+        return str(explicit)
+
+    identity_source = "|".join(
+        str(_get(metadata, key, "")) for key in ("patient_name", "date_of_birth", "scan_date")
+    )
+    if not identity_source.strip("|"):
+        return "N/A"
+    digest = sha256(identity_source.encode("utf-8")).hexdigest()[:10].upper()
+    return f"ANON-{digest}"
+
+
+# --------------------------------------------------------------------------- #
+# Text-snippet entry point
+# --------------------------------------------------------------------------- #
 def generate_radiology_text_snippet(
     prediction_results: Dict[str, Any],
     metadata: Optional[Dict[str, Any]] = None,
@@ -128,6 +254,7 @@ def generate_radiology_text_snippet(
 
     lines = [
         f"Q-KNEE AUTOMATED SCREENING SUMMARY — Case {case_id} ({plane})",
+        f"Predicted condition: {_predicted_condition(acl_risk, meniscus_risk)}",
         f"ACL: {_format_percent(acl_risk)} tear-risk probability, {acl_tier} tier — {acl_label}.",
         f"Meniscus: {_format_percent(meniscus_risk)} tear-risk probability, {meniscus_tier} tier — {meniscus_label}.",
         "Research prototype output, not for clinical use — findings require independent review by a "
@@ -230,6 +357,40 @@ def _draw_image_panel(
 # --------------------------------------------------------------------------- #
 # Tables
 # --------------------------------------------------------------------------- #
+def _clinical_impression_table(prediction_results: Dict[str, Any]) -> Table:
+    acl_risk = _get(prediction_results, "acl_risk")
+    meniscus_risk = _get(prediction_results, "meniscus_risk")
+    overall_risk = _overall_risk(acl_risk, meniscus_risk)
+    overall_tier = _risk_tier(overall_risk)
+    predicted_condition = _predicted_condition(acl_risk, meniscus_risk)
+
+    overall_ci = _confidence_interval(overall_risk, _get(prediction_results, "overall_risk_ci"))
+    ci_source = "caller-supplied" if _get(prediction_results, "overall_risk_ci") is not None else "heuristic ±{:.0f}pp".format(DEFAULT_CI_MARGIN * 100)
+
+    rows = [
+        ["Overall Risk Score", _format_percent(overall_risk), overall_tier],
+        ["Predicted Condition", predicted_condition, ""],
+        [f"Confidence Interval ({ci_source})", _format_ci(overall_ci), ""],
+    ]
+    table = Table(rows, colWidths=[2.3 * inch, 2.2 * inch, 1.2 * inch])
+    table.setStyle(TableStyle([
+        ("SPAN", (1, 1), (2, 1)),
+        ("SPAN", (1, 2), (2, 2)),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (1, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0F0F0")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TEXTCOLOR", (1, 0), (1, 0), _TIER_COLORS[overall_tier]),
+        ("FONTNAME", (1, 0), (1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (1, 1), (1, 1), "Helvetica-Bold"),
+    ]))
+    return table
+
+
 def _metadata_table(metadata: Dict[str, Any]) -> Table:
     rows = [
         ["Patient ID", str(_get(metadata, "patient_id", "N/A")), "Scan Date", str(_get(metadata, "scan_date", "N/A"))],
@@ -257,6 +418,61 @@ def _metadata_table(metadata: Dict[str, Any]) -> Table:
     return table
 
 
+def _quantum_attribution_table(prediction_results: Dict[str, Any]) -> Optional[Table]:
+    """Builds the Quantum Feature Attribution table: one row per qubit's
+    Pauli-Z expectation value <Z>, plus (when the caller supplies the
+    trained readout layer's weights) the feature-impact weight and the
+    resulting weighted contribution to the pre-sigmoid risk logit —
+    `weight_i * <Z_i>`, i.e. exactly the term that qubit contributes inside
+    `VQCClassifier.readout` (`Linear(n_qubits, 1)`).
+
+    Recognized `prediction_results` keys:
+        pauli_z_expectations: sequence of floats in [-1, 1], one per qubit.
+        readout_weights: optional sequence of floats, same length — the
+            trained `Linear(n_qubits, 1)` readout's per-qubit weights.
+
+    Returns `None` if `pauli_z_expectations` isn't supplied, so the caller
+    can skip rendering this section entirely rather than showing an
+    all-"N/A" table.
+    """
+    pauli_z = _get(prediction_results, "pauli_z_expectations")
+    if pauli_z is None:
+        return None
+
+    readout_weights = _get(prediction_results, "readout_weights")
+    has_weights = readout_weights is not None and len(readout_weights) == len(pauli_z)
+
+    header = ["Qubit", "Pauli-Z Expectation <Z>", "Feature Impact Weight", "Weighted Contribution"]
+    rows = [header]
+    for i, expval in enumerate(pauli_z):
+        weight = readout_weights[i] if has_weights else None
+        contribution = (weight * expval) if has_weights else None
+        rows.append([
+            f"Q{i}",
+            f"{expval:+.4f}",
+            f"{weight:+.4f}" if weight is not None else "N/A",
+            f"{contribution:+.4f}" if contribution is not None else "N/A",
+        ])
+
+    table = Table(rows, colWidths=[0.8 * inch, 1.75 * inch, 1.75 * inch, 1.75 * inch])
+    style = [
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+        ("BACKGROUND", (0, 0), (-1, 0), _INK),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+    for row_index, expval in enumerate(pauli_z, start=1):
+        color = colors.HexColor("#E74C3C") if expval >= 0 else colors.HexColor("#2ECC71")
+        style.append(("TEXTCOLOR", (1, row_index), (1, row_index), color))
+    table.setStyle(TableStyle(style))
+    return table
+
+
 def _diagnostic_table(prediction_results: Dict[str, Any]) -> Table:
     acl_risk = _get(prediction_results, "acl_risk")
     meniscus_risk = _get(prediction_results, "meniscus_risk")
@@ -265,26 +481,29 @@ def _diagnostic_table(prediction_results: Dict[str, Any]) -> Table:
     acl_label = _get(prediction_results, "acl_classification") or _classification_label(acl_risk)
     meniscus_label = _get(prediction_results, "meniscus_classification") or _classification_label(meniscus_risk)
 
+    acl_ci = _confidence_interval(acl_risk, _get(prediction_results, "acl_risk_ci"))
+    meniscus_ci = _confidence_interval(meniscus_risk, _get(prediction_results, "meniscus_risk_ci"))
+
     rows = [
-        ["Region", "Tear Risk", "Risk Tier", "Classification"],
-        ["ACL", _format_percent(acl_risk), acl_tier, acl_label],
-        ["Meniscus", _format_percent(meniscus_risk), meniscus_tier, meniscus_label],
+        ["Region", "Tear Risk", "95% CI", "Risk Tier", "Classification"],
+        ["ACL", _format_percent(acl_risk), _format_ci(acl_ci), acl_tier, acl_label],
+        ["Meniscus", _format_percent(meniscus_risk), _format_ci(meniscus_ci), meniscus_tier, meniscus_label],
     ]
-    table = Table(rows, colWidths=[1.4 * inch, 1.4 * inch, 1.4 * inch, 2.5 * inch])
+    table = Table(rows, colWidths=[1.0 * inch, 1.0 * inch, 1.3 * inch, 1.0 * inch, 1.75 * inch])
     style = [
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
         ("BACKGROUND", (0, 0), (-1, 0), _INK),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("ALIGN", (1, 0), (-1, -1), "CENTER"),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("TEXTCOLOR", (2, 1), (2, 1), _TIER_COLORS[acl_tier]),
-        ("FONTNAME", (2, 1), (2, 1), "Helvetica-Bold"),
-        ("TEXTCOLOR", (2, 2), (2, 2), _TIER_COLORS[meniscus_tier]),
-        ("FONTNAME", (2, 2), (2, 2), "Helvetica-Bold"),
+        ("TEXTCOLOR", (3, 1), (3, 1), _TIER_COLORS[acl_tier]),
+        ("FONTNAME", (3, 1), (3, 1), "Helvetica-Bold"),
+        ("TEXTCOLOR", (3, 2), (3, 2), _TIER_COLORS[meniscus_tier]),
+        ("FONTNAME", (3, 2), (3, 2), "Helvetica-Bold"),
     ]
     table.setStyle(TableStyle(style))
     return table
@@ -322,6 +541,51 @@ def _draw_table(c: canvas.Canvas, table: Table, x: float, top_y: float, max_widt
     return top_y - height
 
 
+def _section_heading(c: canvas.Canvas, text: str, y: float) -> float:
+    c.setFont("Helvetica-Bold", 10.5)
+    c.setFillColor(_INK)
+    c.drawString(MARGIN, y, text)
+    return y - 14
+
+
+# --------------------------------------------------------------------------- #
+# Section 1: Header (branding + timestamp + anonymized Study ID)
+# --------------------------------------------------------------------------- #
+def _draw_header(c: canvas.Canvas, metadata: Dict[str, Any], generated_at: datetime, page_label: str) -> float:
+    clinic_name = str(_get(metadata, "clinic_name", DEFAULT_CLINIC_NAME))
+    study_id = _anonymized_study_id(metadata)
+
+    y = PAGE_HEIGHT - MARGIN
+
+    c.setFont("Helvetica-Bold", 13)
+    c.setFillColor(_INK)
+    c.drawCentredString(PAGE_WIDTH / 2, y, clinic_name)
+    y -= 15
+
+    c.setFont("Helvetica-Bold", 11)
+    c.drawCentredString(PAGE_WIDTH / 2, y, f"Quantum-Assisted MRI Analysis Report {page_label}")
+    y -= 12
+
+    c.setFont("Helvetica-Oblique", 7.5)
+    c.setFillColor(colors.grey)
+    c.drawCentredString(
+        PAGE_WIDTH / 2, y,
+        f"{DEFAULT_CLINIC_SUBTITLE} — research prototype, not a certified medical device.",
+    )
+    y -= 13
+
+    c.setFont("Helvetica", 8)
+    c.setFillColor(_INK)
+    c.drawString(MARGIN, y, f"Generated: {generated_at.strftime('%Y-%m-%d %H:%M:%S %Z').strip()}")
+    c.drawRightString(PAGE_WIDTH - MARGIN, y, f"Study ID (De-identified): {study_id}")
+    y -= 10
+
+    c.setStrokeColor(_INK)
+    c.setLineWidth(1)
+    c.line(MARGIN, y, PAGE_WIDTH - MARGIN, y)
+    return y - 14
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -332,10 +596,12 @@ def generate_radiology_report(
     prediction_results: Dict[str, Any],
     metadata: Dict[str, Any],
 ) -> bytes:
-    """Builds a formal, one-page clinical radiology summary PDF and returns
-    it as raw bytes (also writing it to `output_path` when one is given),
-    so callers can feed the same call straight into
-    `st.download_button(data=...)` without an extra disk round-trip.
+    """Builds a structured, multi-section clinical radiology PDF (Header,
+    Clinical Impression, Visual Evidence, Quantum Feature Attribution,
+    Disclaimer — across up to two letter-size pages) and returns it as raw
+    bytes, so callers can feed the same call straight into
+    `st.download_button(data=...)` without an extra disk round-trip; also
+    writes the same bytes to `output_path` when one is given.
 
     Args:
         output_path: Destination `.pdf` path (parent directories created
@@ -349,12 +615,27 @@ def generate_radiology_report(
         prediction_results: Diagnostic/inference payload. Recognized keys
             (all optional, missing ones render as "N/A"):
                 acl_risk, meniscus_risk           - floats in [0, 1]
+                acl_risk_ci, meniscus_risk_ci,
+                overall_risk_ci                   - optional (low, high)
+                                                     confidence-interval
+                                                     overrides; see
+                                                     `_confidence_interval`
                 acl_classification,
                 meniscus_classification           - override label strings;
                                                      default is a 0.5-threshold
                                                      "TEAR LIKELY"/"NO TEAR
                                                      INDICATED" derived from
                                                      the risk score
+                pauli_z_expectations              - sequence of floats in
+                                                     [-1, 1], one per qubit —
+                                                     enables the Quantum
+                                                     Feature Attribution
+                                                     section when present
+                readout_weights                   - optional sequence of
+                                                     floats (same length as
+                                                     pauli_z_expectations),
+                                                     the trained readout
+                                                     layer's per-qubit weights
                 resnet_latency_ms, pca_latency_ms,
                 quantum_latency_ms, total_latency_ms - float milliseconds
                 backend                           - str, e.g. "live"/"mock"/"api"
@@ -362,7 +643,8 @@ def generate_radiology_report(
             optional, missing ones render as "N/A"):
                 patient_id, patient_name, date_of_birth, scan_date,
                 modality (default "MRI Knee"), clinical_indication,
-                referring_physician
+                referring_physician, clinic_name (letterhead override),
+                study_id (explicit anonymized ID; derived if omitted)
 
     Returns:
         Raw PDF bytes.
@@ -371,46 +653,29 @@ def generate_radiology_report(
     c = canvas.Canvas(buffer, pagesize=LETTER)
     c.setTitle("Q-Knee Radiology Report")
 
-    content_width = PAGE_WIDTH - 2 * MARGIN
-    y = PAGE_HEIGHT - MARGIN
+    generated_at = datetime.now(timezone.utc)
+    acl_risk = _get(prediction_results, "acl_risk")
+    meniscus_risk = _get(prediction_results, "meniscus_risk")
+    backend = _get(prediction_results, "backend", "live")
 
-    # --- Header ---
-    c.setFont("Helvetica-Bold", 16)
-    c.setFillColor(_INK)
-    c.drawCentredString(PAGE_WIDTH / 2, y, "Q-KNEE QUANTUM-ASSISTED MRI ANALYSIS REPORT")
-    y -= 14
+    # =================================================================== #
+    # PAGE 1 — Header, Clinical Impression, Patient/Study Info, Visual Evidence
+    # =================================================================== #
+    y = _draw_header(c, metadata, generated_at, page_label="(Page 1 of 2)")
 
-    c.setFont("Helvetica-Oblique", 7.5)
-    c.setFillColor(colors.grey)
-    c.drawCentredString(
-        PAGE_WIDTH / 2, y,
-        "Research prototype — quantum-assisted ACL / meniscal tear-risk triage. Not a certified medical device.",
-    )
-    y -= 16
+    y = _section_heading(c, "Clinical Impression", y)
+    y = _draw_table(c, _clinical_impression_table(prediction_results), MARGIN, y - 2, CONTENT_WIDTH) - 16
 
-    c.setStrokeColor(_INK)
-    c.setLineWidth(1)
-    c.line(MARGIN, y, PAGE_WIDTH - MARGIN, y)
-    y -= 14
+    y = _section_heading(c, "Patient & Study Information", y)
+    y = _draw_table(c, _metadata_table(metadata), MARGIN, y - 2, CONTENT_WIDTH) - 18
 
-    # --- Patient / study metadata banner ---
-    c.setFont("Helvetica-Bold", 10)
-    c.setFillColor(_INK)
-    c.drawString(MARGIN, y, "Patient & Study Information")
-    y -= 4
-    y = _draw_table(c, _metadata_table(metadata), MARGIN, y - 10, content_width) - 16
-
-    # --- Imaging: side-by-side MRI slice + Grad-CAM overlay ---
-    c.setFont("Helvetica-Bold", 10)
-    c.setFillColor(_INK)
-    c.drawString(MARGIN, y, "Imaging — MRI Slice & Risk-Targeted Grad-CAM Overlay")
-    y -= 12
+    y = _section_heading(c, "Visual Evidence — MRI Slice & Risk-Targeted Grad-CAM Overlay", y)
 
     panel_gap = 0.3 * inch
-    panel_w = (content_width - panel_gap) / 2
+    panel_w = (CONTENT_WIDTH - panel_gap) / 2
     panel_h = 2.55 * inch
     caption_space = 18
-    panel_top = y - caption_space  # leave room for the caption drawn below each panel
+    panel_top = y - caption_space
     panel_y = panel_top - panel_h
 
     slice_reader = _to_image_reader(mri_slice, channels="L")
@@ -424,48 +689,72 @@ def generate_radiology_report(
         c, overlay_reader, MARGIN + panel_w + panel_gap, panel_y, panel_w, panel_h,
         caption="Grad-CAM Risk-Region Overlay", placeholder_text="(Grad-CAM unavailable)",
     )
-    y = panel_y - 22
 
-    # --- Diagnostic breakdown ---
-    c.setFont("Helvetica-Bold", 10)
-    c.setFillColor(_INK)
-    c.drawString(MARGIN, y, "Diagnostic Breakdown")
-    y -= 4
-    y = _draw_table(c, _diagnostic_table(prediction_results), MARGIN, y - 10, content_width) - 16
+    c.setFont("Helvetica", 7)
+    c.setFillColor(colors.grey)
+    c.drawCentredString(PAGE_WIDTH / 2, MARGIN * 0.55, f"Page 1 of 2 — {DEFAULT_CLINIC_NAME}")
 
-    c.setFont("Helvetica-Bold", 9)
-    c.setFillColor(_INK)
-    c.drawString(MARGIN, y, "Quantum Circuit Inference Latency")
-    y -= 4
-    backend = _get(prediction_results, "backend", "live")
-    y = _draw_table(c, _latency_table(prediction_results), MARGIN, y - 10, content_width) - 4
+    # =================================================================== #
+    # PAGE 2 — Quantum Feature Attribution, Diagnostic Breakdown, Latency,
+    # Disclaimer + signature
+    # =================================================================== #
+    c.showPage()
+    y = _draw_header(c, metadata, generated_at, page_label="(Page 2 of 2)")
+
+    attribution_table = _quantum_attribution_table(prediction_results)
+    y = _section_heading(c, "Quantum Feature Attribution — 4-Qubit VQC Measurement", y)
+    if attribution_table is not None:
+        y = _draw_table(c, attribution_table, MARGIN, y - 2, CONTENT_WIDTH) - 4
+        c.setFont("Helvetica-Oblique", 7)
+        c.setFillColor(colors.grey)
+        c.drawString(
+            MARGIN, y - 8,
+            "Each qubit's Pauli-Z expectation <Z> (measurement basis, range [-1, 1]) and, when available, "
+            "its trained readout weight and weighted contribution to the pre-sigmoid risk logit.",
+        )
+        y -= 22
+    else:
+        c.setFont("Helvetica-Oblique", 8.5)
+        c.setFillColor(colors.grey)
+        c.drawString(MARGIN, y - 2, "Per-qubit measurement data not available for this inference.")
+        y -= 20
+
+    y = _section_heading(c, "Diagnostic Breakdown", y)
+    y = _draw_table(c, _diagnostic_table(prediction_results), MARGIN, y - 2, CONTENT_WIDTH) - 16
+
+    y = _section_heading(c, "Quantum Circuit Inference Latency", y)
+    y = _draw_table(c, _latency_table(prediction_results), MARGIN, y - 2, CONTENT_WIDTH) - 4
     c.setFont("Helvetica-Oblique", 7.5)
     c.setFillColor(colors.grey)
     c.drawString(MARGIN, y - 8, f"Inference backend: {backend}")
-    y -= 20
+    y -= 24
 
-    # --- Footer: clinical disclaimer + timestamped digital signature placeholder ---
-    footer_top = MARGIN + 0.62 * inch
+    # --- Section 5: Legal/Clinical Disclaimer + timestamped signature placeholder ---
+    footer_top = MARGIN + 0.72 * inch
     c.setStrokeColor(colors.HexColor("#CCCCCC"))
     c.setLineWidth(0.5)
     c.line(MARGIN, footer_top, PAGE_WIDTH - MARGIN, footer_top)
 
     disclaimer_style = ParagraphStyle(
-        "Disclaimer", fontName="Helvetica-Oblique", fontSize=6.8, leading=8.4, textColor=colors.grey,
+        "Disclaimer", fontName="Helvetica-Oblique", fontSize=6.6, leading=8.2, textColor=colors.grey,
     )
     disclaimer = Paragraph(
-        "CLINICAL DISCLAIMER: This report is generated by Q-Knee, a research-prototype quantum-assisted "
-        "decision-support tool. It is NOT a validated diagnostic device and has NOT been reviewed or cleared "
-        "by any regulatory authority. Findings are probabilistic risk estimates only and must not be used, "
-        "in isolation or otherwise, as the basis for diagnosis or treatment. All results require independent "
-        "interpretation and confirmation by a qualified, licensed radiologist or orthopedic clinician.",
+        "AUTOMATED NISQ SCREENING AI DISCLOSURE: This report was generated by Q-Knee, an investigational "
+        "clinical decision-support tool using a noisy intermediate-scale quantum (NISQ) simulated variational "
+        "circuit as part of a hybrid classical/quantum inference pipeline. It is NOT a validated diagnostic "
+        "device, has NOT been reviewed or cleared by the FDA or any other regulatory authority, and is not "
+        "intended to diagnose, treat, cure, or prevent any disease. All risk scores, confidence intervals, and "
+        "quantum feature attributions are probabilistic estimates from a research prototype and must not be "
+        "used, in isolation or otherwise, as the basis for diagnosis or treatment. This report does not "
+        "establish a clinician-patient relationship and creates no duty of care on the part of its developers. "
+        "All findings require independent interpretation, confirmation, and clinical correlation by a "
+        "qualified, licensed radiologist or orthopedic clinician before any clinical action is taken.",
         disclaimer_style,
     )
-    disclaimer_width, disclaimer_height = disclaimer.wrapOn(c, content_width, 1 * inch)
+    disclaimer_width, disclaimer_height = disclaimer.wrapOn(c, CONTENT_WIDTH, 1.2 * inch)
     disclaimer.drawOn(c, MARGIN, footer_top - disclaimer_height - 4)
 
-    timestamp = datetime.now()
-    signature_source = f"{_get(metadata, 'patient_id', 'N/A')}|{timestamp.isoformat()}|{backend}"
+    signature_source = f"{_anonymized_study_id(metadata)}|{generated_at.isoformat()}|{backend}"
     signature_hash = sha256(signature_source.encode("utf-8")).hexdigest()[:16].upper()
 
     sig_y = footer_top - disclaimer_height - 20
@@ -474,8 +763,11 @@ def generate_radiology_report(
     c.drawString(
         MARGIN, sig_y,
         f"Digitally signed (placeholder, non-cryptographic) by Q-Knee Automated Analysis System — "
-        f"generated {timestamp.strftime('%Y-%m-%d %H:%M:%S')} — signature ref: {signature_hash}",
+        f"generated {generated_at.strftime('%Y-%m-%d %H:%M:%S %Z').strip()} — signature ref: {signature_hash}",
     )
+    # No separate "Page 2 of 2" footer label here — the header already
+    # states it, and this page's bottom margin is already occupied by the
+    # disclaimer + signature line above.
 
     c.showPage()
     c.save()
@@ -507,6 +799,8 @@ if __name__ == "__main__":
         prediction_results={
             "acl_risk": 0.72,
             "meniscus_risk": 0.31,
+            "pauli_z_expectations": [0.42, -0.18, 0.63, -0.07],
+            "readout_weights": [0.85, -0.40, 1.10, 0.25],
             "resnet_latency_ms": 18.4,
             "pca_latency_ms": 1.2,
             "quantum_latency_ms": 42.7,
