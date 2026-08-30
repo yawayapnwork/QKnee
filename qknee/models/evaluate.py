@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib
 
@@ -59,9 +59,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+from qknee.data.dataset import RSNA_TARGET_COLUMNS
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.vqc import VQCClassifier
 
+logger = get_logger(__name__)
 _config = load_config()
 OUTPUT_DIR = _config.paths.eval_output_dir
 RISK_THRESHOLD = _config.api.tear_risk_threshold
@@ -73,6 +76,12 @@ RISK_THRESHOLD = _config.api.tear_risk_threshold
 DEFAULT_ARTIFACTS_DIR = Path("qknee/artifacts")
 BENCHMARK_RESULTS_FILENAME = "benchmark_results.json"
 BENCHMARK_ROC_FILENAME = "benchmark_roc_curve.png"
+KAGGLE_BENCHMARK_FILENAME = "kaggle_benchmark_summary.json"
+
+# The RSNA Knee competition's core ligament/meniscal subset — a
+# clinically-focused breakdown of the 12-condition macro-AUC, reported
+# alongside the full Final Score by `compute_macro_auc`.
+RSNA_CORE_SUBSET: Tuple[str, ...] = ("ACL", "MCL", "Medial Meniscus")
 
 PredictSingleFn = Callable[[np.ndarray], float]  # (D,) feature row -> P(positive class)
 
@@ -598,6 +607,260 @@ def export_benchmark_results_json(
     return output_path
 
 
+# --------------------------------------------------------------------------- #
+# RSNA Knee competition-standard macro-averaged ROC-AUC
+#
+# The official RSNA metric averages one ROC-AUC score per target
+# condition across all 12 (`qknee.data.dataset.RSNA_TARGET_COLUMNS` — the
+# single source of truth for the column list, shared with
+# `qknee.data.dataset.RSNAKneeDataset` and
+# `scripts/generate_kaggle_submission.py`):
+#
+#     Final Score = (1 / 12) * sum_{i=0}^{11} AUC_i
+#
+# No real labeled RSNA Knee dataset ships with this repo (only a real
+# *parser* for one — see `RSNAKneeDataset`), so
+# `generate_multilabel_synthetic_dataset` below extends this module's
+# existing `generate_synthetic_dataset` scheme (one shared 4-D latent
+# embedding driving a 512-D feature space) to 12 independent per-
+# condition binary labels, purely so `compute_macro_auc` and the
+# comparative-analysis benchmark below are genuinely exercised end-to-end.
+# Swap in real per-condition labels (e.g. from `RSNAKneeDataset.targets`)
+# for an actual competition score.
+# --------------------------------------------------------------------------- #
+
+def generate_multilabel_synthetic_dataset(
+    n_samples: int = _config.evaluation.synthetic_n_samples,
+    n_features: int = _config.resnet.feature_dim,
+    condition_names: Sequence[str] = RSNA_TARGET_COLUMNS,
+    seed: int = _config.evaluation.random_seed,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Synthetic stand-in for `(ResNet18 512-D embeddings, one binary
+    label per RSNA target condition)`.
+
+    Mirrors `generate_synthetic_dataset`'s single-condition scheme: one
+    shared 4-D latent embedding drives the 512-D feature structure (one
+    random projection, shared across every condition — real anatomical
+    variation shows up across many correlated ResNet channels for every
+    condition at once) and each condition gets its *own* independent
+    linear decision boundary in that latent space (deterministic per
+    `(seed, condition index)`, not Python's randomized `hash()`, so this
+    is reproducible across processes/runs) — conditions end up correlated
+    through shared anatomy without being identical to one another.
+
+    Args:
+        n_samples: Rows to generate.
+        n_features: Synthetic embedding width (matches
+            `config.resnet.feature_dim`, i.e. 512).
+        condition_names: Which conditions to generate a label column for;
+            defaults to all 12 `RSNA_TARGET_COLUMNS`.
+        seed: Base RNG seed; each condition's decision boundary is seeded
+            from `seed + 1000 + index` so the whole set is reproducible
+            and every condition's boundary is independent of the others'.
+
+    Returns:
+        `(features, labels)` — `features` is `(n_samples, n_features)`
+        float32; `labels` is `{condition_name: (n_samples,) int64 array}`.
+    """
+    rng = np.random.default_rng(seed)
+
+    latent = rng.normal(size=(n_samples, 4))
+    projection = rng.normal(size=(4, n_features))
+    noise = rng.normal(scale=1.0, size=(n_samples, n_features))
+    features = (latent @ projection + noise).astype(np.float32)
+
+    labels: Dict[str, np.ndarray] = {}
+    for index, condition in enumerate(condition_names):
+        condition_rng = np.random.default_rng(seed + 1000 + index)
+        decision_weights = condition_rng.normal(size=4)
+        logits = latent @ decision_weights
+        probabilities = 1 / (1 + np.exp(-logits))
+        labels[condition] = (condition_rng.uniform(size=n_samples) < probabilities).astype(np.int64)
+
+    return features, labels
+
+
+def compute_macro_auc(
+    y_true: Dict[str, np.ndarray],
+    y_prob: Dict[str, np.ndarray],
+    condition_names: Sequence[str] = RSNA_TARGET_COLUMNS,
+    core_subset: Sequence[str] = RSNA_CORE_SUBSET,
+) -> Dict[str, Any]:
+    """Computes the official RSNA Knee macro-averaged ROC-AUC:
+
+        Final Score = (1 / 12) * sum_{i=0}^{11} AUC_i
+
+    plus a breakdown over the core ligament/meniscal subset (ACL, MCL,
+    Medial Meniscus) and the full per-condition `AUC_i` table.
+
+    Args:
+        y_true: `{condition_name: (n,) binary ground-truth array}`.
+        y_prob: `{condition_name: (n,) predicted-probability array}`,
+            same keys/lengths as `y_true`.
+        condition_names: The 12 conditions to average over (order doesn't
+            affect the score; kept for a stable `per_condition_auc` key
+            order in the returned dict).
+        core_subset: Conditions to additionally report a sub-average for.
+
+    Returns:
+        `{"per_condition_auc": {name: float | None}, "final_score": float | None,
+          "n_conditions_scored": int, "n_conditions_total": int,
+          "core_subset": {"conditions": [...], "mean_auc": float | None}}`
+
+        A condition is `None` in `per_condition_auc` (and excluded from
+        both averages, with a logged warning) if its `y_true` has only one
+        class present — ROC-AUC is mathematically undefined there
+        (`sklearn.metrics.roc_auc_score` itself raises `ValueError`), and
+        silently substituting 0.5 or dropping it from the divisor without
+        saying so would misrepresent the score.
+    """
+    per_condition_auc: Dict[str, Optional[float]] = {}
+    for condition in condition_names:
+        true_labels = np.asarray(y_true[condition])
+        probs = np.asarray(y_prob[condition])
+        if len(np.unique(true_labels)) < 2:
+            logger.warning(
+                "compute_macro_auc: condition '%s' has only one class present in y_true "
+                "(n=%d) — ROC-AUC is undefined; excluding it from the macro average.",
+                condition, len(true_labels),
+            )
+            per_condition_auc[condition] = None
+            continue
+        per_condition_auc[condition] = float(roc_auc_score(true_labels, probs))
+
+    valid_scores = [score for score in per_condition_auc.values() if score is not None]
+    final_score = float(np.mean(valid_scores)) if valid_scores else None
+
+    core_scores = [per_condition_auc[c] for c in core_subset if per_condition_auc.get(c) is not None]
+    core_subset_mean = float(np.mean(core_scores)) if core_scores else None
+
+    return {
+        "per_condition_auc": per_condition_auc,
+        "final_score": final_score,
+        "n_conditions_scored": len(valid_scores),
+        "n_conditions_total": len(condition_names),
+        "core_subset": {
+            "conditions": list(core_subset),
+            "mean_auc": core_subset_mean,
+        },
+    }
+
+
+# Which callable implements each named architecture for the comparative
+# analysis below — reuses this module's three *original* baseline
+# functions (each trained directly on the full 512-D embedding, no 4-D
+# PCA/quantum bottleneck for the two classical models), matching this
+# section's literal architecture names.
+_KAGGLE_BENCHMARK_ARCHITECTURES: Dict[str, Callable] = {
+    "Baseline Classical ResNet18": train_resnet_linear_baseline,
+    "Classical ResNet18 + RBF SVM": train_svm_baseline,
+    "Hybrid Q-Knee VQC": train_quantum_vqc,
+}
+
+
+def run_kaggle_macro_auc_benchmark(
+    n_samples: int = _config.evaluation.synthetic_n_samples,
+    n_epochs: int = 20,
+    seed: int = _config.evaluation.random_seed,
+    condition_names: Sequence[str] = RSNA_TARGET_COLUMNS,
+    architectures: Optional[Dict[str, Callable]] = None,
+) -> Dict[str, Any]:
+    """Trains each named architecture once per RSNA target condition on
+    one shared synthetic multi-label dataset
+    (`generate_multilabel_synthetic_dataset`) and computes each
+    architecture's macro-averaged ROC-AUC (`compute_macro_auc`) — the
+    comparative analysis `export_kaggle_benchmark_summary` serializes.
+
+    All three architectures share the exact same train/test row split and
+    the exact same per-condition labels, so the comparison isolates "which
+    architecture" rather than confounding it with different data.
+
+    Args:
+        n_samples: Synthetic dataset size.
+        n_epochs: Training epochs for the VQC architecture (the two
+            classical baselines below don't use gradient-descent epochs).
+        seed: RNG seed for both the synthetic dataset and the train/test split.
+        condition_names: Which of the 12 RSNA conditions to score.
+        architectures: `{name: train_fn}` overriding the default trio
+            (`_KAGGLE_BENCHMARK_ARCHITECTURES`) — `train_fn` must have the
+            signature `(X_train, y_train, X_test) -> (n_test,) probability array`.
+
+    Returns:
+        `{architecture_name: compute_macro_auc(...)-shaped dict}`.
+    """
+    architectures = architectures or _KAGGLE_BENCHMARK_ARCHITECTURES
+
+    features, labels = generate_multilabel_synthetic_dataset(
+        n_samples=n_samples, condition_names=condition_names, seed=seed,
+    )
+    train_idx, test_idx = train_test_split(
+        np.arange(n_samples), test_size=_config.evaluation.test_size, random_state=seed,
+    )
+    X_train, X_test = features[train_idx], features[test_idx]
+
+    results: Dict[str, Any] = {}
+    for arch_name, train_fn in architectures.items():
+        logger.info("Training '%s' across %d RSNA conditions...", arch_name, len(condition_names))
+        y_true_test: Dict[str, np.ndarray] = {}
+        y_prob_test: Dict[str, np.ndarray] = {}
+
+        for condition in condition_names:
+            y_train = labels[condition][train_idx]
+            y_test = labels[condition][test_idx]
+            if train_fn is train_quantum_vqc:
+                probs = train_fn(X_train, y_train, X_test, n_epochs=n_epochs)
+            else:
+                probs = train_fn(X_train, y_train, X_test)
+            y_true_test[condition] = y_test
+            y_prob_test[condition] = probs
+
+        macro_auc_result = compute_macro_auc(y_true_test, y_prob_test, condition_names=condition_names)
+        results[arch_name] = macro_auc_result
+        logger.info("  '%s' Final Score = %.4f", arch_name, macro_auc_result["final_score"])
+
+    return results
+
+
+def export_kaggle_benchmark_summary(
+    comparative_results: Dict[str, Any],
+    output_path: Union[str, Path] = DEFAULT_ARTIFACTS_DIR / KAGGLE_BENCHMARK_FILENAME,
+    dataset_info: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Serializes the RSNA Knee macro-AUC comparative-analysis results
+    (from `run_kaggle_macro_auc_benchmark`) to a structured JSON file, for
+    live presentation on the Streamlit dashboard.
+
+    Args:
+        comparative_results: `{architecture_name: compute_macro_auc(...)-shaped
+            dict}`, as returned by `run_kaggle_macro_auc_benchmark`.
+        output_path: Destination `.json` path (parent directories created
+            if missing); defaults to `qknee/artifacts/kaggle_benchmark_summary.json`.
+        dataset_info: Optional free-form dict describing the evaluation
+            dataset (e.g. `{"source": "synthetic", "n_train": ..., "n_test": ...}`),
+            recorded alongside the results for provenance.
+
+    Returns:
+        `output_path`.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "metric": "RSNA Knee macro-averaged ROC-AUC (Final Score = mean of 12 per-condition AUCs)",
+        "condition_names": list(RSNA_TARGET_COLUMNS),
+        "core_subset": list(RSNA_CORE_SUBSET),
+        "dataset": dataset_info or {},
+        "models": comparative_results,
+    }
+
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+    logger.info("Saved Kaggle benchmark summary to %s", output_path)
+    return output_path
+
+
 def plot_confusion_matrices(results: list[ModelMetrics], output_dir: Path) -> Path:
     fig, axes = plt.subplots(1, len(results), figsize=(5 * len(results), 4.5))
     if len(results) == 1:
@@ -712,3 +975,21 @@ if __name__ == "__main__":
 
     print(f"\nSaved confusion matrices to {cm_path.resolve()}")
     print(f"Saved ROC curves to {roc_path.resolve()}")
+
+    print("\n=== RSNA Knee macro-averaged ROC-AUC (12-condition Kaggle benchmark) ===")
+    kaggle_results = run_kaggle_macro_auc_benchmark(seed=_config.evaluation.random_seed)
+    for arch_name, arch_result in kaggle_results.items():
+        print(
+            f"{arch_name}: Final Score = {arch_result['final_score']:.4f} "
+            f"(core ACL/MCL/Medial-Meniscus subset = {arch_result['core_subset']['mean_auc']:.4f})"
+        )
+    kaggle_summary_path = export_kaggle_benchmark_summary(
+        kaggle_results,
+        dataset_info={
+            "source": "synthetic",
+            "n_samples": _config.evaluation.synthetic_n_samples,
+            "note": "No real labeled RSNA Knee dataset ships with this repo; see "
+                    "qknee.data.dataset.RSNAKneeDataset for the real-data parser.",
+        },
+    )
+    print(f"Saved Kaggle benchmark summary to {kaggle_summary_path.resolve()}")
