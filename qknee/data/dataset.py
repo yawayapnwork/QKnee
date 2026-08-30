@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
+import pandas as pd
 import torch
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import DataLoader, Dataset, default_collate
@@ -426,6 +427,261 @@ def build_dataloaders(
         )
 
     return dataloaders
+
+
+# --------------------------------------------------------------------------- #
+# RSNA Knee dataset parser
+#
+# Expected on-disk layout:
+#
+#     train.csv / test.csv           - StudyInstanceUID + (train.csv only)
+#                                       the 12 RSNA_TARGET_COLUMNS
+#     <series_dir>/
+#         <StudyInstanceUID>/
+#             Sagittal/*.dcm             - one DICOM series per plane;
+#             Coronal/*.dcm                not every study has all three
+#             Axial/*.dcm
+#
+# `RSNAKneeDataset` parses the CSV and, for every row, resolves whichever
+# of that study's plane subdirectories actually exist on disk — it never
+# drops a CSV row for a missing series (see `RSNAKneeDataset`'s docstring
+# for why: `scripts/generate_kaggle_submission.py` needs one output row
+# per input study regardless of data availability).
+# --------------------------------------------------------------------------- #
+
+RSNA_UID_COLUMN = "StudyInstanceUID"
+RSNA_PLANE_COLUMN = "Anatomical_Plane"
+RSNA_PLANES: Tuple[str, str, str] = ("Sagittal", "Coronal", "Axial")
+
+# The 12 standard RSNA Knee abnormality target columns, in the exact order
+# the competition's submission schema expects
+# (`scripts/generate_kaggle_submission.py` reuses this tuple verbatim for
+# `submission.csv`'s column order).
+RSNA_TARGET_COLUMNS: Tuple[str, ...] = (
+    "ACL",
+    "MCL",
+    "Medial Meniscus",
+    "Lateral Meniscus",
+    "Medial OA",
+    "Lateral OA",
+    "PF OA",
+    "Effusion",
+    "Synovitis",
+    "Baker's",
+    "Contusion",
+    "Fracture",
+)
+
+
+def load_rsna_labels_csv(
+    csv_path: Union[str, Path],
+    require_targets: bool = False,
+) -> pd.DataFrame:
+    """Loads an RSNA-Knee-format `train.csv`/`test.csv` into a DataFrame
+    with a guaranteed, cleaned `StudyInstanceUID` column plus all 12
+    `RSNA_TARGET_COLUMNS` — added as all-NaN for any that are genuinely
+    absent from the file (expected for `test.csv`, which by definition
+    carries no ground truth) rather than raising `KeyError` downstream.
+
+    Robust null-handling, applied unconditionally:
+        - Rows with a missing/blank `StudyInstanceUID` are dropped (logged
+          as a warning) — that row can never be matched to a series
+          directory or a submission row, so keeping it would only produce
+          a later, harder-to-diagnose failure.
+        - Each target column is coerced via `pd.to_numeric(errors="coerce")`,
+          so a stray non-numeric cell becomes `NaN` instead of raising or
+          silently poisoning the column's dtype.
+        - Missing target columns are added as all-`NaN`, not raised on,
+          unless `require_targets=True`.
+        - Out-of-`[0, 1]`-range target values and duplicate
+          `StudyInstanceUID`s are logged as warnings (both indicate a
+          malformed source file) but do not block loading — callers that
+          need to hard-fail on either should check `RSNA_TARGET_COLUMNS`/
+          `RSNA_UID_COLUMN` on the returned frame themselves.
+
+    Args:
+        csv_path: Path to `train.csv` or `test.csv`.
+        require_targets: If `True`, raise `ValueError` when any of the 12
+            target columns is entirely absent from the file — set this
+            for `train.csv`; leave `False` (default) for `test.csv`.
+
+    Returns:
+        A DataFrame with `StudyInstanceUID` (str, cleaned) plus all 12
+        `RSNA_TARGET_COLUMNS` (float, `NaN` where missing/null/malformed).
+
+    Raises:
+        FileNotFoundError: if `csv_path` doesn't exist.
+        ValueError: if `StudyInstanceUID` is missing from the file, or if
+            `require_targets=True` and a target column is entirely absent.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"RSNA labels CSV not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+
+    if RSNA_UID_COLUMN not in df.columns:
+        raise ValueError(
+            f"{csv_path} is missing the required '{RSNA_UID_COLUMN}' column. "
+            f"Found columns: {list(df.columns)}"
+        )
+
+    before = len(df)
+    df = df[df[RSNA_UID_COLUMN].notna() & (df[RSNA_UID_COLUMN].astype(str).str.strip() != "")].copy()
+    df[RSNA_UID_COLUMN] = df[RSNA_UID_COLUMN].astype(str).str.strip()
+    dropped = before - len(df)
+    if dropped:
+        logger.warning("%s: dropped %d row(s) with missing/empty %s.", csv_path, dropped, RSNA_UID_COLUMN)
+
+    missing_columns = [column for column in RSNA_TARGET_COLUMNS if column not in df.columns]
+    if missing_columns and require_targets:
+        raise ValueError(
+            f"{csv_path} is missing required target column(s) {missing_columns} "
+            "(require_targets=True was passed — expected for a labeled train.csv)."
+        )
+    if missing_columns:
+        logger.debug(
+            "%s has no columns for target(s) %s; filled with NaN (expected for a test.csv).",
+            csv_path, missing_columns,
+        )
+
+    for column in RSNA_TARGET_COLUMNS:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        else:
+            df[column] = np.nan
+
+    out_of_range = {}
+    for column in RSNA_TARGET_COLUMNS:
+        values = df[column].dropna()
+        bad = values[(values < 0) | (values > 1)]
+        if not bad.empty:
+            out_of_range[column] = int(len(bad))
+    if out_of_range:
+        logger.warning("%s has out-of-[0,1]-range target value(s): %s", csv_path, out_of_range)
+
+    duplicate_uids = df[RSNA_UID_COLUMN][df[RSNA_UID_COLUMN].duplicated()].unique().tolist()
+    if duplicate_uids:
+        logger.warning(
+            "%s has %d duplicate %s value(s), e.g. %s.",
+            csv_path, len(duplicate_uids), RSNA_UID_COLUMN, duplicate_uids[:5],
+        )
+
+    return df.reset_index(drop=True)
+
+
+def discover_rsna_plane_series(
+    series_dir: Union[str, Path],
+    study_instance_uid: str,
+    planes: Sequence[str] = RSNA_PLANES,
+) -> Dict[str, Path]:
+    """Resolves `<series_dir>/<study_instance_uid>/<plane>/` for each of
+    `planes`, returning only the ones that exist AND contain at least one
+    `.dcm`/`.dicom` file. A study missing a plane (common — not every exam
+    includes all three) simply isn't a key in the returned dict; this
+    never raises for a missing/incomplete study."""
+    from qknee.data.ingestion import DICOM_EXTENSIONS
+
+    study_dir = Path(series_dir) / study_instance_uid
+    found: Dict[str, Path] = {}
+    if not study_dir.is_dir():
+        return found
+
+    for plane in planes:
+        plane_dir = study_dir / plane
+        if plane_dir.is_dir() and any(
+            p.is_file() and p.suffix.lower() in DICOM_EXTENSIONS for p in plane_dir.iterdir()
+        ):
+            found[plane] = plane_dir
+    return found
+
+
+@dataclass(frozen=True)
+class RSNAStudyRecord:
+    """One row of an RSNA-Knee train/test CSV, paired with whichever of
+    its per-plane DICOM series directories actually exist on disk."""
+
+    study_instance_uid: str
+    plane_series_dirs: Dict[str, Path]                # {"Sagittal": Path(...), ...} — only planes found on disk
+    targets: Optional[Dict[str, Optional[float]]]      # None for a test-set record; else {column: float | None}
+
+
+class RSNAKneeDataset:
+    """Parses an RSNA-Knee-format `train.csv`/`test.csv` (`StudyInstanceUID`
+    + the 12 `RSNA_TARGET_COLUMNS` abnormality labels) and pairs every row
+    with whichever per-plane DICOM series directories exist under
+    `series_dir/<StudyInstanceUID>/<Sagittal|Coronal|Axial>/`.
+
+    Every CSV row becomes exactly one `RSNAStudyRecord`, even if none of
+    its plane directories exist on disk (`plane_series_dirs` is then an
+    empty dict) — a caller that needs one prediction row per input study
+    (e.g. `scripts/generate_kaggle_submission.py`, which must match the
+    competition's exact `StudyInstanceUID` count) can rely on
+    `len(dataset) == ` the CSV's row count unconditionally; a missing
+    series is the caller's problem to handle (e.g. fall back to a default
+    score), not something silently dropped here.
+
+    Args:
+        csv_path: Path to `train.csv` or `test.csv`.
+        series_dir: Root directory containing one subdirectory per
+            `StudyInstanceUID`.
+        planes: Which `Anatomical_Plane` subdirectory names to look for.
+        require_targets: If `True`, raise if any of the 12 target columns
+            is entirely absent from the CSV — set this for `train.csv`.
+    """
+
+    def __init__(
+        self,
+        csv_path: Union[str, Path],
+        series_dir: Union[str, Path],
+        planes: Sequence[str] = RSNA_PLANES,
+        require_targets: bool = False,
+    ) -> None:
+        self.csv_path = Path(csv_path)
+        self.series_dir = Path(series_dir)
+        self.planes = tuple(planes)
+        self._has_targets = require_targets or self._csv_has_any_target_columns()
+
+        self.frame = load_rsna_labels_csv(self.csv_path, require_targets=require_targets)
+        self._records = self._build_records()
+
+        n_missing_series = sum(1 for record in self._records if not record.plane_series_dirs)
+        if n_missing_series:
+            logger.warning(
+                "%d/%d studies from %s have no DICOM series found under %s.",
+                n_missing_series, len(self._records), self.csv_path, self.series_dir,
+            )
+
+    def _csv_has_any_target_columns(self) -> bool:
+        try:
+            header = pd.read_csv(self.csv_path, nrows=0).columns
+        except Exception:
+            return False
+        return any(column in header for column in RSNA_TARGET_COLUMNS)
+
+    def _build_records(self) -> List[RSNAStudyRecord]:
+        records: List[RSNAStudyRecord] = []
+        for _, row in self.frame.iterrows():
+            uid = row[RSNA_UID_COLUMN]
+            plane_dirs = discover_rsna_plane_series(self.series_dir, uid, self.planes)
+
+            targets: Optional[Dict[str, Optional[float]]] = None
+            if self._has_targets:
+                targets = {
+                    column: (float(row[column]) if pd.notna(row[column]) else None)
+                    for column in RSNA_TARGET_COLUMNS
+                }
+            records.append(RSNAStudyRecord(study_instance_uid=uid, plane_series_dirs=plane_dirs, targets=targets))
+        return records
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __getitem__(self, index: int) -> RSNAStudyRecord:
+        return self._records[index]
+
+    def __iter__(self):
+        return iter(self._records)
 
 
 # --------------------------------------------------------------------------- #
