@@ -45,6 +45,7 @@ quantum:
   n_layers: 3
   device: "default.qubit"
   diff_method: "backprop"
+  multi_target_head: "multi_observable"  # "multi_observable" | "ensemble" — see qknee.models.vqc_multitarget
 
 training:
   learning_rate: 0.01

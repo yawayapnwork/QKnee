@@ -29,7 +29,7 @@ trainable — the ResNet backbone and PCA projection are both frozen, so
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -37,9 +37,11 @@ import torch.nn as nn
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.data.dataset import RSNA_TARGET_COLUMNS
 from qknee.models.pca_reducer import ANGLE_RANGE, QuantumDimReducer
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import N_QUBITS, VQCClassifier
+from qknee.models.vqc_multitarget import MultiTargetHeadType, build_multi_target_head
 
 logger = get_logger(__name__)
 _config = load_config()
@@ -169,6 +171,96 @@ class QKneeModel(nn.Module):
         return filter(lambda p: p.requires_grad, self.parameters())
 
 
+class QKneeMultiTargetModel(nn.Module):
+    """Multi-label variant of `QKneeModel`, for the 12 RSNA Knee
+    conditions: Image/Tensor -> ResNet18 (512-D) -> PCA (4-D) -> a
+    multi-target quantum-classical head (`qknee.models.vqc_multitarget`)
+    -> 12 raw logits, in `qknee.data.dataset.RSNA_TARGET_COLUMNS` order.
+
+    IMPORTANT — unlike `QKneeModel` (whose `forward()` returns calibrated
+    `[0, 1]` probabilities directly, since it trains with plain `BCELoss`
+    on one target), this model's `forward()` returns RAW LOGITS. That's
+    the correct input for `nn.BCEWithLogitsLoss`
+    (`train_qknee_multitarget_model` below) — its numerically-fused
+    sigmoid+BCE computation is more stable under the severe per-condition
+    class imbalance RSNA has (e.g. Fracture vs. Effusion prevalence) than
+    training against already-squashed probabilities would be. Call
+    `.predict_proba(x)` for calibrated `[0.0, 1.0]` sigmoid probabilities
+    — e.g. for `scripts/generate_kaggle_submission.py`'s `submission.csv`.
+
+    Args:
+        pca_reducer: A pre-fitted `QuantumDimReducer` (same requirement as
+            `QKneeModel`).
+        n_qubits: Qubits per quantum sub-circuit (must equal
+            `pca_reducer.n_components`).
+        n_layers: Variational circuit depth.
+        freeze_resnet: Whether to freeze the ResNet18 backbone.
+        head_type: `"multi_observable"` or `"ensemble"` (see
+            `qknee.models.vqc_multitarget`); defaults to
+            `config.quantum.multi_target_head`. Ignored if `head` is given.
+        head: A pre-built `(B, n_qubits) -> (B, 12)` raw-logits module,
+            overriding `head_type`'s default construction — for a caller
+            that wants to inject a custom/pre-trained head directly.
+    """
+
+    TARGET_NAMES: Sequence[str] = RSNA_TARGET_COLUMNS
+
+    def __init__(
+        self,
+        pca_reducer: QuantumDimReducer,
+        n_qubits: int = N_QUBITS,
+        n_layers: int = _config.quantum.n_layers,
+        freeze_resnet: bool = _config.resnet.freeze_backbone,
+        head_type: Optional[MultiTargetHeadType] = None,
+        head: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+
+        if pca_reducer.n_components != n_qubits:
+            raise ValueError(
+                f"pca_reducer produces {pca_reducer.n_components}-D output but "
+                f"n_qubits={n_qubits}; these must match."
+            )
+
+        self.resnet = ResNet18FeatureExtractor(freeze_backbone=freeze_resnet)
+        self.pca_layer = PCAProjectionLayer.from_reducer(pca_reducer)
+        self.head_type: MultiTargetHeadType = head_type or _config.quantum.multi_target_head
+        self.head = head if head is not None else build_multi_target_head(
+            self.head_type, n_qubits=n_qubits, n_layers=n_layers,
+        )
+
+        for param in self.pca_layer.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: `(B, 3, 224, 224)` single-slice batch, or `(B, S, 3, 224, 224)`
+               multi-slice volume batch.
+
+        Returns:
+            `(B, 12)` RAW LOGITS (pre-sigmoid) — see class docstring. Use
+            `.predict_proba(x)` for calibrated `[0, 1]` probabilities.
+        """
+        features_512d = self.resnet(x)                  # (B, 512)
+        quantum_angles = self.pca_layer(features_512d)   # (B, n_qubits), in [0, 2*pi]
+        logits = self.head(quantum_angles)                # (B, 12), raw logits
+        return logits
+
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        """Calibrated per-condition probabilities: `torch.sigmoid(self(x))`,
+        in `[0.0, 1.0]` — matching the Kaggle `submission.csv` schema
+        (`qknee.data.dataset.RSNA_TARGET_COLUMNS` column order)."""
+        return torch.sigmoid(self.forward(x))
+
+    def trainable_parameters(self):
+        """Returns only the parameters that should be handed to an
+        optimizer (the multi-target head's quantum weights + any classical
+        projection layers — the ResNet backbone and PCA projection are
+        both frozen)."""
+        return filter(lambda p: p.requires_grad, self.parameters())
+
+
 # --------------------------------------------------------------------------- #
 # Training utility
 # --------------------------------------------------------------------------- #
@@ -214,6 +306,103 @@ def train_qknee_model(
         optimizer.zero_grad()
         predictions = model(inputs)
         loss = loss_fn(predictions, labels)
+        loss.backward()
+        optimizer.step()
+
+        history.append(loss.item())
+        if epoch % log_every == 0 or epoch == n_epochs - 1:
+            logger.info("epoch %3d | loss = %.4f", epoch, loss.item())
+
+    return history
+
+
+# --------------------------------------------------------------------------- #
+# Multi-target training utility (RSNA 12-condition head)
+# --------------------------------------------------------------------------- #
+
+def compute_pos_weight(labels: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Computes per-class positive weights for `nn.BCEWithLogitsLoss`
+    from a `(N, 12)` multi-hot label tensor — the standard class-imbalance
+    correction, `pos_weight_c = n_negative_c / n_positive_c`: a rare
+    positive class (e.g. Fracture, typically far less prevalent than
+    Effusion in RSNA-style knee MRI data) gets a large `pos_weight`, so a
+    false negative on it costs the loss as much as `pos_weight` false
+    negatives on a perfectly-balanced class would — preventing the model
+    from minimizing loss by simply always predicting "negative" for rare
+    conditions.
+
+    Args:
+        labels: `(N, 12)` binary (0/1) tensor.
+        eps: Floor applied to both the positive count (before dividing)
+            and the final weight, so a condition with zero positives in
+            this batch/split doesn't produce a `inf`/`NaN` weight.
+
+    Returns:
+        `(12,)` tensor of per-class positive weights, `>= eps`.
+    """
+    n_samples = labels.shape[0]
+    n_positive = labels.sum(dim=0).clamp(min=eps)
+    n_negative = n_samples - labels.sum(dim=0)
+    return (n_negative / n_positive).clamp(min=eps)
+
+
+def train_qknee_multitarget_model(
+    model: QKneeMultiTargetModel,
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    n_epochs: int = _config.training.n_epochs,
+    lr: float = _config.training.learning_rate,
+    device: Optional[str] = None,
+    log_every: int = _config.training.log_every,
+    pos_weight: Optional[torch.Tensor] = None,
+) -> List[float]:
+    """Trains `model`'s trainable parameters (multi-target head weights)
+    with `nn.BCEWithLogitsLoss` (raw-logit input — see
+    `QKneeMultiTargetModel`'s docstring for why not plain `BCELoss`) and
+    the Adam optimizer.
+
+    Args:
+        model: A `QKneeMultiTargetModel` instance.
+        inputs: `(N, 3, 224, 224)` or `(N, S, 3, 224, 224)` training batch.
+        labels: `(N, 12)` multi-hot binary labels, in
+            `QKneeMultiTargetModel.TARGET_NAMES` order.
+        n_epochs: Number of full-batch gradient steps.
+        lr: Adam learning rate.
+        device: Optional device string; defaults to CUDA if available.
+        log_every: Log loss every this many epochs.
+        pos_weight: Optional `(12,)` per-class positive weight tensor for
+            `BCEWithLogitsLoss`; computed from `labels` via
+            `compute_pos_weight` when omitted (the common case — a caller
+            with a separately-computed, dataset-wide `pos_weight` should
+            pass it explicitly instead of letting it be re-derived from
+            just this training batch).
+
+    Returns:
+        List of per-epoch loss values (for plotting/inspection).
+    """
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model.to(device)
+    model.train()
+
+    inputs = inputs.to(device)
+    labels = labels.to(device).float()
+    n_targets = len(model.TARGET_NAMES)
+    if labels.dim() != 2 or labels.shape[1] != n_targets:
+        raise ValueError(
+            f"Expected labels shape (N, {n_targets}) (one column per "
+            f"QKneeMultiTargetModel.TARGET_NAMES), got {tuple(labels.shape)}"
+        )
+
+    resolved_pos_weight = (pos_weight if pos_weight is not None else compute_pos_weight(labels)).to(device)
+
+    optimizer = torch.optim.Adam(model.trainable_parameters(), lr=lr)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=resolved_pos_weight)
+
+    history: List[float] = []
+    for epoch in range(n_epochs):
+        optimizer.zero_grad()
+        logits = model(inputs)  # (N, 12) raw logits — NOT sigmoid-activated
+        loss = loss_fn(logits, labels)
         loss.backward()
         optimizer.step()
 
@@ -323,6 +512,109 @@ def load_checkpoint(
 
 
 # --------------------------------------------------------------------------- #
+# Multi-target checkpointing
+# --------------------------------------------------------------------------- #
+
+MULTITARGET_CHECKPOINT_REQUIRED_KEYS = ("head_state_dict", "model_state_dict", "n_qubits", "n_layers", "head_type", "target_names")
+
+
+def save_multitarget_checkpoint(
+    model: QKneeMultiTargetModel,
+    path: Union[str, Path],
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    epoch: Optional[int] = None,
+    extra: Optional[Dict] = None,
+) -> Path:
+    """Saves a `QKneeMultiTargetModel` checkpoint — mirrors `save_checkpoint`'s
+    two-state-dict-views structure, plus `head_type`/`target_names` so a
+    reload can verify it's reconstructing the *same* head architecture and
+    condition ordering the checkpoint was trained with:
+
+        - `head_state_dict`:  just the multi-target head's own parameters.
+        - `model_state_dict`: the full joint model (incl. frozen ResNet/PCA
+          buffers), for a fully self-contained reload.
+    """
+    path = Path(path)
+    checkpoint = {
+        "head_state_dict": model.head.state_dict(),
+        "model_state_dict": model.state_dict(),
+        "n_qubits": getattr(model.head, "n_qubits", None),
+        "n_layers": getattr(model.head, "n_layers", None),
+        "head_type": model.head_type,
+        "target_names": list(model.TARGET_NAMES),
+        "epoch": epoch,
+        "extra": extra or {},
+    }
+    if optimizer is not None:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+
+    torch.save(checkpoint, path)
+    logger.info("Saved multi-target checkpoint to %s (head_type=%s, keys=%s)", path, model.head_type, sorted(checkpoint.keys()))
+    return path
+
+
+def _validate_multitarget_checkpoint_schema(checkpoint: Dict, path: Union[str, Path]) -> None:
+    missing = [key for key in MULTITARGET_CHECKPOINT_REQUIRED_KEYS if key not in checkpoint]
+    if missing:
+        raise KeyError(
+            f"Multi-target checkpoint at {path} is missing required key(s) {missing}. "
+            f"Expected all of {MULTITARGET_CHECKPOINT_REQUIRED_KEYS} - this checkpoint may "
+            "have been saved by an older/incompatible version of save_multitarget_checkpoint(), "
+            "or is a single-target QKneeModel checkpoint (see load_checkpoint instead)."
+        )
+
+
+def load_multitarget_checkpoint(
+    model: QKneeMultiTargetModel,
+    path: Union[str, Path],
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    map_location: Optional[str] = None,
+) -> Dict:
+    """Loads full `QKneeMultiTargetModel` (and optionally optimizer) state
+    from a checkpoint saved by `save_multitarget_checkpoint`. Mutates
+    `model` (and `optimizer`, if given) in place.
+
+    Raises:
+        FileNotFoundError: if `path` doesn't exist.
+        KeyError: if the checkpoint is missing required keys (e.g. a
+            single-target `QKneeModel` checkpoint was passed here).
+        ValueError: if the checkpoint's `head_type`/`n_qubits`/`n_layers`/
+            `target_names` don't match `model`'s.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+    checkpoint = torch.load(path, map_location=map_location or "cpu")
+    _validate_multitarget_checkpoint_schema(checkpoint, path)
+
+    if checkpoint["head_type"] != model.head_type:
+        raise ValueError(
+            f"Checkpoint was saved with head_type={checkpoint['head_type']!r}, "
+            f"but model has head_type={model.head_type!r}"
+        )
+    if list(checkpoint["target_names"]) != list(model.TARGET_NAMES):
+        raise ValueError(
+            f"Checkpoint's target_names {checkpoint['target_names']} don't match "
+            f"model.TARGET_NAMES {list(model.TARGET_NAMES)}"
+        )
+    model_n_qubits = getattr(model.head, "n_qubits", None)
+    model_n_layers = getattr(model.head, "n_layers", None)
+    if checkpoint["n_qubits"] != model_n_qubits:
+        raise ValueError(f"Checkpoint was saved with n_qubits={checkpoint['n_qubits']}, but model has n_qubits={model_n_qubits}")
+    if checkpoint["n_layers"] != model_n_layers:
+        raise ValueError(f"Checkpoint was saved with n_layers={checkpoint['n_layers']}, but model has n_layers={model_n_layers}")
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    logger.info("Loaded multi-target checkpoint from %s (epoch=%s, head_type=%s)", path, checkpoint.get("epoch"), checkpoint["head_type"])
+    return checkpoint
+
+
+# --------------------------------------------------------------------------- #
 # Full forward-pass validation
 # --------------------------------------------------------------------------- #
 
@@ -393,4 +685,55 @@ if __name__ == "__main__":
     logger.info("  Reloaded model produces identical output to the saved model.")
 
     checkpoint_path.unlink()
+    logger.info("All single-target QKneeModel validations passed.")
+
+    # --- Multi-target model validation (RSNA 12-condition head) ---
+    for head_type in ("multi_observable", "ensemble"):
+        logger.info("=== QKneeMultiTargetModel (head_type=%s) ===", head_type)
+        torch.manual_seed(0)
+        multitarget_model = QKneeMultiTargetModel(pca_reducer=reducer, n_qubits=4, n_layers=3, head_type=head_type)
+
+        n_targets = len(multitarget_model.TARGET_NAMES)
+        logits = multitarget_model(dummy_images)
+        assert logits.shape == (batch_size, n_targets), f"Unexpected logits shape {tuple(logits.shape)}"
+        logger.info("  forward() -> raw logits %s (NOT [0,1] -- BCEWithLogitsLoss input)", tuple(logits.shape))
+
+        probabilities = multitarget_model.predict_proba(dummy_images)
+        assert probabilities.shape == (batch_size, n_targets)
+        assert torch.all(probabilities >= 0.0) and torch.all(probabilities <= 1.0), "predict_proba() must be in [0, 1]"
+        logger.info("  predict_proba() -> calibrated probabilities in [0, 1]: OK")
+
+        # --- pos_weight + BCEWithLogitsLoss training ---
+        multitarget_labels = torch.randint(0, 2, (batch_size, n_targets)).float()
+        pos_weight = compute_pos_weight(multitarget_labels)
+        assert pos_weight.shape == (n_targets,)
+        assert torch.all(pos_weight >= 0)
+        logger.info("  compute_pos_weight(): %s", pos_weight.tolist())
+
+        multitarget_history = train_qknee_multitarget_model(
+            multitarget_model, dummy_images, multitarget_labels, n_epochs=20, lr=0.1, log_every=10,
+        )
+        assert multitarget_history[-1] < multitarget_history[0], "Expected multi-target loss to decrease during training"
+        logger.info("  Multi-target loss: %.4f -> %.4f", multitarget_history[0], multitarget_history[-1])
+
+        # --- multi-target checkpoint save/load round-trip ---
+        multitarget_model.eval()
+        with torch.no_grad():
+            pre_save_probs = multitarget_model.predict_proba(dummy_images).clone()
+
+        multitarget_checkpoint_path = Path(f"qknee_multitarget_model_{head_type}.pt")
+        save_multitarget_checkpoint(multitarget_model, multitarget_checkpoint_path, epoch=20)
+
+        reloaded_multitarget_model = QKneeMultiTargetModel(pca_reducer=reducer, n_qubits=4, n_layers=3, head_type=head_type)
+        load_multitarget_checkpoint(reloaded_multitarget_model, multitarget_checkpoint_path)
+        reloaded_multitarget_model.eval()
+
+        with torch.no_grad():
+            post_load_probs = reloaded_multitarget_model.predict_proba(dummy_images)
+
+        torch.testing.assert_close(pre_save_probs, post_load_probs, rtol=1e-5, atol=1e-6)
+        logger.info("  Reloaded multi-target model produces identical predict_proba() output.")
+
+        multitarget_checkpoint_path.unlink()
+
     logger.info("All qknee_model.py validations passed.")

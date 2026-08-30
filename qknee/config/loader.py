@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import yaml
 
 BackendEngine = Literal["pytorch", "onnx"]
+MultiTargetHeadType = Literal["multi_observable", "ensemble"]
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
@@ -104,6 +105,7 @@ class QuantumConfig:
     n_layers: int
     device: str
     diff_method: str
+    multi_target_head: MultiTargetHeadType  # "multi_observable" | "ensemble" — see qknee.models.vqc_multitarget
 
 
 @dataclass(frozen=True)
@@ -259,6 +261,10 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
     if resnet.backend_engine not in ("pytorch", "onnx"):
         raise ConfigError(
             f"resnet.backend_engine must be 'pytorch' or 'onnx', got {resnet.backend_engine!r}"
+        )
+    if quantum.multi_target_head not in ("multi_observable", "ensemble"):
+        raise ConfigError(
+            f"quantum.multi_target_head must be 'multi_observable' or 'ensemble', got {quantum.multi_target_head!r}"
         )
 
     return QKneeConfig(

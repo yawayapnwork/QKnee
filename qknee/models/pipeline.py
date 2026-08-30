@@ -31,15 +31,17 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Sequence, Union
 
 import numpy as np
 import pennylane as qml
 import torch
+import torch.nn as nn
 from PIL import Image
 
 from qknee.config.loader import QKneeConfig, load_config
 from qknee.config.logging_config import get_logger
+from qknee.data.dataset import RSNA_TARGET_COLUMNS
 from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import PCAProjectionLayer
@@ -449,6 +451,65 @@ class PipelineRunner:
         if not 0.0 <= risk_value <= 1.0:
             raise PipelineValidationError(f"[VQC] risk score {risk_value} outside expected range [0, 1]")
         return risk_value
+
+    def classify_multitarget(
+        self,
+        quantum_angles: np.ndarray,
+        head: nn.Module,
+        target_names: Optional[Sequence[str]] = None,
+    ) -> np.ndarray:
+        """Stage 4 (multi-label variant): `(1, n_qubits)` angles -> `(1, 12)`
+        calibrated sigmoid probabilities in `[0.0, 1.0]`, via any
+        multi-target head built by
+        `qknee.models.vqc_multitarget.build_multi_target_head` (or a
+        compatible `(B, n_qubits) -> (B, 12)` raw-logits module) — matching
+        the schema `scripts/generate_kaggle_submission.py`'s
+        `submission.csv` expects
+        (`qknee.data.dataset.RSNA_TARGET_COLUMNS` column order).
+
+        `head` outputs raw logits (see `qknee.models.qknee_model.
+        QKneeMultiTargetModel`'s docstring for why); this method applies
+        `torch.sigmoid()` itself so the returned array is always a
+        calibrated probability, never a raw logit — a caller never needs
+        to remember to do that conversion.
+
+        Args:
+            quantum_angles: `(1, n_qubits)` array, in `[0, 2*pi]` — the
+                output of `reduce_to_quantum_angles`.
+            head: A `(B, n_qubits) -> (B, len(target_names))` raw-logits
+                module (e.g. `MultiObservableVQC`/`EnsembleMultiTargetHead`).
+            target_names: Condition names, for the output's expected
+                width and error messages only; defaults to
+                `qknee.data.dataset.RSNA_TARGET_COLUMNS` (12 conditions).
+
+        Returns:
+            `(1, len(target_names))` numpy array of calibrated
+            probabilities in `[0, 1]`.
+        """
+        target_names = target_names if target_names is not None else RSNA_TARGET_COLUMNS
+        angles_tensor = torch.from_numpy(quantum_angles).float().to(self.device)
+        head = head.to(self.device)
+        was_training = head.training
+        head.eval()
+        try:
+            with torch.no_grad():
+                logits = head(angles_tensor)
+                probabilities = torch.sigmoid(logits)
+        except Exception as exc:
+            raise PipelineValidationError(f"[MultiTargetHead] forward pass failed: {exc}") from exc
+        finally:
+            head.train(was_training)
+
+        self._validate_stage_output(
+            probabilities, expected_ndim=2, expected_last_dim=len(target_names), stage_name="MultiTargetHead",
+        )
+        probabilities_np = probabilities.cpu().numpy()
+        if probabilities_np.min() < -1e-6 or probabilities_np.max() > 1.0 + 1e-6:
+            raise PipelineValidationError(
+                f"[MultiTargetHead] output {probabilities_np.min():.4f}..{probabilities_np.max():.4f} "
+                "outside expected range [0, 1]"
+            )
+        return probabilities_np
 
     def _risk_target_fn(self, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> TargetFn:
         """Builds a Grad-CAM `target_fn` that continues the forward pass from
