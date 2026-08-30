@@ -9,14 +9,16 @@ so only downstream layers (if any are added later) would be trained.
 Two usage modes:
     - Per-slice: input (B, 3, 224, 224) -> output (B, 512)
     - Per-volume: input (B, S, 3, 224, 224) -> per-slice features are
-      extracted with the same backbone, then averaged over the slice
-      dimension into a single (B, 512) volume embedding.
+      extracted with the same backbone, then aggregated over the (variable-
+      length) slice dimension into a single (B, 512) volume embedding via
+      `config.resnet.volumetric_aggregation` ("mean" | "attention" |
+      "topk_max" — see `AttentionPooling` / `topk_max_aggregate` below).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -29,6 +31,70 @@ from qknee.config.logging_config import get_logger
 _config = load_config()
 logger = get_logger(__name__)
 
+VOLUMETRIC_AGGREGATIONS = ("mean", "attention", "topk_max")
+
+
+class AttentionPooling(nn.Module):
+    """Gated-attention pooling (Ilse et al., 2018 style) over a variable
+    number of per-slice feature vectors: a small MLP scores each slice's
+    512-D feature vector, scores are softmax-normalized across the slice
+    dimension, and the volume embedding is the resulting convex combination
+    of slice features. Unlike plain mean-pooling, slices contributing more
+    diagnostically relevant signal can receive a larger weight.
+
+    Args:
+        feature_dim: Dimensionality of each per-slice feature vector.
+        hidden_dim: Width of the scoring MLP's hidden layer.
+    """
+
+    def __init__(self, feature_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.score = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, slice_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            slice_features: `(B, S, feature_dim)`.
+
+        Returns:
+            `(pooled, weights)` where `pooled` is `(B, feature_dim)` and
+            `weights` is `(B, S)` (softmax-normalized attention weights,
+            summing to 1 across the slice dimension — useful for
+            inspecting which slices drove the volume embedding).
+        """
+        scores = self.score(slice_features)  # (B, S, 1)
+        weights = torch.softmax(scores, dim=1)  # (B, S, 1)
+        pooled = (slice_features * weights).sum(dim=1)  # (B, feature_dim)
+        return pooled, weights.squeeze(-1)
+
+
+def topk_max_aggregate(slice_features: torch.Tensor, k: int) -> torch.Tensor:
+    """Top-k maximum feature aggregation across the slice dimension: for
+    each of the `feature_dim` channels independently, takes the `k`
+    largest per-slice values and averages them. This is a standard
+    multiple-instance-learning pooling rule — it lets the volume embedding
+    be driven by whichever slices most strongly activate each feature
+    channel, rather than diluting a strong signal across every slice the
+    way plain mean-pooling does.
+
+    Args:
+        slice_features: `(B, S, feature_dim)`.
+        k: Number of top slices to average per channel. Clamped to `S` if
+            `k > S` (a short volume still aggregates correctly rather than
+            raising).
+
+    Returns:
+        `(B, feature_dim)`.
+    """
+    num_slices = slice_features.shape[1]
+    k = min(k, num_slices)
+    top_values, _ = torch.topk(slice_features, k, dim=1)  # (B, k, feature_dim)
+    return top_values.mean(dim=1)  # (B, feature_dim)
+
 
 class ResNet18FeatureExtractor(nn.Module):
     """Frozen, pretrained ResNet18 backbone that outputs 512-D feature vectors.
@@ -38,12 +104,34 @@ class ResNet18FeatureExtractor(nn.Module):
             `resnet.freeze_backbone`), all backbone parameters have
             `requires_grad = False` set, so the pretrained weights are not
             updated during training (feature extraction / linear-probe use).
+        volumetric_aggregation: How `forward_volume` collapses a volume's
+            variable-length slice dimension into one 512-D embedding —
+            `"mean"` (plain average), `"attention"` (learned
+            `AttentionPooling` over slices), or `"topk_max"` (per-channel
+            top-`topk_k` max, see `topk_max_aggregate`). Defaults to
+            `config.yaml`'s `resnet.volumetric_aggregation`.
+        topk_k: Slices averaged per channel when
+            `volumetric_aggregation == "topk_max"`. Defaults to
+            `config.yaml`'s `resnet.topk_k`.
     """
 
     FEATURE_DIM = _config.resnet.feature_dim
 
-    def __init__(self, freeze_backbone: bool = _config.resnet.freeze_backbone):
+    def __init__(
+        self,
+        freeze_backbone: bool = _config.resnet.freeze_backbone,
+        volumetric_aggregation: str = _config.resnet.volumetric_aggregation,
+        topk_k: int = _config.resnet.topk_k,
+    ):
         super().__init__()
+
+        if volumetric_aggregation not in VOLUMETRIC_AGGREGATIONS:
+            raise ValueError(
+                f"volumetric_aggregation must be one of {VOLUMETRIC_AGGREGATIONS}, "
+                f"got {volumetric_aggregation!r}"
+            )
+        if topk_k < 1:
+            raise ValueError(f"topk_k must be >= 1, got {topk_k}")
 
         backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
 
@@ -58,6 +146,12 @@ class ResNet18FeatureExtractor(nn.Module):
             self.backbone.eval()
 
         self.freeze_backbone = freeze_backbone
+        self.volumetric_aggregation = volumetric_aggregation
+        self.topk_k = topk_k
+        self.attention_pool = (
+            AttentionPooling(self.FEATURE_DIM) if volumetric_aggregation == "attention" else None
+        )
+        self._last_attention_weights: Optional[torch.Tensor] = None
 
     def train(self, mode: bool = True) -> "ResNet18FeatureExtractor":
         """Override train() so the frozen backbone always stays in eval mode
@@ -87,14 +181,17 @@ class ResNet18FeatureExtractor(nn.Module):
 
     def forward_volume(self, x: torch.Tensor) -> torch.Tensor:
         """Extract a single global embedding per multi-slice MRI volume by
-        averaging per-slice features.
+        aggregating per-slice features across the (variable-length) slice
+        dimension, via `self.volumetric_aggregation`.
 
         Args:
             x: Tensor of shape (B, S, 3, 224, 224), where S is the number of
-               slices in the volume.
+               slices in the volume — S may vary freely between calls (e.g.
+               20 to 45 slices per study), since the backbone runs
+               per-slice and aggregation reduces over whatever S is passed.
 
         Returns:
-            Tensor of shape (B, 512): mean-pooled feature vector per volume.
+            Tensor of shape (B, 512): aggregated feature vector per volume.
         """
         if x.dim() != 5 or x.shape[2] != 3:
             raise ValueError(
@@ -104,12 +201,22 @@ class ResNet18FeatureExtractor(nn.Module):
         batch_size, num_slices = x.shape[0], x.shape[1]
 
         # Fold slices into the batch dimension so the backbone runs once
-        # over all slices, then unfold and average.
+        # over all slices, then unfold and aggregate.
         flat_slices = x.reshape(batch_size * num_slices, *x.shape[2:])
         slice_features = self.forward_slice(flat_slices)  # (B*S, 512)
 
         slice_features = slice_features.reshape(batch_size, num_slices, self.FEATURE_DIM)
-        return slice_features.mean(dim=1)  # (B, 512)
+
+        if self.volumetric_aggregation == "mean":
+            self._last_attention_weights = None
+            return slice_features.mean(dim=1)  # (B, 512)
+        elif self.volumetric_aggregation == "topk_max":
+            self._last_attention_weights = None
+            return topk_max_aggregate(slice_features, self.topk_k)  # (B, 512)
+        else:  # "attention"
+            pooled, weights = self.attention_pool(slice_features)  # (B, 512), (B, S)
+            self._last_attention_weights = weights
+            return pooled
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Dispatches to per-slice or per-volume extraction based on input rank.
@@ -308,7 +415,7 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
 
-    extractor = ResNet18FeatureExtractor(freeze_backbone=True)
+    extractor = ResNet18FeatureExtractor(freeze_backbone=True, volumetric_aggregation="mean")
     extractor.eval()
 
     trainable = sum(p.numel() for p in extractor.parameters() if p.requires_grad)
@@ -334,4 +441,19 @@ if __name__ == "__main__":
         manual_features = extractor.forward_slice(dummy_volume[0])  # (10, 512)
         manual_mean = manual_features.mean(dim=0)  # (512,)
     torch.testing.assert_close(manual_mean, volume_features[0], rtol=1e-4, atol=1e-4)
-    logger.info("Manual per-slice averaging matches forward_volume output. All tests passed.")
+    logger.info("Manual per-slice averaging matches forward_volume (mean) output.")
+
+    # --- Attention pooling + top-k max aggregation, over variable slice counts ---
+    for aggregation in ("attention", "topk_max"):
+        aggregator = ResNet18FeatureExtractor(
+            freeze_backbone=True, volumetric_aggregation=aggregation, topk_k=3,
+        )
+        aggregator.eval()
+        for num_slices in (5, 20, 45):  # variable volume depth, per the RSNA spec
+            volume = torch.randn(2, num_slices, 3, 224, 224)
+            with torch.no_grad():
+                pooled = aggregator(volume)
+            assert pooled.shape == (2, 512), f"{aggregation}, S={num_slices}: got {tuple(pooled.shape)}"
+        logger.info("volumetric_aggregation=%r handles variable slice counts -> (B, 512).", aggregation)
+
+    logger.info("All resnet_extractor.py smoke tests passed.")

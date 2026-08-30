@@ -41,6 +41,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import DataLoader, Dataset, default_collate
 from torchvision import transforms
@@ -682,6 +683,108 @@ class RSNAKneeDataset:
 
     def __iter__(self):
         return iter(self._records)
+
+
+# --------------------------------------------------------------------------- #
+# Multi-plane series fusion
+#
+# A single RSNA study can carry up to three DICOM series (Sagittal,
+# Coronal, Axial). Each plane is run independently through the ResNet18 ->
+# PCA/quantum-dim-reduction path (`qknee.models.qknee_model.
+# PCAProjectionLayer`) to its own 4-D quantum-ready embedding; not every
+# study has all three planes (see `discover_rsna_plane_series`). This
+# section fuses however many per-plane 4-D embeddings are present into the
+# single 4-D vector fed to the 4-qubit VQC.
+# --------------------------------------------------------------------------- #
+
+PLANE_FUSION_METHODS: Tuple[str, str] = ("weighted_average", "linear_bottleneck")
+
+
+class MultiPlaneEmbeddingFusion(nn.Module):
+    """Fuses per-plane 4-D quantum-ready embeddings (one per available
+    `RSNA_PLANES` series) into a single 4-D embedding for the 4-qubit VQC.
+
+    Two fusion strategies:
+        - `"weighted_average"`: a learned per-plane weight (softmax-
+          normalized over whichever planes are actually present for a
+          given study, so a missing plane doesn't dilute the others'
+          weights) — output stays a convex combination of the input
+          embeddings, so it never leaves their value range.
+        - `"linear_bottleneck"`: concatenates up to `len(planes) *
+          embedding_dim` values (missing planes zero-padded at their fixed
+          slot) and projects through a single `Linear(12, 4)` layer — lets
+          the fusion learn cross-plane interactions the weighted average
+          can't express, at the cost of needing zero-padding to keep the
+          bottleneck's input width fixed regardless of which planes are
+          present.
+
+    Args:
+        planes: Canonical plane ordering; defaults to `RSNA_PLANES`
+            (Sagittal, Coronal, Axial).
+        embedding_dim: Dimensionality of each per-plane embedding (4, to
+            match the 4-qubit VQC's input).
+        method: `"weighted_average"` (default) or `"linear_bottleneck"`.
+    """
+
+    def __init__(
+        self,
+        planes: Sequence[str] = RSNA_PLANES,
+        embedding_dim: int = 4,
+        method: str = "weighted_average",
+    ) -> None:
+        super().__init__()
+        if method not in PLANE_FUSION_METHODS:
+            raise ValueError(f"method must be one of {PLANE_FUSION_METHODS}, got {method!r}")
+
+        self.planes = tuple(planes)
+        self.embedding_dim = embedding_dim
+        self.method = method
+
+        if method == "weighted_average":
+            self.plane_logits = nn.Parameter(torch.zeros(len(self.planes)))
+        else:  # linear_bottleneck
+            self.bottleneck = nn.Linear(len(self.planes) * embedding_dim, embedding_dim)
+
+    def forward(self, plane_embeddings: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Args:
+            plane_embeddings: `{plane_name: (B, embedding_dim) tensor}` —
+                any non-empty subset of `self.planes`; a plane absent from
+                the dict (no series found for that study, per
+                `discover_rsna_plane_series`) is simply excluded from
+                `"weighted_average"`, or zero-padded for
+                `"linear_bottleneck"`.
+
+        Returns:
+            `(B, embedding_dim)` fused embedding.
+
+        Raises:
+            ValueError: if `plane_embeddings` is empty, or contains a key
+                not in `self.planes`.
+        """
+        present_planes = [plane for plane in self.planes if plane in plane_embeddings]
+        unknown_planes = set(plane_embeddings) - set(self.planes)
+        if unknown_planes:
+            raise ValueError(f"Unknown plane(s) {unknown_planes}; expected a subset of {self.planes}")
+        if not present_planes:
+            raise ValueError("plane_embeddings is empty — need at least one plane's embedding to fuse.")
+
+        stacked = torch.stack([plane_embeddings[plane] for plane in present_planes], dim=1)  # (B, P, D)
+
+        if self.method == "weighted_average":
+            plane_indices = [self.planes.index(plane) for plane in present_planes]
+            weights = torch.softmax(self.plane_logits[plane_indices], dim=0)  # (P,)
+            return (stacked * weights.view(1, -1, 1)).sum(dim=1)  # (B, D)
+
+        # linear_bottleneck: zero-pad any missing planes into their fixed
+        # slot so the bottleneck always sees a (B, len(planes)*D) input.
+        batch_size = stacked.shape[0]
+        padded = torch.zeros(
+            batch_size, len(self.planes), self.embedding_dim, device=stacked.device, dtype=stacked.dtype,
+        )
+        for local_index, plane in enumerate(present_planes):
+            padded[:, self.planes.index(plane), :] = stacked[:, local_index, :]
+        return self.bottleneck(padded.reshape(batch_size, -1))  # (B, D)
 
 
 # --------------------------------------------------------------------------- #

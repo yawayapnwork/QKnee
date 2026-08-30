@@ -33,6 +33,7 @@ import yaml
 
 BackendEngine = Literal["pytorch", "onnx"]
 MultiTargetHeadType = Literal["multi_observable", "ensemble"]
+VolumetricAggregation = Literal["mean", "attention", "topk_max"]
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
@@ -90,6 +91,8 @@ class ResNetConfig:
     freeze_backbone: bool
     backend_engine: BackendEngine  # "pytorch" -> ResNet18FeatureExtractor, "onnx" -> ONNXFeatureExtractor
     onnx_path: Path                # used only when backend_engine == "onnx"
+    volumetric_aggregation: VolumetricAggregation  # "mean" | "attention" | "topk_max"
+    topk_k: int                    # used only when volumetric_aggregation == "topk_max"
 
 
 @dataclass(frozen=True)
@@ -237,6 +240,8 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             freeze_backbone=bool(resnet_raw["freeze_backbone"]),
             backend_engine=resnet_raw.get("backend_engine", "pytorch"),
             onnx_path=Path(resnet_raw.get("onnx_path", "qknee/artifacts/resnet18_extractor.onnx")),
+            volumetric_aggregation=resnet_raw.get("volumetric_aggregation", "mean"),
+            topk_k=int(resnet_raw.get("topk_k", 5)),
         )
         pca_raw = raw["pca"]
         pca = PCAConfig(
@@ -262,6 +267,13 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         raise ConfigError(
             f"resnet.backend_engine must be 'pytorch' or 'onnx', got {resnet.backend_engine!r}"
         )
+    if resnet.volumetric_aggregation not in ("mean", "attention", "topk_max"):
+        raise ConfigError(
+            "resnet.volumetric_aggregation must be 'mean', 'attention', or 'topk_max', "
+            f"got {resnet.volumetric_aggregation!r}"
+        )
+    if resnet.topk_k < 1:
+        raise ConfigError(f"resnet.topk_k must be >= 1, got {resnet.topk_k}")
     if quantum.multi_target_head not in ("multi_observable", "ensemble"):
         raise ConfigError(
             f"quantum.multi_target_head must be 'multi_observable' or 'ensemble', got {quantum.multi_target_head!r}"
