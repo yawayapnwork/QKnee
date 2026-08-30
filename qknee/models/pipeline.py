@@ -27,11 +27,14 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
 import numpy as np
+import pennylane as qml
 import torch
 from PIL import Image
 
@@ -42,7 +45,7 @@ from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import PCAProjectionLayer
 from qknee.models.quantum_autoencoder import QuantumAutoencoder
 from qknee.models.resnet_extractor import ONNXFeatureExtractor, ResNet18FeatureExtractor
-from qknee.models.vqc import VQCClassifier
+from qknee.models.vqc import VQCClassifier, angle_encoding, variational_block
 from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 from qknee.xai.gradcam import GradCAM, TargetFn, get_default_target_layer, overlay_heatmap
 
@@ -53,6 +56,18 @@ InputType = Union[str, Path, np.ndarray, Image.Image]
 # Dynamic backbone-selection flags (Stage 3 / Stage 4) — see `PipelineRunner`.
 EncoderType = Literal["pca", "quantum_autoencoder"]
 ClassifierBackbone = Literal["vqc", "data_reuploading"]
+
+# --------------------------------------------------------------------------- #
+# Decoupled ONNX export artifacts (see `scripts/export_onnx.py` and
+# `HybridONNXInferenceEngine` below). Named here (not just in the export
+# script) so the export side and the load side share one source of truth
+# for where these three files live.
+# --------------------------------------------------------------------------- #
+DEFAULT_RESNET_ONNX_PATH = Path("qknee/artifacts/resnet_feature_extractor.onnx")
+DEFAULT_VQC_WEIGHTS_PATH = Path("qknee/artifacts/qknee_vqc_weights.pt")
+DEFAULT_CIRCUIT_PARAMS_PATH = Path("qknee/artifacts/circuit_params.json")
+
+QuantumBackend = Literal["pennylane", "qiskit"]
 
 
 class PipelineValidationError(RuntimeError):
@@ -535,6 +550,215 @@ class PipelineRunner:
 
         logger.info("PipelineRunner.run: risk_score=%.4f, source=%r", risk_score, source)
         return PipelineResult(risk_score=risk_score, quantum_angles=quantum_angles, gradcam_heatmap=heatmap)
+
+
+# --------------------------------------------------------------------------- #
+# HybridONNXInferenceEngine — the runtime counterpart of
+# `scripts/export_onnx.py`'s decoupled export.
+#
+# Why decoupled: `torch.onnx.export()` cannot trace `VQCClassifier` as a
+# single graph. `qml.qnn.TorchLayer` wraps a PennyLane QNode whose
+# `default.qubit` simulator represents the quantum state vector as a
+# complex128 tensor; when the TorchScript-based ONNX exporter traces
+# through that QNode call, the resulting op trace contains raw complex-
+# arithmetic ops with no ONNX equivalent, and the export fails with
+# `RuntimeError: Unknown number type: complex` (reproduced by
+# `scripts/export_onnx.py`'s `demonstrate_vqc_export_failure()`). This is
+# the "graph-tracing mismatch" between an eager-mode quantum simulator and
+# ONNX's static, real-valued-tensor op set — it isn't a bug to work around
+# with a different opset or exporter flag, it's a fundamental representation
+# gap, so the fix is architectural: only export the classical, ordinary-
+# tensor-arithmetic half of the model (ResNet18 + the PCA-projection
+# bottleneck) to ONNX; keep the quantum half as raw parameter tensors
+# (`qknee_vqc_weights.pt`) plus a JSON description of the circuit structure
+# (`circuit_params.json`), and re-execute it directly through PennyLane (or
+# Qiskit Aer) at inference time — never through a traced ONNX graph.
+# --------------------------------------------------------------------------- #
+
+def _resolve_quantum_device(backend: QuantumBackend, n_qubits: int):
+    """Builds the PennyLane device `HybridONNXInferenceEngine` runs the
+    circuit on. `"pennylane"` (default) uses the same `default.qubit`
+    state-vector simulator the rest of this project trains against.
+    `"qiskit"` instead delegates simulation to Qiskit Aer via the optional
+    `pennylane-qiskit` plugin — useful for validating against IBM's own
+    simulator/noise-model stack, at the cost of an extra dependency."""
+    if backend == "qiskit":
+        try:
+            return qml.device("qiskit.aer", wires=n_qubits, backend="aer_simulator")
+        except Exception as exc:
+            raise PipelineValidationError(
+                "quantum_backend='qiskit' requires the optional 'pennylane-qiskit' plugin "
+                "(and 'qiskit'/'qiskit-aer'): pip install pennylane-qiskit qiskit-aer. "
+                f"Original error: {exc}"
+            ) from exc
+    return qml.device(load_config().quantum.device, wires=n_qubits)
+
+
+class HybridONNXInferenceEngine:
+    """Loads the two decoupled export artifacts (`resnet_feature_extractor.onnx`
+    + `qknee_vqc_weights.pt`/`circuit_params.json`) and reproduces
+    `QKneeModel`'s full forward pass — ResNet18 -> PCA(4) -> 4-qubit VQC ->
+    sigmoid risk score — without ever loading PyTorch's autograd machinery
+    for the classical half (ONNX Runtime instead) or tracing the quantum
+    half through ONNX at all (a raw PennyLane/Qiskit QNode instead).
+
+    Args:
+        resnet_onnx_path: Path to the exported ResNet18+PCA ONNX graph
+            (`(B, 3, 224, 224) -> (B, n_qubits)` angles in `[0, 2*pi]`).
+        vqc_weights_path: Path to the `.pt` file holding the quantum
+            circuit's rotation weights and the classical readout layer's
+            weight/bias (`scripts/export_onnx.py::export_vqc_weights_and_circuit_params`).
+        circuit_params_path: Optional path to the circuit's structural
+            description (`circuit_params.json`); if given, its
+            `n_qubits`/`n_layers` are cross-checked against
+            `vqc_weights_path`'s so a mismatched pair of export artifacts
+            fails loudly at construction time instead of silently
+            producing wrong predictions.
+        quantum_backend: `"pennylane"` (default, `default.qubit`) or
+            `"qiskit"` (Qiskit Aer via `pennylane-qiskit`) — see
+            `_resolve_quantum_device`.
+        onnx_providers: ONNX Runtime execution providers, in priority
+            order; defaults to GPU-if-available, else CPU (same policy as
+            `ONNXFeatureExtractor`).
+        intra_op_num_threads: CPU threads for the ONNX Runtime session's
+            intra-op parallelism; defaults to all available cores.
+    """
+
+    def __init__(
+        self,
+        resnet_onnx_path: Union[str, Path] = DEFAULT_RESNET_ONNX_PATH,
+        vqc_weights_path: Union[str, Path] = DEFAULT_VQC_WEIGHTS_PATH,
+        circuit_params_path: Optional[Union[str, Path]] = DEFAULT_CIRCUIT_PARAMS_PATH,
+        quantum_backend: QuantumBackend = "pennylane",
+        onnx_providers: Optional[List[str]] = None,
+        intra_op_num_threads: Optional[int] = None,
+    ) -> None:
+        import onnxruntime as ort
+
+        resnet_onnx_path = Path(resnet_onnx_path)
+        vqc_weights_path = Path(vqc_weights_path)
+        if not resnet_onnx_path.exists():
+            raise FileNotFoundError(
+                f"ONNX feature extractor not found at {resnet_onnx_path}. Export one first via "
+                "`python scripts/export_onnx.py`."
+            )
+        if not vqc_weights_path.exists():
+            raise FileNotFoundError(
+                f"VQC weights not found at {vqc_weights_path}. Export them first via "
+                "`python scripts/export_onnx.py`."
+            )
+
+        # --- Classical half: ONNX Runtime session (ResNet18 + PCA(4)) ---
+        if onnx_providers is None:
+            available = ort.get_available_providers()
+            onnx_providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in available else [])
+            onnx_providers.append("CPUExecutionProvider")
+
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = intra_op_num_threads or (os.cpu_count() or 1)
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.session = ort.InferenceSession(
+            str(resnet_onnx_path), sess_options=session_options, providers=onnx_providers,
+        )
+        self._input_name = self.session.get_inputs()[0].name
+        self._output_name = self.session.get_outputs()[0].name
+
+        # --- Quantum half: raw weight tensors + a from-scratch (non-Torch,
+        # non-ONNX) PennyLane/Qiskit QNode, executed directly at inference
+        # time instead of through any traced graph ---
+        weights_blob = torch.load(vqc_weights_path, map_location="cpu")
+        self.n_qubits = int(weights_blob["n_qubits"])
+        self.n_layers = int(weights_blob["n_layers"])
+        self.quantum_weights = weights_blob["quantum_weights"].detach().cpu().numpy()
+        self.readout_weight = weights_blob["readout_weight"].detach().cpu().numpy()  # (1, n_qubits)
+        self.readout_bias = weights_blob["readout_bias"].detach().cpu().numpy()      # (1,)
+
+        self.circuit_params: Optional[Dict] = None
+        if circuit_params_path is not None and Path(circuit_params_path).exists():
+            with open(circuit_params_path, "r", encoding="utf-8") as handle:
+                self.circuit_params = json.load(handle)
+            if (
+                self.circuit_params.get("n_qubits") != self.n_qubits
+                or self.circuit_params.get("n_layers") != self.n_layers
+            ):
+                raise PipelineValidationError(
+                    f"circuit_params.json (n_qubits={self.circuit_params.get('n_qubits')}, "
+                    f"n_layers={self.circuit_params.get('n_layers')}) disagrees with "
+                    f"{vqc_weights_path} (n_qubits={self.n_qubits}, n_layers={self.n_layers}) "
+                    "— these two export artifacts must come from the same trained VQC."
+                )
+
+        self.quantum_backend = quantum_backend
+        self._circuit = self._build_inference_circuit(quantum_backend)
+
+        logger.info(
+            "HybridONNXInferenceEngine ready (onnx_provider=%s, quantum_backend=%s, n_qubits=%d, n_layers=%d)",
+            self.session.get_providers()[0], quantum_backend, self.n_qubits, self.n_layers,
+        )
+
+    def _build_inference_circuit(self, quantum_backend: QuantumBackend):
+        """Builds a bare PennyLane QNode with `interface=None` (plain numpy
+        in/out, no autograd) — deliberately *not* `qml.qnn.TorchLayer`,
+        since this engine is inference-only and skipping Torch's autograd
+        bookkeeping is a genuine (if modest) CPU speedup on top of avoiding
+        the ONNX-tracing problem entirely."""
+        device = _resolve_quantum_device(quantum_backend, self.n_qubits)
+        wires = list(range(self.n_qubits))
+        n_layers = self.n_layers
+
+        @qml.qnode(device, interface=None)
+        def circuit(inputs, weights):
+            angle_encoding(inputs, wires)
+            for layer in range(n_layers):
+                variational_block(weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
+
+        return circuit
+
+    def extract_angles(self, batch: torch.Tensor) -> np.ndarray:
+        """Classical stage: `(B, 3, 224, 224)` -> `(B, n_qubits)` angles in
+        `[0, 2*pi]`, via the ONNX Runtime session (ResNet18 + PCA(4))."""
+        input_array = batch.detach().cpu().numpy().astype(np.float32)
+        angles = self.session.run([self._output_name], {self._input_name: input_array})[0]
+        return angles
+
+    def run_quantum_circuit(self, angles: np.ndarray) -> np.ndarray:
+        """Quantum stage: `(B, n_qubits)` angles -> `(B, n_qubits)` Pauli-Z
+        expectation values, one QNode evaluation per row.
+
+        This per-sample loop *is* the "optimized CPU loop": `default.qubit`
+        (or Qiskit Aer) simulates each circuit with vectorized C/numpy
+        tensor contractions internally, so the Python-level loop over the
+        batch dimension is cheap relative to each simulation — matching how
+        the dashboard/API actually serve one slice at a time, rather than
+        claiming a batched-throughput number no live request would see.
+        """
+        angles = np.asarray(angles, dtype=np.float64)
+        expvals = np.stack([
+            np.asarray(self._circuit(angles[i], self.quantum_weights), dtype=np.float64)
+            for i in range(angles.shape[0])
+        ])
+        return expvals
+
+    def classify(self, expvals: np.ndarray) -> np.ndarray:
+        """Classical readout: `(B, n_qubits)` expectation values -> `(B, 1)`
+        risk probabilities, via the exported `Linear(n_qubits, 1) + Sigmoid`
+        (plain numpy — the readout layer is tiny, no need for ONNX Runtime
+        here)."""
+        logits = expvals @ self.readout_weight.T + self.readout_bias  # (B, 1)
+        return 1.0 / (1.0 + np.exp(-logits))
+
+    def predict(self, batch: torch.Tensor) -> np.ndarray:
+        """Full decoupled forward pass: `(B, 3, 224, 224)` -> `(B, 1)` risk
+        probabilities, matching `QKneeModel.forward`'s output exactly (up
+        to floating-point export/quantization error — see
+        `scripts/export_onnx.py`'s `validate_decoupled_export`)."""
+        angles = self.extract_angles(batch)
+        expvals = self.run_quantum_circuit(angles)
+        return self.classify(expvals)
+
+    def __call__(self, batch: torch.Tensor) -> np.ndarray:
+        return self.predict(batch)
 
 
 if __name__ == "__main__":
