@@ -94,6 +94,48 @@ def _get(d: Optional[Dict[str, Any]], key: str, default: Any = None) -> Any:
     return default if not d else d.get(key, default)
 
 
+def generate_radiology_text_snippet(
+    prediction_results: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generates a short, automated plain-text clinical-style summary from
+    the same `prediction_results`/`metadata` schema `generate_radiology_report`
+    accepts (see its docstring for the full recognized-key list) — for
+    callers that want a text snippet (a demo cache entry, a log line, a
+    Slack/API summary) rather than a full PDF page.
+
+    Args:
+        prediction_results: Recognized keys: `acl_risk`, `meniscus_risk`
+            (floats in `[0, 1]`, or `None`/absent), plus optional
+            `acl_classification`/`meniscus_classification` override strings.
+        metadata: Recognized keys: `patient_id`, `plane`/`modality`,
+            `clinical_indication` — all optional, folded into the header
+            line when present.
+
+    Returns:
+        A multi-line plain-text string, always ending with the standard
+        research-prototype disclaimer sentence.
+    """
+    acl_risk = _get(prediction_results, "acl_risk")
+    meniscus_risk = _get(prediction_results, "meniscus_risk")
+    acl_tier = _risk_tier(acl_risk)
+    meniscus_tier = _risk_tier(meniscus_risk)
+    acl_label = _get(prediction_results, "acl_classification") or _classification_label(acl_risk)
+    meniscus_label = _get(prediction_results, "meniscus_classification") or _classification_label(meniscus_risk)
+
+    case_id = _get(metadata, "patient_id", "N/A")
+    plane = _get(metadata, "plane") or _get(metadata, "modality", "unspecified plane")
+
+    lines = [
+        f"Q-KNEE AUTOMATED SCREENING SUMMARY — Case {case_id} ({plane})",
+        f"ACL: {_format_percent(acl_risk)} tear-risk probability, {acl_tier} tier — {acl_label}.",
+        f"Meniscus: {_format_percent(meniscus_risk)} tear-risk probability, {meniscus_tier} tier — {meniscus_label}.",
+        "Research prototype output, not for clinical use — findings require independent review by a "
+        "licensed radiologist or orthopedic clinician.",
+    ]
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # Image handling
 # --------------------------------------------------------------------------- #
