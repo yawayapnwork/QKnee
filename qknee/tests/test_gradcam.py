@@ -19,7 +19,14 @@ import pytest
 import torch
 
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
-from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
+from qknee.xai.gradcam import (
+    COLORMAP_OPTIONS,
+    GradCAM,
+    VolumetricGradCAMResult,
+    compute_volumetric_gradcam,
+    get_default_target_layer,
+    overlay_heatmap,
+)
 
 pytestmark = [pytest.mark.slow]
 
@@ -256,3 +263,110 @@ class TestSpatialDimensions128:
 
         overlay = overlay_heatmap(heatmap, slice_128)
         assert overlay.shape == (128, 128, 3)
+
+
+# --------------------------------------------------------------------------- #
+# 6. return_raw_magnitude + compute_volumetric_gradcam (multi-slice)
+# --------------------------------------------------------------------------- #
+
+class TestReturnRawMagnitude:
+    def test_default_return_is_unchanged(self, resnet_extractor, target_layer, single_input):
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            result = cam.generate(single_input)
+        assert isinstance(result, np.ndarray)
+
+    def test_return_raw_magnitude_gives_heatmap_and_float(self, resnet_extractor, target_layer, single_input):
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            heatmap, magnitude = cam.generate(single_input, return_raw_magnitude=True)
+
+        assert isinstance(heatmap, np.ndarray) and heatmap.ndim == 2
+        assert isinstance(magnitude, float)
+        assert magnitude >= 0.0  # sum of a ReLU'd map is non-negative
+
+    def test_stronger_target_yields_a_larger_magnitude(self, resnet_extractor, target_layer, single_input):
+        """A target scaled up should backprop proportionally larger
+        gradients into the target layer, and therefore a larger raw
+        (pre-normalization) activation mass — the exact property
+        `compute_volumetric_gradcam` relies on to rank slices, unlike the
+        [0, 1]-normalized heatmap which would look identical either way."""
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            _, small_magnitude = cam.generate(
+                single_input, target_fn=lambda out: out.pow(2).sum(), return_raw_magnitude=True,
+            )
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            _, large_magnitude = cam.generate(
+                single_input, target_fn=lambda out: (out * 100).pow(2).sum(), return_raw_magnitude=True,
+            )
+
+        assert large_magnitude > small_magnitude
+
+
+class TestComputeVolumetricGradcam:
+    @pytest.fixture
+    def slice_tensors(self) -> list:
+        generator = torch.Generator().manual_seed(0)
+        return [torch.rand(1, 3, 224, 224, generator=generator) for _ in range(5)]
+
+    def test_one_saliency_per_input_slice_in_order(self, resnet_extractor, target_layer, slice_tensors):
+        result = compute_volumetric_gradcam(resnet_extractor, target_layer, slice_tensors)
+
+        assert isinstance(result, VolumetricGradCAMResult)
+        assert [s.slice_index for s in result.saliencies] == list(range(5))
+        for saliency in result.saliencies:
+            assert saliency.heatmap.ndim == 2
+            assert saliency.heatmap.min() >= 0.0 and saliency.heatmap.max() <= 1.0 + 1e-6
+            assert saliency.magnitude >= 0.0
+
+    def test_top_k_indices_are_the_k_highest_magnitude_slices(self, resnet_extractor, target_layer, slice_tensors):
+        result = compute_volumetric_gradcam(resnet_extractor, target_layer, slice_tensors, top_k=3)
+
+        assert len(result.top_k_indices) == 3
+        magnitudes = {s.slice_index: s.magnitude for s in result.saliencies}
+        expected = sorted(magnitudes, key=lambda i: magnitudes[i], reverse=True)[:3]
+        assert result.top_k_indices == expected
+
+    def test_top_k_clamped_to_available_slices(self, resnet_extractor, target_layer, slice_tensors):
+        result = compute_volumetric_gradcam(resnet_extractor, target_layer, slice_tensors, top_k=99)
+        assert len(result.top_k_indices) == len(slice_tensors)
+
+    def test_custom_slice_indices_are_preserved(self, resnet_extractor, target_layer, slice_tensors):
+        """Simulates a subsampled volume — e.g. slices [0, 10, 20, 30, 40]
+        of a larger volume — and checks the result reports real volume
+        indices, not positions within the subsample."""
+        custom_indices = [0, 10, 20, 30, 40]
+        result = compute_volumetric_gradcam(
+            resnet_extractor, target_layer, slice_tensors, slice_indices=custom_indices, top_k=2,
+        )
+
+        assert [s.slice_index for s in result.saliencies] == custom_indices
+        assert all(index in custom_indices for index in result.top_k_indices)
+        assert result.heatmap_for(10) is not None
+        assert result.heatmap_for(999) is None
+
+    def test_mismatched_slice_indices_length_raises(self, resnet_extractor, target_layer, slice_tensors):
+        with pytest.raises(ValueError, match="slice_indices"):
+            compute_volumetric_gradcam(resnet_extractor, target_layer, slice_tensors, slice_indices=[0, 1])
+
+    def test_shared_target_fn_applied_to_every_slice(self, resnet_extractor, target_layer, slice_tensors):
+        calls = []
+
+        def target_fn(output: torch.Tensor) -> torch.Tensor:
+            calls.append(1)
+            return output.pow(2).sum()
+
+        compute_volumetric_gradcam(resnet_extractor, target_layer, slice_tensors, target_fn=target_fn)
+        assert len(calls) == len(slice_tensors)
+
+
+class TestColormapOptions:
+    def test_expected_colormap_names_present(self):
+        assert set(COLORMAP_OPTIONS.keys()) == {"jet", "inferno", "magma"}
+
+    def test_each_colormap_produces_a_valid_overlay(self):
+        heatmap = np.random.default_rng(0).random((7, 7)).astype(np.float32)
+        slice_2d = np.random.default_rng(1).integers(0, 255, size=(64, 64), dtype=np.uint8)
+
+        for colormap_value in COLORMAP_OPTIONS.values():
+            overlay = overlay_heatmap(heatmap, slice_2d, colormap=colormap_value)
+            assert overlay.shape == (64, 64, 3)
+            assert overlay.dtype == np.uint8

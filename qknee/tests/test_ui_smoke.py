@@ -92,6 +92,96 @@ class TestAnalysisAppHelpers:
 
         assert result_a.risk_score != pytest.approx(result_b.risk_score)
 
+    def test_run_mock_analysis_includes_bounded_pauli_z_expectations(self):
+        slice_2d = np.random.default_rng(3).integers(0, 255, size=(16, 16), dtype=np.uint8)
+        result = analysis_app.run_mock_analysis(slice_2d)
+
+        assert result.pauli_z_expectations is not None
+        assert len(result.pauli_z_expectations) == analysis_app.N_QUBITS
+        assert np.all(result.pauli_z_expectations >= -1.0) and np.all(result.pauli_z_expectations <= 1.0)
+
+
+# --------------------------------------------------------------------------- #
+# 2a-bis. analysis_app.py multi-slice (volumetric) Grad-CAM + quantum panel
+# --------------------------------------------------------------------------- #
+
+class TestAnalysisAppVolumetric:
+    def test_subsampled_indices_returns_full_range_when_under_cap(self):
+        assert analysis_app._subsampled_indices(5, max_slices=40) == [0, 1, 2, 3, 4]
+
+    def test_subsampled_indices_caps_and_spans_full_range(self):
+        indices = analysis_app._subsampled_indices(200, max_slices=20)
+        assert len(indices) <= 20
+        assert indices[0] == 0
+        assert indices[-1] == 199
+        assert indices == sorted(indices)
+
+    def test_get_pauli_z_expectations_returns_none_without_quantum_layer(self):
+        class _NoQuantumLayerModel:
+            pass
+
+        result = analysis_app.get_pauli_z_expectations(_NoQuantumLayerModel(), np.zeros((1, 4), dtype=np.float32))
+        assert result is None
+
+    def test_get_pauli_z_expectations_reads_real_vqc_quantum_layer(self):
+        from qknee.models.vqc import VQCClassifier
+
+        torch_module = pytest.importorskip("torch")
+        torch_module.manual_seed(0)
+        vqc = VQCClassifier(n_qubits=4, n_layers=1)
+
+        angles = np.zeros((1, 4), dtype=np.float32)
+        expvals = analysis_app.get_pauli_z_expectations(vqc, angles)
+
+        assert expvals is not None
+        assert expvals.shape == (4,)
+        assert np.all(expvals >= -1.0 - 1e-6) and np.all(expvals <= 1.0 + 1e-6)
+
+    def test_run_volumetric_gradcam_mock_ranks_top_k_by_magnitude(self):
+        volume = np.random.default_rng(4).integers(0, 255, size=(12, 32, 32), dtype=np.uint8)
+        result = analysis_app.run_volumetric_gradcam_mock(volume, "Axial", max_slices=40, top_k=3)
+
+        assert result.plane == "Axial"
+        assert result.backend == "mock"
+        assert set(result.analyzed_indices) == set(result.heatmaps.keys())
+        assert len(result.top_k_indices) == 3
+        expected = sorted(result.magnitudes, key=lambda i: result.magnitudes[i], reverse=True)[:3]
+        assert result.top_k_indices == expected
+        for heatmap in result.heatmaps.values():
+            assert heatmap.min() >= 0.0 and heatmap.max() <= 1.0 + 1e-6
+
+    def test_run_volumetric_gradcam_mock_respects_max_slices(self):
+        volume = np.random.default_rng(5).integers(0, 255, size=(100, 16, 16), dtype=np.uint8)
+        result = analysis_app.run_volumetric_gradcam_mock(volume, "Axial", max_slices=10, top_k=3)
+        assert len(result.analyzed_indices) <= 10
+
+    def test_volumetric_result_overlay_for_analyzed_slice(self):
+        volume = np.random.default_rng(6).integers(0, 255, size=(6, 32, 32), dtype=np.uint8)
+        result = analysis_app.run_volumetric_gradcam_mock(volume, "Coronal", max_slices=40, top_k=2)
+        display_slice = analysis_app.normalize_uint8(volume[0])
+
+        from qknee.xai.gradcam import COLORMAP_OPTIONS
+
+        overlay = result.overlay_for(0, display_slice, alpha=0.5, colormap=COLORMAP_OPTIONS["jet"])
+        assert overlay is not None
+        assert overlay.shape == (32, 32, 3)
+
+    def test_volumetric_result_overlay_for_unanalyzed_slice_is_none(self):
+        volume = np.random.default_rng(7).integers(0, 255, size=(6, 32, 32), dtype=np.uint8)
+        result = analysis_app.run_volumetric_gradcam_mock(volume, "Coronal", max_slices=40, top_k=2)
+        display_slice = analysis_app.normalize_uint8(volume[0])
+
+        overlay = result.overlay_for(9999, display_slice, alpha=0.5, colormap=6)
+        assert overlay is None
+
+    def test_render_quantum_attribution_panel_none_when_no_expectations(self):
+        assert analysis_app.render_quantum_attribution_panel(None) is None
+
+    def test_render_quantum_attribution_panel_returns_figure(self):
+        expvals = np.array([-0.8, -0.1, 0.3, 0.9], dtype=np.float32)
+        fig = analysis_app.render_quantum_attribution_panel(expvals)
+        assert fig is not None
+
 
 # --------------------------------------------------------------------------- #
 # 2b. dashboard.py pure helpers

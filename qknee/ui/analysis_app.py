@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 
@@ -45,8 +45,23 @@ from qknee.config.logging_config import get_logger
 _config = load_config()
 logger = get_logger(__name__)
 RISK_THRESHOLD = _config.api.tear_risk_threshold
+N_QUBITS = _config.quantum.n_qubits
 
 PLANES = ["Axial", "Coronal", "Sagittal"]
+
+# The two reference planes always shown for anatomical cross-checking
+# alongside whichever plane is primary (task spec names these two
+# specifically, regardless of which plane the main slice explorer is on).
+CROSS_REFERENCE_PLANES = ["Sagittal", "Coronal"]
+
+# Multi-slice Grad-CAM runs one full ResNet18 forward + backward pass per
+# slice — a volume deep enough to matter (dozens to low-hundreds of
+# slices) would otherwise block the UI for a long time on CPU. Volumes
+# with more slices than this along the chosen plane are evenly
+# subsampled down to this many before running Grad-CAM, so the operation
+# stays interactive; `VolumetricAnalysisResult` reports which real volume
+# indices were actually analyzed.
+MAX_VOLUMETRIC_SLICES = 40
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +78,62 @@ class AnalysisResult:
     gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8 pre-blended overlay, or None
     gradcam_heatmap: Optional[np.ndarray] = None  # (h, w) float32 in [0, 1], raw Grad-CAM — lets the
     # UI re-blend at any opacity live (see the opacity slider in `main()`) without re-running inference.
+    pauli_z_expectations: Optional[np.ndarray] = None  # (n_qubits,) in [-1, 1] — the quantum circuit's
+    # own raw per-qubit output, read before the classical Linear+Sigmoid readout collapses it to a
+    # single risk probability. None if the VQC backbone doesn't expose one (see get_pauli_z_expectations).
+
+
+@dataclass
+class VolumetricAnalysisResult:
+    """Multi-slice Grad-CAM over an entire anatomical plane's worth of
+    slices (see `qknee.xai.gradcam.compute_volumetric_gradcam`) — powers
+    the interactive slice explorer's real-time (zero-recompute) heatmap
+    scrubbing and the top-3 high-salience-slice highlighting."""
+
+    plane: str
+    heatmaps: Dict[int, np.ndarray] = field(default_factory=dict)   # slice_index -> (h, w) heatmap in [0, 1]
+    magnitudes: Dict[int, float] = field(default_factory=dict)      # slice_index -> raw salience magnitude
+    top_k_indices: List[int] = field(default_factory=list)          # highest-magnitude slice indices, descending
+    analyzed_indices: List[int] = field(default_factory=list)       # which volume indices were actually analyzed
+    backend: str = "live"                                            # "live" or "mock"
+
+    def overlay_for(
+        self, slice_index: int, display_slice: np.ndarray, alpha: float, colormap: int,
+    ) -> Optional[np.ndarray]:
+        """Blends this slice's precomputed heatmap onto `display_slice` at
+        any `alpha`/`colormap` — a resize + colormap + `cv2.addWeighted`,
+        effectively free, so scrubbing the slice slider or dragging the
+        alpha/colormap controls after this result has been computed never
+        re-runs inference. Returns `None` if `slice_index` wasn't analyzed."""
+        heatmap = self.heatmaps.get(slice_index)
+        if heatmap is None:
+            return None
+        from qknee.xai.gradcam import overlay_heatmap
+
+        return overlay_heatmap(heatmap, display_slice, alpha=alpha, colormap=colormap)
+
+
+def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[np.ndarray]:
+    """Raw per-qubit Pauli-Z expectation values in `[-1, 1]` — the 4-qubit
+    circuit's own measurement output, read directly from `vqc_model`'s
+    `quantum_layer` before the classical `Linear(n_qubits, 1)` + sigmoid
+    readout collapses it into a single risk probability. This is what the
+    Quantum State Attribution panel plots.
+
+    Returns `None` (rather than guessing) if `vqc_model` doesn't expose a
+    `.quantum_layer` attribute — e.g. a custom ansatz that doesn't follow
+    `VQCClassifier`'s structure.
+    """
+    quantum_layer = getattr(vqc_model, "quantum_layer", None)
+    if quantum_layer is None:
+        return None
+
+    import torch
+
+    with torch.no_grad():
+        angles_tensor = torch.from_numpy(np.asarray(quantum_angles)).float()
+        expvals = quantum_layer(angles_tensor)
+    return expvals.detach().cpu().numpy().reshape(-1)
 
 
 # --------------------------------------------------------------------------- #
@@ -127,6 +198,7 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     quantum_latency_ms = (t2 - t1) * 1000
     total_latency_ms = (t2 - t0) * 1000
     label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
+    pauli_z_expectations = get_pauli_z_expectations(runner.vqc, quantum_angles)
 
     return AnalysisResult(
         risk_score=risk_score,
@@ -136,6 +208,7 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         backend="live",
         gradcam_overlay=gradcam_overlay,
         gradcam_heatmap=gradcam_heatmap,
+        pauli_z_expectations=pauli_z_expectations,
     )
 
 
@@ -153,6 +226,7 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
     risk_score = float(rng.uniform(0.05, 0.95))
     label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
     heatmap = _mock_gradcam_heatmap(slice_2d)
+    pauli_z_expectations = rng.uniform(-1.0, 1.0, size=N_QUBITS).astype(np.float32)
 
     return AnalysisResult(
         risk_score=risk_score,
@@ -162,6 +236,7 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
         backend="mock",
         gradcam_overlay=overlay_heatmap(heatmap, slice_2d),
         gradcam_heatmap=heatmap,
+        pauli_z_expectations=pauli_z_expectations,
     )
 
 
@@ -170,6 +245,128 @@ def run_analysis(slice_2d: np.ndarray) -> AnalysisResult:
     if runner is not None:
         return run_live_analysis(runner, slice_2d)
     return run_mock_analysis(slice_2d)
+
+
+# --------------------------------------------------------------------------- #
+# Multi-slice (volumetric) Grad-CAM
+# --------------------------------------------------------------------------- #
+
+def _subsampled_indices(num_slices: int, max_slices: int) -> List[int]:
+    """Evenly-spaced indices covering `[0, num_slices)`, capped at
+    `max_slices` — keeps `run_volumetric_gradcam_live` interactive on a
+    deep volume by analyzing a representative subset rather than every
+    slice."""
+    if num_slices <= max_slices:
+        return list(range(num_slices))
+    return sorted(set(np.linspace(0, num_slices - 1, num=max_slices, dtype=int).tolist()))
+
+
+def _risk_target_fn_for(runner):
+    """Builds a Grad-CAM `target_fn` that continues the forward pass from
+    a ResNet embedding through `runner`'s dimensionality-reduction stage
+    (PCA or the quantum autoencoder) and its VQC to the scalar predicted
+    risk probability — mirrors `PipelineRunner`'s own internal
+    `_risk_target_fn` (used by `PipelineRunner.explain()`) so a
+    multi-slice heatmap explains the same risk score the single-slice
+    Grad-CAM path does, just built here from `runner`'s public
+    `pca_layer`/`quantum_autoencoder`/`vqc` attributes so this UI module
+    doesn't need to reach into PipelineRunner's private API."""
+    def risk_target(resnet_output):
+        if runner.encoder_type == "pca":
+            angles = runner.pca_layer(resnet_output)
+        else:
+            angles = runner.quantum_autoencoder.compress(resnet_output)
+        risk = runner.vqc(angles)
+        return risk.squeeze()
+
+    return risk_target
+
+
+def run_volumetric_gradcam_live(
+    runner, volume: np.ndarray, plane: str, max_slices: int = MAX_VOLUMETRIC_SLICES, top_k: int = 3,
+) -> VolumetricAnalysisResult:
+    """Runs real Grad-CAM independently across every slice (or an evenly
+    subsampled subset, if the volume is deep — see `_subsampled_indices`)
+    of `volume` along `plane`, via `qknee.xai.gradcam.compute_volumetric_gradcam`.
+
+    Each slice is explained against the same risk-score target
+    (`_risk_target_fn_for`), so the resulting per-slice heatmaps and
+    salience ranking are directly comparable to each other and to the
+    single-slice Grad-CAM panel driven by `run_live_analysis`.
+    """
+    from qknee.data.ingestion import MultiPlaneViewSelector
+    from qknee.xai.gradcam import compute_volumetric_gradcam
+
+    selector = MultiPlaneViewSelector(volume)
+    num_slices = selector.num_slices(plane.lower())
+    indices = _subsampled_indices(num_slices, max_slices)
+
+    slice_tensors = []
+    for index in indices:
+        raw_slice = selector.get_slice(plane.lower(), index)
+        batch = runner.ingest(raw_slice)   # (1, S, 3, 224, 224)
+        slice_tensors.append(batch[:, 0])  # (1, 3, 224, 224) — the ingested representative slice
+
+    result = compute_volumetric_gradcam(
+        model=runner.feature_extractor,
+        target_layer=runner.gradcam_target_layer,
+        slice_tensors=slice_tensors,
+        slice_indices=indices,
+        target_fn=_risk_target_fn_for(runner),
+        top_k=top_k,
+    )
+
+    return VolumetricAnalysisResult(
+        plane=plane,
+        heatmaps={s.slice_index: s.heatmap for s in result.saliencies},
+        magnitudes={s.slice_index: s.magnitude for s in result.saliencies},
+        top_k_indices=result.top_k_indices,
+        analyzed_indices=indices,
+        backend="live",
+    )
+
+
+def run_volumetric_gradcam_mock(
+    volume: np.ndarray, plane: str, max_slices: int = MAX_VOLUMETRIC_SLICES, top_k: int = 3,
+) -> VolumetricAnalysisResult:
+    """Torch-free stand-in for `run_volumetric_gradcam_live`, used when no
+    trained backend is available — a per-slice radial-gradient heatmap
+    (matching `_mock_gradcam_heatmap`'s single-slice mock) plus a
+    deterministic, content-seeded magnitude per slice, so the multi-slice
+    explorer (including top-3 salience highlighting) is fully exercisable
+    without a live backend."""
+    from qknee.data.ingestion import MultiPlaneViewSelector
+
+    selector = MultiPlaneViewSelector(volume)
+    num_slices = selector.num_slices(plane.lower())
+    indices = _subsampled_indices(num_slices, max_slices)
+
+    heatmaps: Dict[int, np.ndarray] = {}
+    magnitudes: Dict[int, float] = {}
+    for index in indices:
+        raw_slice = selector.get_slice(plane.lower(), index)
+        heatmaps[index] = _mock_gradcam_heatmap(raw_slice)
+        digest = hashlib.sha256(raw_slice.tobytes()).digest()
+        seed = int.from_bytes(digest[:4], "big")
+        magnitudes[index] = float(np.random.default_rng(seed).uniform(0, 1000))
+
+    top_k_indices = sorted(magnitudes, key=lambda i: magnitudes[i], reverse=True)[: max(top_k, 0)]
+
+    return VolumetricAnalysisResult(
+        plane=plane,
+        heatmaps=heatmaps,
+        magnitudes=magnitudes,
+        top_k_indices=top_k_indices,
+        analyzed_indices=indices,
+        backend="mock",
+    )
+
+
+def run_volumetric_gradcam(volume: np.ndarray, plane: str) -> VolumetricAnalysisResult:
+    runner = load_backend()
+    if runner is not None:
+        return run_volumetric_gradcam_live(runner, volume, plane)
+    return run_volumetric_gradcam_mock(volume, plane)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,6 +507,40 @@ def render_prediction_badge(result: AnalysisResult) -> None:
     )
 
 
+def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray]) -> Optional[plt.Figure]:
+    """Quantum State Attribution panel: a bar chart of the 4-qubit
+    circuit's raw per-qubit Pauli-Z expectation values, each in
+    `[-1.0, 1.0]` — the quantum circuit's own measurement output, shown
+    before the classical readout layer collapses it into one risk
+    probability, so a viewer can see how each qubit individually
+    contributed to the decision rather than only the final score.
+
+    Returns `None` (renders nothing) if `pauli_z_expectations` is `None`
+    (the loaded VQC doesn't expose one — see `get_pauli_z_expectations`).
+    """
+    if pauli_z_expectations is None:
+        return None
+
+    n_qubits = len(pauli_z_expectations)
+    fig, ax = plt.subplots(figsize=(4, 2.6))
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor("none")
+
+    colors = ["#2ECC71" if value >= 0 else "#E74C3C" for value in pauli_z_expectations]
+    qubit_labels = [f"q{i}" for i in range(n_qubits)]
+    ax.bar(qubit_labels, pauli_z_expectations, color=colors, edgecolor="none")
+    ax.axhline(0.0, color="#8B949E", linewidth=0.8)
+
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_ylabel("⟨Z⟩", color="#E6EDF3")
+    ax.tick_params(colors="#E6EDF3")
+    for spine in ax.spines.values():
+        spine.set_color("#8B949E")
+
+    fig.tight_layout()
+    return fig
+
+
 # --------------------------------------------------------------------------- #
 # UI
 # --------------------------------------------------------------------------- #
@@ -338,7 +569,7 @@ def render_header() -> None:
     )
 
 
-def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float]:
+def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]:
     st.sidebar.markdown("### 📤 Upload Scan")
     uploaded_files = st.sidebar.file_uploader(
         "DICOM series (.dcm, select/drag multiple files), single DICOM, PNG, JPG, or NumPy volume (.npy)",
@@ -359,13 +590,15 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float]:
         if error:
             st.sidebar.caption(f"Reason: {error}")
 
+    default_colormap, default_alpha = "jet", 0.5
+
     if not uploaded_files:
         st.sidebar.info("Upload a scan to enable plane/slice/contrast controls.")
-        return None, PLANES[0], 0, 1.0
+        return None, PLANES[0], 0, 1.0, default_colormap, default_alpha
 
     volume = load_scan(uploaded_files)
     if volume is None:
-        return None, PLANES[0], 0, 1.0
+        return None, PLANES[0], 0, 1.0, default_colormap, default_alpha
 
     display_name = (
         f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
@@ -391,12 +624,54 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float]:
 
     contrast = st.sidebar.slider("Contrast", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
 
-    return volume, plane, slice_index, contrast
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🎨 Grad-CAM Display")
+    from qknee.xai.gradcam import COLORMAP_OPTIONS
+
+    colormap_name = st.sidebar.selectbox(
+        "Colormap", list(COLORMAP_OPTIONS.keys()), index=list(COLORMAP_OPTIONS.keys()).index(default_colormap),
+        help="Color scheme used to render the Grad-CAM heatmap.",
+    )
+    alpha = st.sidebar.slider(
+        "Heatmap Alpha", min_value=0.1, max_value=0.9, value=default_alpha, step=0.05,
+        help="Blend weight of the heatmap over the MRI slice (0.1 = mostly slice, 0.9 = mostly heatmap).",
+    )
+
+    return volume, plane, slice_index, contrast, colormap_name, alpha
+
+
+def render_cross_reference_panel(volume: np.ndarray, contrast: float, primary_plane: str) -> None:
+    """Dual-plane anatomical cross-referencing: Sagittal + Coronal
+    thumbnails, each independently scrubbable (their own slider, keyed so
+    Streamlit persists each plane's position across reruns), so a viewer
+    can confirm the primary view's anatomical location on the two
+    complementary planes. Always shows both, regardless of which plane is
+    currently primary."""
+    from qknee.data.ingestion import MultiPlaneViewSelector
+
+    selector = MultiPlaneViewSelector(volume)
+    st.markdown("#### 🧭 Dual-Plane Cross-Reference")
+    columns = st.columns(len(CROSS_REFERENCE_PLANES))
+    for column, ref_plane in zip(columns, CROSS_REFERENCE_PLANES):
+        with column:
+            ref_max_index = selector.num_slices(ref_plane.lower()) - 1
+            is_primary = ref_plane == primary_plane
+            label = f"{ref_plane} slice" + (" (primary view)" if is_primary else "")
+            if ref_max_index > 0:
+                ref_index = st.slider(
+                    label, 0, ref_max_index, ref_max_index // 2, key=f"crossref_slice_{ref_plane}",
+                )
+            else:
+                ref_index = 0
+                st.caption(f"{label}: single slice.")
+            ref_slice = selector.get_slice(ref_plane.lower(), ref_index)
+            ref_display = apply_contrast(normalize_uint8(ref_slice), contrast)
+            st.image(ref_display, use_container_width=True, clamp=True, caption=f"{ref_plane} — {ref_index + 1}/{ref_max_index + 1}")
 
 
 def main() -> None:
     render_header()
-    volume, plane, slice_index, contrast = render_sidebar()
+    volume, plane, slice_index, contrast, colormap_name, alpha = render_sidebar()
 
     if volume is None:
         st.info("👈 Upload a `.png`, `.jpg`, `.npy`, or `.dcm` scan (drag & drop supported) "
@@ -404,19 +679,60 @@ def main() -> None:
         return
 
     from qknee.data.ingestion import MultiPlaneViewSelector
+    from qknee.xai.gradcam import COLORMAP_OPTIONS
+
+    colormap_value = COLORMAP_OPTIONS[colormap_name]
 
     selector = MultiPlaneViewSelector(volume)
     max_index = selector.num_slices(plane.lower()) - 1
     raw_slice = selector.get_slice(plane.lower(), slice_index)
     display_slice = apply_contrast(normalize_uint8(raw_slice), contrast)
 
+    result_key = "last_analysis_result"
+    volumetric_key = "last_volumetric_result"
+
+    st.markdown("#### 🧠 Multi-Slice Grad-CAM (full volume)")
+    vol_col1, vol_col2 = st.columns([1, 2])
+    with vol_col1:
+        run_volumetric_clicked = st.button(
+            "Run Volumetric Grad-CAM Analysis", use_container_width=True,
+            help=f"Runs Grad-CAM independently on every slice of the {plane} plane "
+                 f"(subsampled to at most {MAX_VOLUMETRIC_SLICES} slices for a deep volume) "
+                 "and ranks them by salience — enables instant heatmap scrubbing below.",
+        )
+        if run_volumetric_clicked:
+            with st.spinner(f"Running Grad-CAM across the {plane} volume..."):
+                st.session_state[volumetric_key] = run_volumetric_gradcam(volume, plane)
+
+    volumetric_result: Optional[VolumetricAnalysisResult] = st.session_state.get(volumetric_key)
+    volumetric_active = volumetric_result is not None and volumetric_result.plane == plane
+
+    with vol_col2:
+        if volumetric_result is None:
+            st.caption("Not yet run for this volume — click the button to analyze every slice.")
+        elif not volumetric_active:
+            st.caption(
+                f"Cached result is for the **{volumetric_result.plane}** plane; "
+                f"re-run for **{plane}** to enable synced scrubbing/top-3 highlighting here."
+            )
+        else:
+            top3 = ", ".join(f"#{i + 1}" for i in volumetric_result.top_k_indices)
+            st.caption(
+                f"Analyzed {len(volumetric_result.analyzed_indices)} slice(s) of the {plane} plane "
+                f"({volumetric_result.backend} backend). Top-3 high-salience slices: {top3 or '—'}."
+            )
+            if slice_index in volumetric_result.top_k_indices:
+                rank = volumetric_result.top_k_indices.index(slice_index) + 1
+                st.success(f"⭐ Slice {slice_index + 1} is a top-{rank} high-salience slice.")
+
     image_col, gradcam_col, action_col = st.columns([1, 1, 1.2])
 
     with image_col:
         st.markdown(f"#### {plane} View — Slice {slice_index + 1} / {max_index + 1}")
         st.image(display_slice, use_container_width=True, clamp=True)
-
-    result_key = "last_analysis_result"
+        if volumetric_active and volumetric_result.top_k_indices:
+            jump_labels = [f"Slice {i + 1}" for i in volumetric_result.top_k_indices]
+            st.caption("Jump to a high-salience slice using the sidebar's Slice control: " + ", ".join(jump_labels))
 
     with action_col:
         st.markdown("#### Run Analysis")
@@ -441,22 +757,28 @@ def main() -> None:
     with gradcam_col:
         st.markdown("#### Grad-CAM")
         result = st.session_state.get(result_key)
-        if result is None:
-            st.info("Run the analysis to generate a Grad-CAM overlay.")
-        elif result.gradcam_heatmap is not None:
-            # Live opacity re-blend: overlay_heatmap is just a resize +
-            # colormap + cv2.addWeighted, so re-blending on every slider
-            # drag is effectively free — no re-inference required.
+
+        # Real-time synchronized overlay: prefer the volumetric result's
+        # precomputed per-slice heatmap for the currently-scrubbed slice
+        # (zero-recompute — just a resize + colormap + blend) over the
+        # single-slice `result`, so dragging the sidebar's Slice control
+        # instantly updates the heatmap once a volumetric run exists.
+        volumetric_overlay = (
+            volumetric_result.overlay_for(slice_index, display_slice, alpha=alpha, colormap=colormap_value)
+            if volumetric_active else None
+        )
+
+        if volumetric_overlay is not None:
+            st.image(
+                volumetric_overlay, channels="BGR", use_container_width=True,
+                caption=f"Slice {slice_index + 1} — synced from volumetric analysis ({colormap_name}, α={alpha:.2f})",
+            )
+        elif result is not None and result.gradcam_heatmap is not None:
             from qknee.xai.gradcam import overlay_heatmap
 
-            opacity = st.slider(
-                "Heatmap Opacity", min_value=0.0, max_value=1.0,
-                value=float(_config.gradcam.alpha), step=0.05,
-                help="Blends the raw Grad-CAM heatmap onto the slice live.",
-            )
-            overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=opacity)
+            overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=alpha, colormap=colormap_value)
             st.image(overlay, channels="BGR", use_container_width=True, caption="Regions driving the risk prediction")
-        elif result.gradcam_overlay is not None:
+        elif result is not None and result.gradcam_overlay is not None:
             st.image(
                 result.gradcam_overlay,
                 channels="BGR",
@@ -464,7 +786,24 @@ def main() -> None:
                 caption="Regions driving the risk prediction",
             )
         else:
-            st.info("Grad-CAM overlay unavailable for this slice.")
+            st.info("Run the single-slice or volumetric analysis to generate a Grad-CAM overlay.")
+
+    st.markdown("---")
+    attribution_col, crossref_col = st.columns([1, 2])
+    with attribution_col:
+        st.markdown("#### ⚛️ Quantum State Attribution")
+        result = st.session_state.get(result_key)
+        pauli_z = result.pauli_z_expectations if result is not None else None
+        fig = render_quantum_attribution_panel(pauli_z)
+        if fig is not None:
+            st.pyplot(fig, use_container_width=True)
+            st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩, read directly from the quantum circuit "
+                       "before the classical readout layer.")
+        else:
+            st.info("Run **Q-Knee Analysis** to display this slice's per-qubit ⟨Z⟩ expectation values.")
+
+    with crossref_col:
+        render_cross_reference_panel(volume, contrast, primary_plane=plane)
 
     st.markdown("---")
     st.caption(

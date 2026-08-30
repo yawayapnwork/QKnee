@@ -31,7 +31,8 @@ dependency required).
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -47,6 +48,15 @@ logger = get_logger(__name__)
 _config = load_config()
 
 TargetFn = Callable[[torch.Tensor], torch.Tensor]
+
+# Colormap options for `overlay_heatmap`'s `colormap` argument — a single
+# source of truth so the UI layer (`qknee.ui.analysis_app`'s colormap
+# toggle) doesn't hardcode OpenCV constants of its own.
+COLORMAP_OPTIONS: Dict[str, int] = {
+    "jet": cv2.COLORMAP_JET,
+    "inferno": cv2.COLORMAP_INFERNO,
+    "magma": cv2.COLORMAP_MAGMA,
+}
 
 
 class GradCAM:
@@ -83,7 +93,12 @@ class GradCAM:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.remove_hooks()
 
-    def generate(self, input_tensor: torch.Tensor, target_fn: Optional[TargetFn] = None) -> np.ndarray:
+    def generate(
+        self,
+        input_tensor: torch.Tensor,
+        target_fn: Optional[TargetFn] = None,
+        return_raw_magnitude: bool = False,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, float]]:
         """Runs a forward + backward pass and produces the Grad-CAM heatmap.
 
         Args:
@@ -97,12 +112,21 @@ class GradCAM:
                 else raises a `ValueError` naming the offending shape rather
                 than failing inside `.backward()`. Defaults to the squared
                 L2 norm of the output (embedding-energy Grad-CAM) when omitted.
+            return_raw_magnitude: If True, also returns this call's raw
+                (pre-[0,1]-normalization) Grad-CAM activation mass — see
+                `compute_volumetric_gradcam` for why that's the right
+                quantity to rank multiple slices' salience by, unlike the
+                normalized heatmap below (which always spans exactly
+                [0, 1] regardless of the underlying signal's real strength,
+                so it can't distinguish a weakly- from a strongly-activated
+                slice).
 
         Returns:
             (H, W) numpy array, normalized to [0, 1], at the target layer's
             native spatial resolution (typically 7x7 for ResNet18 layer4 on
             a 224x224 input) — call `overlay_heatmap` to resize + blend it
-            onto the original image.
+            onto the original image. If `return_raw_magnitude=True`,
+            returns `(heatmap, raw_magnitude)` instead.
         """
         if input_tensor.shape[0] != 1:
             raise ValueError(f"GradCAM.generate expects batch size 1, got {input_tensor.shape[0]}")
@@ -135,13 +159,18 @@ class GradCAM:
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)  # (1, C, 1, 1)
         cam = F.relu((weights * self.activations).sum(dim=1)).squeeze(0)  # (H, W)
 
+        raw_magnitude = float(cam.sum().item())  # pre-normalization salience mass, for cross-slice ranking
+
         cam_min, cam_max = cam.min(), cam.max()
         if (cam_max - cam_min).item() > 1e-8:
             cam = (cam - cam_min) / (cam_max - cam_min)
         else:
             cam = torch.zeros_like(cam)
 
-        return cam.cpu().numpy()
+        heatmap = cam.cpu().numpy()
+        if return_raw_magnitude:
+            return heatmap, raw_magnitude
+        return heatmap
 
 
 def overlay_heatmap(
@@ -180,6 +209,119 @@ def overlay_heatmap(
     color_heatmap = cv2.applyColorMap(heatmap_uint8, colormap)
 
     return cv2.addWeighted(color_heatmap, alpha, original_bgr, 1 - alpha, 0)
+
+
+@dataclass(frozen=True)
+class SliceSaliency:
+    """One slice's Grad-CAM result within a `VolumetricGradCAMResult`."""
+
+    slice_index: int
+    heatmap: np.ndarray  # (h, w) in [0, 1], native target-layer resolution
+    magnitude: float     # raw, pre-normalization Grad-CAM activation mass — this slice's salience score
+
+
+@dataclass(frozen=True)
+class VolumetricGradCAMResult:
+    """Per-slice Grad-CAM heatmaps for an entire volume (one anatomical
+    plane's worth of slices), plus a salience-based ranking across them —
+    see `compute_volumetric_gradcam`."""
+
+    saliencies: List[SliceSaliency] = field(default_factory=list)  # one per input slice, in input order
+    top_k_indices: List[int] = field(default_factory=list)         # highest-magnitude slice_indexes, descending
+
+    def heatmap_for(self, slice_index: int) -> Optional[np.ndarray]:
+        """Returns that slice's `(h, w)` `[0, 1]` heatmap, or `None` if
+        `slice_index` wasn't included in this result (e.g. it was skipped
+        by `compute_volumetric_gradcam`'s `max_slices` subsampling)."""
+        for saliency in self.saliencies:
+            if saliency.slice_index == slice_index:
+                return saliency.heatmap
+        return None
+
+    def magnitude_for(self, slice_index: int) -> Optional[float]:
+        for saliency in self.saliencies:
+            if saliency.slice_index == slice_index:
+                return saliency.magnitude
+        return None
+
+
+def compute_volumetric_gradcam(
+    model: nn.Module,
+    target_layer: nn.Module,
+    slice_tensors: Sequence[torch.Tensor],
+    slice_indices: Optional[Sequence[int]] = None,
+    target_fn: Optional[TargetFn] = None,
+    top_k: int = 3,
+) -> VolumetricGradCAMResult:
+    """Runs Grad-CAM independently on every slice of a 3D MRI volume
+    sequence (rather than just the central slice) and ranks all slices by
+    salience, so the highest-salience ones can be surfaced automatically.
+
+    Grad-CAM's per-channel importance weights are a global-average-pool of
+    *that one sample's own* gradients, so slices must be processed one at
+    a time — stacking them into a single batched forward/backward pass
+    would average gradients across slices instead of explaining each one
+    on its own, which is not what a per-slice heatmap is supposed to show.
+
+    Ranking uses each slice's raw (pre-[0,1]-normalization) Grad-CAM
+    activation mass — the summed, ReLU'd, gradient-weighted activation
+    map before it's rescaled to span exactly [0, 1] — as a real per-slice
+    salience magnitude (this is the Grad-CAM activation mass, not the
+    Integrated Gradients (Sundararajan et al. 2017) attribution method;
+    the two are different techniques, so this is described here plainly
+    rather than mislabeled). Comparing already-normalized [0, 1] heatmaps
+    across slices wouldn't work for this: every slice's heatmap gets
+    rescaled to the same [0, 1] range regardless of how strong its
+    underlying signal actually was, so two heatmaps that look equally
+    "hot" after normalization can come from very different real
+    activation strengths — only the pre-normalization magnitude preserves
+    that difference.
+
+    Args:
+        model, target_layer: passed straight through to `GradCAM` for
+            every slice (one shared hook registration, reused across all
+            slices, rather than one per slice).
+        slice_tensors: One `(1, 3, 224, 224)` tensor per slice.
+        slice_indices: The volume-index each entry of `slice_tensors`
+            corresponds to (e.g. depth indices into the source volume);
+            defaults to `range(len(slice_tensors))` when omitted — set
+            this explicitly when `slice_tensors` is a subsampled subset of
+            a larger volume, so `top_k_indices`/`heatmap_for` report real
+            volume indices rather than positions within the subsample.
+        target_fn: Same as `GradCAM.generate`'s `target_fn` — applied
+            identically to every slice, so all slices are explained
+            against the same prediction target.
+        top_k: How many of the highest-magnitude slices to report in
+            `top_k_indices`. Clamped to `len(slice_tensors)`.
+
+    Returns:
+        A `VolumetricGradCAMResult` with one `SliceSaliency` per input
+        slice (in input order) and the `top_k` highest-magnitude slice
+        indices, descending by magnitude.
+    """
+    if slice_indices is None:
+        slice_indices = range(len(slice_tensors))
+    slice_indices = list(slice_indices)
+    if len(slice_indices) != len(slice_tensors):
+        raise ValueError(
+            f"slice_indices has {len(slice_indices)} entries but slice_tensors has "
+            f"{len(slice_tensors)}; they must be the same length."
+        )
+
+    saliencies: List[SliceSaliency] = []
+    with GradCAM(model, target_layer) as cam:
+        for slice_index, slice_tensor in zip(slice_indices, slice_tensors):
+            heatmap, magnitude = cam.generate(slice_tensor, target_fn=target_fn, return_raw_magnitude=True)
+            saliencies.append(SliceSaliency(slice_index=slice_index, heatmap=heatmap, magnitude=magnitude))
+
+    ranked = sorted(saliencies, key=lambda s: s.magnitude, reverse=True)
+    top_k_indices = [s.slice_index for s in ranked[: max(top_k, 0)]]
+
+    logger.info(
+        "compute_volumetric_gradcam: %d slice(s), top-%d by salience magnitude: %s",
+        len(saliencies), top_k, top_k_indices,
+    )
+    return VolumetricGradCAMResult(saliencies=saliencies, top_k_indices=top_k_indices)
 
 
 def get_default_target_layer(extractor: ResNet18FeatureExtractor) -> nn.Module:
