@@ -13,6 +13,7 @@ overlay/compositing helpers. Covers:
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -21,6 +22,12 @@ from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.xai.gradcam import GradCAM, get_default_target_layer, overlay_heatmap
 
 pytestmark = [pytest.mark.slow]
+
+# Every tensor/array in this module stays on CPU throughout (no `.cuda()`
+# call anywhere in this file or in `qknee.xai.gradcam`/
+# `qknee.models.resnet_extractor`) — Grad-CAM here never depends on CUDA
+# being installed or a GPU being present, so this whole suite runs
+# identically on a CPU-only CI runner.
 
 
 @pytest.fixture
@@ -176,3 +183,76 @@ class TestGetDefaultTargetLayer:
     def test_returns_second_to_last_backbone_child(self, resnet_extractor: ResNet18FeatureExtractor):
         layer = get_default_target_layer(resnet_extractor)
         assert layer is resnet_extractor.backbone[-2]
+
+
+# --------------------------------------------------------------------------- #
+# 5. Spatial dimensions (128x128) + [0, 1] normalization, CPU-only
+# --------------------------------------------------------------------------- #
+
+class TestSpatialDimensions128:
+    """`GradCAM.generate()` returns the heatmap at its target layer's
+    native spatial resolution (not a fixed size); resizing to a specific
+    output resolution — 128x128 here — is `overlay_heatmap`'s job. These
+    tests exercise the full path: a 128x128 input image all the way
+    through to a 128x128-sized, [0, 1]-normalized-before-colorization
+    heatmap, entirely on CPU.
+    """
+
+    @pytest.fixture
+    def input_128(self) -> torch.Tensor:
+        generator = torch.Generator().manual_seed(0)
+        return torch.rand(1, 3, 128, 128, generator=generator)
+
+    def test_raw_heatmap_is_in_unit_range(
+        self, resnet_extractor: ResNet18FeatureExtractor, target_layer, input_128: torch.Tensor
+    ):
+        assert input_128.device.type == "cpu"
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            heatmap = cam.generate(input_128)
+
+        assert heatmap.ndim == 2
+        assert heatmap.min() >= 0.0 and heatmap.max() <= 1.0 + 1e-6
+
+    def test_resizing_raw_heatmap_to_128x128_preserves_unit_range(
+        self, resnet_extractor: ResNet18FeatureExtractor, target_layer, input_128: torch.Tensor
+    ):
+        """Bilinear resizing is a convex combination of neighboring pixel
+        values, so a heatmap already in [0, 1] must stay in [0, 1] after
+        resizing to any target size — verified here at exactly 128x128."""
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            heatmap = cam.generate(input_128)
+
+        resized = cv2.resize(heatmap, (128, 128), interpolation=cv2.INTER_LINEAR)
+
+        assert resized.shape == (128, 128)
+        assert resized.min() >= -1e-6 and resized.max() <= 1.0 + 1e-6
+        assert np.all(np.isfinite(resized))
+
+    def test_overlay_on_128x128_slice_produces_128x128x3_output(
+        self, resnet_extractor: ResNet18FeatureExtractor, target_layer, input_128: torch.Tensor
+    ):
+        slice_128 = np.random.default_rng(1).integers(0, 255, size=(128, 128), dtype=np.uint8)
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            heatmap = cam.generate(input_128)
+
+        overlay = overlay_heatmap(heatmap, slice_128)
+
+        assert overlay.shape == (128, 128, 3)
+        assert overlay.dtype == np.uint8
+
+    def test_overlay_resizes_a_differently_sized_raw_heatmap_to_128x128(
+        self, resnet_extractor: ResNet18FeatureExtractor, target_layer
+    ):
+        """Also cover the more common real case: a 224x224 input (the
+        pipeline's native resolution, giving a 7x7 raw heatmap) displayed
+        on a 128x128 slice — `overlay_heatmap` must resize to match the
+        *display* image, not the raw heatmap's own native resolution."""
+        input_224 = torch.rand(1, 3, 224, 224)
+        slice_128 = np.random.default_rng(2).integers(0, 255, size=(128, 128), dtype=np.uint8)
+
+        with GradCAM(resnet_extractor, target_layer) as cam:
+            heatmap = cam.generate(input_224)
+        assert heatmap.shape != (128, 128)  # sanity: genuinely a resize, not a no-op
+
+        overlay = overlay_heatmap(heatmap, slice_128)
+        assert overlay.shape == (128, 128, 3)

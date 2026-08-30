@@ -12,6 +12,10 @@ Endpoints:
     POST /predict  - accepts a DICOM (.dcm/.dicom) or NumPy (.npy) MRI
                      slice/volume upload, returns risk score, diagnosis, and
                      a base64-encoded Grad-CAM heatmap overlay (PNG).
+    POST /explain  - same upload contract as /predict, but returns just the
+                     explainability payload (Grad-CAM heatmap + risk score
+                     for context) — for a caller that only needs the visual
+                     explanation, not the full diagnosis response.
 """
 
 from __future__ import annotations
@@ -55,6 +59,12 @@ class HealthResponse(BaseModel):
     status: str
     backend_ready: bool
     detail: Optional[str] = None
+
+
+class ExplanationResponse(BaseModel):
+    gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
+    risk_score: float = Field(..., ge=0.0, le=1.0, description="Predicted tear risk probability, in [0, 1] — provided for context alongside the heatmap.")
+    backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
 
 
 # --------------------------------------------------------------------------- #
@@ -278,6 +288,26 @@ async def predict(file: UploadFile = File(..., description="DICOM (.dcm/.dicom) 
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     return backend.predict(raw_bytes, file.filename or "upload")
+
+
+@app.post("/explain", response_model=ExplanationResponse, tags=["Inference"])
+async def explain(file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume")) -> ExplanationResponse:
+    """Runs one MRI slice (or the middle slice of a volume) through the
+    Q-Knee pipeline and returns just its Grad-CAM explainability heatmap
+    (plus the risk score for context) — the explanation-focused
+    counterpart to /predict. Shares /predict's exact upload contract, file
+    parsing, and error handling (delegates to the same `QKneeBackend.predict`
+    call), so a client can point either endpoint at the same file."""
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    prediction = backend.predict(raw_bytes, file.filename or "upload")
+    return ExplanationResponse(
+        gradcam_heatmap=prediction.gradcam_heatmap,
+        risk_score=prediction.risk_score,
+        backend=prediction.backend,
+    )
 
 
 if __name__ == "__main__":

@@ -2,12 +2,16 @@
 Tests for `qknee.api.server` (the FastAPI backend) using FastAPI's
 `TestClient`. Covers:
 
-    1. `/health` and `/predict` payload shape/contents in both live and
-       mock backend modes.
-    2. DICOM upload parsing through the full `/predict` endpoint (not just
-       the internal `_load_dicom_slice` helper).
+    1. `/health`, `/predict`, and `/explain` payload shape/contents in both
+       live and mock backend modes.
+    2. DICOM upload parsing through the full `/predict`/`/explain`
+       endpoints (not just the internal `_load_dicom_slice` helper).
     3. Error status codes for invalid payloads: unsupported extensions,
        empty uploads, and corrupted/malformed file contents.
+
+All fixtures build in-memory DICOM/NumPy payloads (`_synthetic_dicom_bytes`/
+`_npy_bytes`) rather than depending on real clinical files on disk, so this
+suite is fully self-contained and deterministic.
 """
 
 from __future__ import annotations
@@ -157,6 +161,97 @@ class TestPredictEndpointPayload:
             files={"file": ("multiframe.npy", _npy_bytes(volume), "application/octet-stream")},
         )
         assert response.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# 1b. /explain payload shape/contents
+# --------------------------------------------------------------------------- #
+
+class TestExplainEndpoint:
+    def test_explain_with_npy_slice_live(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
+        response = live_client.post(
+            "/explain",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert set(payload.keys()) == {"gradcam_heatmap", "risk_score", "backend"}
+        assert 0.0 <= payload["risk_score"] <= 1.0
+        assert payload["backend"] == "live"
+
+        import base64
+        decoded = base64.b64decode(payload["gradcam_heatmap"])
+        assert decoded[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic bytes
+
+    def test_explain_with_npy_slice_mock(self, mock_client: TestClient, dummy_slice_2d: np.ndarray):
+        response = mock_client.post(
+            "/explain",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["backend"] == "mock"
+        assert 0.0 <= payload["risk_score"] <= 1.0
+
+    def test_explain_with_valid_dicom(self, live_client: TestClient):
+        pytest.importorskip("pydicom")
+        rng = np.random.default_rng(14)
+        pixel_array = rng.integers(0, 4000, size=(64, 64)).astype(np.uint16)
+
+        response = live_client.post(
+            "/explain",
+            files={"file": ("slice.dcm", _synthetic_dicom_bytes(pixel_array), "application/dicom")},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert 0.0 <= payload["risk_score"] <= 1.0
+
+    def test_explain_matches_predict_for_the_same_upload(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
+        """/explain shares /predict's exact inference call internally — the
+        heatmap and risk score for the same upload must agree exactly."""
+        predict_response = live_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        explain_response = live_client.post(
+            "/explain",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+
+        assert predict_response.status_code == explain_response.status_code == 200
+        predict_payload = predict_response.json()
+        explain_payload = explain_response.json()
+        assert explain_payload["risk_score"] == predict_payload["risk_score"]
+        assert explain_payload["gradcam_heatmap"] == predict_payload["gradcam_heatmap"]
+        assert explain_payload["backend"] == predict_payload["backend"]
+
+    def test_explain_with_unsupported_extension_returns_415(self, live_client: TestClient):
+        response = live_client.post(
+            "/explain",
+            files={"file": ("scan.txt", b"hello world", "text/plain")},
+        )
+        assert response.status_code == 415
+
+    def test_explain_with_empty_file_returns_400(self, live_client: TestClient):
+        response = live_client.post(
+            "/explain",
+            files={"file": ("empty.npy", b"", "application/octet-stream")},
+        )
+        assert response.status_code == 400
+
+    def test_explain_with_corrupted_npy_returns_422(self, live_client: TestClient):
+        response = live_client.post(
+            "/explain",
+            files={"file": ("broken.npy", b"this is not a numpy file", "application/octet-stream")},
+        )
+        assert response.status_code == 422
+
+    def test_explain_with_no_file_field_returns_422(self, live_client: TestClient):
+        response = live_client.post("/explain")
+        assert response.status_code == 422
 
 
 # --------------------------------------------------------------------------- #
