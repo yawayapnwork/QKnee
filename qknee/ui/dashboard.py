@@ -473,8 +473,9 @@ def render_latency_metrics(result: InferenceResult) -> None:
 
 
 def render_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
-    """Renders a 'Download PDF Report' button compiling the current slice,
-    Grad-CAM overlay, and ACL/meniscus risk scores into a radiology-style
+    """Renders a 'Download Radiology PDF Report' button, in the summary
+    (Tear Risk Assessment) panel, compiling the current slice, Grad-CAM
+    overlay, and ACL/meniscus risk scores into a one-page radiology-style
     PDF via `qknee.xai.report_generator`. A failed generation degrades to
     a warning rather than crashing the dashboard."""
     from qknee.xai.report_generator import generate_radiology_report
@@ -506,7 +507,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
         return
 
     st.download_button(
-        label="📄 Download PDF Report",
+        label="📄 Download Radiology PDF Report",
         data=pdf_bytes,
         file_name=f"qknee_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
@@ -594,9 +595,8 @@ def main() -> None:
         render_risk_gauge("Meniscus", result.meniscus_risk)
         st.markdown("---")
         render_latency_metrics(result)
-
-    st.markdown("---")
-    render_report_download(display_slice, result)
+        st.markdown("---")
+        render_report_download(display_slice, result)
 
     st.markdown("---")
     st.caption(

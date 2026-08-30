@@ -99,7 +99,7 @@ class DataIngestion:
                 message naming the offending file and format.
         """
         if isinstance(source, (list, tuple)):
-            return self._load_dicom_series(source)
+            return self.load_dicom_series(source)
 
         if isinstance(source, np.ndarray):
             return np.asarray(source)
@@ -111,12 +111,7 @@ class DataIngestion:
             path = Path(source)
 
             if path.is_dir():
-                dicom_files = sorted(
-                    p for p in path.iterdir() if p.is_file() and p.suffix.lower() in DICOM_EXTENSIONS
-                )
-                if not dicom_files:
-                    raise IngestionError(f"No .dcm/.dicom files found in directory {path}")
-                return self._load_dicom_series(dicom_files)
+                return self.load_dicom_series(path)
 
             if not path.exists():
                 raise IngestionError(f"Input file does not exist: {path}")
@@ -225,17 +220,56 @@ class DataIngestion:
         except Exception as exc:
             raise IngestionError(f"Failed to decode pixel data in '{display_name}': {exc}") from exc
 
-    def _load_dicom_series(self, file_items: DicomSeriesInput) -> np.ndarray:
-        """Reads a list of single-frame DICOM files/uploads (one series)
-        into one calibrated `(D, H, W)` volume, ordered by `InstanceNumber`
-        (falling back to `SliceLocation`, then upload order) so slices
-        stack in genuine anatomical order rather than upload/filesystem
-        order."""
+    def load_dicom_series(
+        self, directory_path_or_files: Union[str, Path, DicomSeriesInput]
+    ) -> np.ndarray:
+        """Reads a multi-file DICOM series into one calibrated `(D, H, W)`
+        volume, sorted and stacked by `InstanceNumber` (falling back to
+        `SliceLocation`, then input order) so slices stack in genuine
+        anatomical order rather than filesystem/upload order.
+
+        Args:
+            directory_path_or_files: Either
+                - a directory path (`str`/`Path`) containing one
+                  `*.dcm`/`*.dicom` file per slice, or
+                - an explicit list/tuple of DICOM file paths and/or
+                  file-like uploads (e.g. Streamlit `UploadedFile`s) that
+                  together make up one series.
+
+        Returns:
+            `(D, H, W)` array, one calibrated slice per input file.
+
+        Raises:
+            IngestionError: if a directory path has no `.dcm`/`.dicom`
+                files, the file list is empty, a file fails to read/decode,
+                or the series' slices don't share a common `(H, W)` shape.
+        """
+        if isinstance(directory_path_or_files, (str, Path)):
+            directory = Path(directory_path_or_files)
+            if not directory.is_dir():
+                raise IngestionError(
+                    f"'{directory}' is not a directory; pass a directory of DICOM files "
+                    "or a list of DICOM file paths/uploads."
+                )
+            file_items: DicomSeriesInput = sorted(
+                p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in DICOM_EXTENSIONS
+            )
+            if not file_items:
+                raise IngestionError(f"No .dcm/.dicom files found in directory {directory}")
+        else:
+            file_items = list(directory_path_or_files)
+            if not file_items:
+                raise IngestionError("DICOM series input is empty (no .dcm/.dicom files provided).")
+
+        return self._read_and_stack_dicom_series(file_items)
+
+    def _read_and_stack_dicom_series(self, file_items: DicomSeriesInput) -> np.ndarray:
+        """Reads + sorts + stacks an already-resolved list of DICOM
+        files/uploads into one `(D, H, W)` volume. Shared implementation
+        behind `load_dicom_series`."""
         import pydicom
 
         file_items = list(file_items)
-        if not file_items:
-            raise IngestionError("DICOM series input is empty (no .dcm/.dicom files provided).")
 
         entries: List[tuple] = []
         for index, item in enumerate(file_items):
