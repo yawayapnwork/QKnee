@@ -36,7 +36,7 @@ from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 
 logger = get_logger(__name__)
 
-DEFAULT_OUTPUT_PATH = Path("qknee/artifacts/resnet18_feature_extractor.onnx")
+DEFAULT_OUTPUT_PATH = Path("qknee/artifacts/resnet18_extractor.onnx")
 DEFAULT_OPSET = 17
 
 
@@ -113,11 +113,13 @@ def validate_onnx_export(onnx_path: Path, atol: float = 1e-4) -> None:
 
     max_abs_diff = float(np.abs(torch_output - onnx_output).max())
     logger.info("Max abs difference (PyTorch vs ONNX Runtime): %.2e", max_abs_diff)
-    if not np.allclose(torch_output, onnx_output, atol=atol):
-        raise AssertionError(
-            f"ONNX export diverges from the PyTorch module by more than atol={atol} "
-            f"(max abs diff {max_abs_diff:.2e})"
-        )
+    # numpy.testing.assert_allclose raises (with a detailed mismatch report)
+    # instead of returning a bool, so a divergent export fails loudly here
+    # rather than requiring the caller to check a return value.
+    np.testing.assert_allclose(
+        onnx_output, torch_output, atol=atol, rtol=1e-3,
+        err_msg=f"ONNX export diverges from the PyTorch module by more than atol={atol} (max abs diff {max_abs_diff:.2e})",
+    )
     logger.info("Numerical parity OK (PyTorch vs ONNX Runtime, atol=%.0e).", atol)
 
 

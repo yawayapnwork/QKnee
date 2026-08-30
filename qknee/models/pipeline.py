@@ -41,7 +41,7 @@ from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import PCAProjectionLayer
 from qknee.models.quantum_autoencoder import QuantumAutoencoder
-from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+from qknee.models.resnet_extractor import ONNXFeatureExtractor, ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier
 from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 from qknee.xai.gradcam import GradCAM, TargetFn, get_default_target_layer, overlay_heatmap
@@ -215,13 +215,28 @@ class PipelineRunner:
         # --- Stage 1: ingestion ---
         self.ingestion = DataIngestion(train=False)
 
-        # --- Stage 2: ResNet18 ---
+        # --- Stage 2: ResNet18 (eager PyTorch, or ONNX Runtime per
+        # config.resnet.backend_engine — both expose the same
+        # extract_features()/forward()/__call__ interface, so the rest of
+        # the pipeline (and Grad-CAM's backbone gradient hooks, which only
+        # work with the PyTorch backend) doesn't need to know which is active) ---
         try:
-            self.feature_extractor = ResNet18FeatureExtractor(
-                freeze_backbone=self.config.resnet.freeze_backbone
-            )
-            self.feature_extractor.to(self.device)
+            if self.config.resnet.backend_engine == "onnx":
+                onnx_path = self.config.resnet.onnx_path
+                if not onnx_path.exists():
+                    raise PipelineValidationError(
+                        f"resnet.backend_engine='onnx' but no ONNX model found at {onnx_path}. "
+                        "Export one first via `python scripts/export_onnx.py`."
+                    )
+                self.feature_extractor = ONNXFeatureExtractor(onnx_path=onnx_path)
+            else:
+                self.feature_extractor = ResNet18FeatureExtractor(
+                    freeze_backbone=self.config.resnet.freeze_backbone
+                )
+                self.feature_extractor.to(self.device)
             self.feature_extractor.eval()
+        except PipelineValidationError:
+            raise
         except Exception as exc:
             raise PipelineValidationError(f"Failed to initialize ResNet18 backbone: {exc}") from exc
 
@@ -304,7 +319,14 @@ class PipelineRunner:
         self.vqc.eval()  # standard PyTorch inference mode: disables dropout/BatchNorm updates
 
         # --- Stage 5: Grad-CAM ---
-        self.gradcam_target_layer = get_default_target_layer(self.feature_extractor)
+        # ONNX Runtime is inference-only (no autograd graph to hook), so
+        # Grad-CAM (which backprops through the ResNet backbone) only
+        # works with the "pytorch" backend; explain() raises a clear error
+        # under "onnx" instead of failing deep inside a hook registration.
+        self.gradcam_target_layer = (
+            get_default_target_layer(self.feature_extractor)
+            if self.config.resnet.backend_engine != "onnx" else None
+        )
 
         logger.info(
             "PipelineRunner ready (device=%s, encoder_type=%s, classifier_backbone=%s, n_qubits=%d, n_layers=%d)",
@@ -361,7 +383,7 @@ class PipelineRunner:
         """Stage 2: `(1, S, 3, 224, 224)` batch -> `(1, 512)` ResNet18 embedding."""
         try:
             with torch.no_grad():
-                features = self.feature_extractor(batch.to(self.device))
+                features = self.feature_extractor.extract_features(batch.to(self.device))
         except Exception as exc:
             raise PipelineValidationError(f"[ResNet18] forward pass failed: {exc}") from exc
 
@@ -455,6 +477,12 @@ class PipelineRunner:
         if single_slice_tensor.dim() != 4:
             raise PipelineValidationError(
                 f"[GradCAM] expects a single-slice (1, 3, 224, 224) tensor, got {tuple(single_slice_tensor.shape)}"
+            )
+        if self.gradcam_target_layer is None:
+            raise PipelineValidationError(
+                "[GradCAM] not available with resnet.backend_engine='onnx' (ONNX Runtime is "
+                "inference-only, no autograd graph to backprop through). Build this "
+                "PipelineRunner with backend_engine='pytorch' to use explain()/Grad-CAM."
             )
         resolved_target_fn = target_fn or self._risk_target_fn(vqc)
         try:

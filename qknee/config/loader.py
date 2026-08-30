@@ -26,9 +26,11 @@ import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import yaml
+
+BackendEngine = Literal["pytorch", "onnx"]
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
@@ -83,6 +85,8 @@ class DataConfig:
 class ResNetConfig:
     feature_dim: int
     freeze_backbone: bool
+    backend_engine: BackendEngine  # "pytorch" -> ResNet18FeatureExtractor, "onnx" -> ONNXFeatureExtractor
+    onnx_path: Path                # used only when backend_engine == "onnx"
 
 
 @dataclass(frozen=True)
@@ -220,7 +224,13 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             train_augmentation=augmentation,
         )
 
-        resnet = ResNetConfig(**raw["resnet"])
+        resnet_raw = raw["resnet"]
+        resnet = ResNetConfig(
+            feature_dim=int(resnet_raw["feature_dim"]),
+            freeze_backbone=bool(resnet_raw["freeze_backbone"]),
+            backend_engine=resnet_raw.get("backend_engine", "pytorch"),
+            onnx_path=Path(resnet_raw.get("onnx_path", "qknee/artifacts/resnet18_extractor.onnx")),
+        )
         pca_raw = raw["pca"]
         pca = PCAConfig(
             n_components=int(pca_raw["n_components"]),
@@ -240,6 +250,10 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         raise ConfigError(
             f"pca.n_components ({pca.n_components}) must equal "
             f"quantum.n_qubits ({quantum.n_qubits})"
+        )
+    if resnet.backend_engine not in ("pytorch", "onnx"):
+        raise ConfigError(
+            f"resnet.backend_engine must be 'pytorch' or 'onnx', got {resnet.backend_engine!r}"
         )
 
     return QKneeConfig(

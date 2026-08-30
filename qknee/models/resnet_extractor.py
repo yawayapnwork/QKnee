@@ -126,6 +126,14 @@ class ResNet18FeatureExtractor(nn.Module):
                 f"Expected 4D (B,3,H,W) or 5D (B,S,3,H,W) input, got {x.dim()}D"
             )
 
+    def extract_features(self, batch: torch.Tensor) -> torch.Tensor:
+        """Backend-agnostic alias for `forward`/`__call__` — the interface
+        `PipelineRunner` (and `ONNXFeatureExtractor`) code against so either
+        backend is a plug-and-play swap regardless of which is selected via
+        `config.resnet.backend_engine`. Accepts either a 4D per-slice batch
+        or a 5D per-volume batch (see `forward`)."""
+        return self(batch)
+
 
 class ONNXFeatureExtractor:
     """onnxruntime-accelerated drop-in for `ResNet18FeatureExtractor`'s
@@ -148,6 +156,23 @@ class ONNXFeatureExtractor:
             Defaults to GPU-if-available (`CUDAExecutionProvider`),
             falling back to `CPUExecutionProvider` — pass an explicit list
             to pin one provider regardless of what's installed/available.
+        intra_op_num_threads: Threads used to parallelize *within* a single
+            op (e.g. one conv's matmul) on `CPUExecutionProvider`. Defaults
+            to `os.cpu_count()` — ONNX Runtime's own default is a good
+            general choice, but this backbone is a fixed, always-CPU-bound
+            frozen-inference workload, so pinning it explicitly to all
+            available cores avoids under-using the host in a container with
+            a restrictive default thread count.
+        inter_op_num_threads: Threads used to run independent op subgraphs
+            *in parallel* with each other. Left at 1 (ONNX Runtime's
+            default) since `execution_mode` is sequential below; only
+            relevant if a caller overrides `execution_mode` to parallel.
+        execution_mode: `"sequential"` (default) runs the graph's ops one
+            at a time, each fanning out across `intra_op_num_threads` —
+            the better choice for this backbone, a single linear chain of
+            conv/BN/relu blocks with no independent branches to run
+            concurrently. `"parallel"` is exposed for callers with a
+            different graph shape.
     """
 
     FEATURE_DIM = _config.resnet.feature_dim
@@ -156,7 +181,12 @@ class ONNXFeatureExtractor:
         self,
         onnx_path: Union[str, Path],
         providers: Optional[List[str]] = None,
+        intra_op_num_threads: Optional[int] = None,
+        inter_op_num_threads: int = 1,
+        execution_mode: str = "sequential",
     ) -> None:
+        import os
+
         import onnxruntime as ort
 
         onnx_path = Path(onnx_path)
@@ -171,15 +201,30 @@ class ONNXFeatureExtractor:
             providers = (["CUDAExecutionProvider"] if "CUDAExecutionProvider" in available else [])
             providers.append("CPUExecutionProvider")
 
+        # Optimized CPU thread pooling: pin intra-op parallelism to all
+        # available cores (rather than leaving it at ONNX Runtime's
+        # environment-dependent default) and enable the full graph
+        # optimization level (op fusion, constant folding, layout
+        # optimization), since this is a fixed inference-only graph with
+        # no further training/export step downstream that could need the
+        # unoptimized graph preserved.
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = intra_op_num_threads or (os.cpu_count() or 1)
+        session_options.inter_op_num_threads = inter_op_num_threads
+        session_options.execution_mode = (
+            ort.ExecutionMode.ORT_PARALLEL if execution_mode == "parallel" else ort.ExecutionMode.ORT_SEQUENTIAL
+        )
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
         self.onnx_path = onnx_path
         self.providers = providers
-        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self.session = ort.InferenceSession(str(onnx_path), sess_options=session_options, providers=providers)
         self._input_name = self.session.get_inputs()[0].name
         self._output_name = self.session.get_outputs()[0].name
 
         logger.info(
-            "ONNXFeatureExtractor loaded %s (active provider: %s)",
-            onnx_path, self.session.get_providers()[0],
+            "ONNXFeatureExtractor loaded %s (active provider: %s, intra_op_num_threads=%d)",
+            onnx_path, self.session.get_providers()[0], session_options.intra_op_num_threads,
         )
 
     def forward_slice(self, x: torch.Tensor) -> torch.Tensor:
@@ -233,6 +278,14 @@ class ONNXFeatureExtractor:
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward(x)
+
+    def extract_features(self, batch: torch.Tensor) -> torch.Tensor:
+        """Backend-agnostic alias for `forward`/`__call__` — the interface
+        `PipelineRunner` codes against so `ResNet18FeatureExtractor` and
+        `ONNXFeatureExtractor` are a plug-and-play swap regardless of which
+        is selected via `config.resnet.backend_engine`. Accepts either a 4D
+        per-slice batch or a 5D per-volume batch (see `forward`)."""
+        return self(batch)
 
     def eval(self) -> "ONNXFeatureExtractor":
         """No-op, provided for interface parity with

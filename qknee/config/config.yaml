@@ -31,6 +31,8 @@ data:
 resnet:
   feature_dim: 512
   freeze_backbone: true
+  backend_engine: "pytorch"      # "pytorch" (eager ResNet18FeatureExtractor) or "onnx" (ONNXFeatureExtractor)
+  onnx_path: "qknee/artifacts/resnet18_extractor.onnx"  # used only when backend_engine == "onnx"; see scripts/export_onnx.py
 
 pca:
   n_components: 4
