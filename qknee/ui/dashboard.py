@@ -22,12 +22,13 @@ RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import streamlit as st
@@ -43,6 +44,17 @@ from qknee.config.logging_config import get_logger
 _config = load_config()
 logger = get_logger(__name__)
 
+# Demo Mode / Latency Fallback: precomputed predictions + Grad-CAM heatmaps
+# for a handful of sample cases, built offline by `scripts/build_demo_cache.py`,
+# so live judging never waits on a cold model/QNode.
+DEMO_CACHE_DIR = Path("qknee/artifacts/demo_cache")
+DEMO_CACHE_INDEX_PATH = DEMO_CACHE_DIR / "index.json"
+
+# Quantum-vs-classical comparative benchmark, built offline by
+# `scripts/run_benchmark.py`.
+BENCHMARK_RESULTS_PATH = Path("qknee/artifacts/benchmark_results.json")
+BENCHMARK_ROC_PATH = Path("qknee/artifacts/benchmark_roc_curve.png")
+
 
 @dataclass
 class InferenceResult:
@@ -52,8 +64,11 @@ class InferenceResult:
     pca_latency_ms: float
     quantum_latency_ms: float
     total_latency_ms: float
-    backend: str             # "live", "mock", or "api"
-    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8, or None if generation failed
+    backend: str             # "live", "mock", "api", or "cached/..."
+    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8 pre-blended overlay, or None
+    gradcam_heatmap: Optional[np.ndarray] = None  # (h, w) float32 in [0, 1], raw Grad-CAM — lets the
+    # UI re-blend at any opacity live (see `render_gradcam_panel`) without re-running inference.
+    # None for backends that only ever produce a pre-blended overlay (HTTP API mode).
 
 
 @st.cache_resource(show_spinner=False)
@@ -204,34 +219,33 @@ def _seed_from_slice(slice_2d: np.ndarray) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
-def _mock_gradcam_overlay(slice_2d: np.ndarray) -> np.ndarray:
-    """Cheap, torch-free stand-in Grad-CAM overlay for mock mode (a soft
-    radial gradient blended onto the slice via OpenCV only), so the heatmap
-    panel is exercised in the UI even without a live backend — mirrors
-    `qknee.api.server.QKneeBackend._predict_mock`'s fallback heatmap."""
-    import cv2
-
+def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
+    """Cheap, torch-free stand-in *raw* Grad-CAM heatmap for mock mode (a
+    soft radial gradient), so the heatmap panel — including its live
+    opacity slider — is exercised in the UI even without a live backend.
+    Blended into a displayable overlay via `qknee.xai.gradcam.overlay_heatmap`,
+    the same function the live backend uses, so mock/live share one blending
+    implementation."""
     display = normalize_for_display(slice_2d)
     height, width = display.shape[:2]
     yy, xx = np.mgrid[0:height, 0:width]
     cy, cx = height / 2, width / 2
     radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    fake_heatmap = np.clip(1 - radius / radius.max(), 0, 1)
-
-    gray_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-    heatmap_uint8 = (fake_heatmap * 255).astype(np.uint8)
-    color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    return cv2.addWeighted(color_heatmap, 0.45, gray_bgr, 0.55, 0)
+    return np.clip(1 - radius / radius.max(), 0, 1).astype(np.float32)
 
 
 def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     """Seeded, deterministic mock scores + plausible latency numbers, used
     whenever the real pipeline/model backend isn't available."""
+    from qknee.xai.gradcam import overlay_heatmap
+
     rng = np.random.default_rng(_seed_from_slice(slice_2d))
 
     resnet_ms = float(rng.uniform(18, 35))
     pca_ms = float(rng.uniform(0.5, 2.0))
     quantum_ms = float(rng.uniform(4, 12))
+
+    heatmap = _mock_gradcam_heatmap(slice_2d)
 
     return InferenceResult(
         acl_risk=float(rng.uniform(0.05, 0.95)),
@@ -241,7 +255,8 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
         quantum_latency_ms=quantum_ms,
         total_latency_ms=resnet_ms + pca_ms + quantum_ms,
         backend="mock",
-        gradcam_overlay=_mock_gradcam_overlay(slice_2d),
+        gradcam_overlay=overlay_heatmap(heatmap, slice_2d),
+        gradcam_heatmap=heatmap,
     )
 
 
@@ -266,9 +281,10 @@ def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) 
     t3 = time.perf_counter()
 
     gradcam_overlay: Optional[np.ndarray] = None
+    gradcam_heatmap: Optional[np.ndarray] = None
     try:
-        heatmap = runner.explain(batch[:, 0], vqc=acl_model)
-        gradcam_overlay = overlay_heatmap(heatmap, slice_2d)
+        gradcam_heatmap = runner.explain(batch[:, 0], vqc=acl_model)
+        gradcam_overlay = overlay_heatmap(gradcam_heatmap, slice_2d)
     except Exception as exc:  # noqa: BLE001 - a failed heatmap shouldn't hide the risk scores
         logger.warning("Grad-CAM generation failed; showing risk scores without an overlay: %s", exc)
 
@@ -286,6 +302,7 @@ def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) 
         total_latency_ms=feature_ms + quantum_ms,
         backend="live",
         gradcam_overlay=gradcam_overlay,
+        gradcam_heatmap=gradcam_heatmap,
     )
 
 
@@ -443,16 +460,37 @@ def render_risk_gauge(label: str, value: Optional[float]) -> None:
     st.progress(min(max(value, 0.0), 1.0))
 
 
-def render_gradcam_panel(result: InferenceResult) -> None:
+def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> None:
+    """Renders the Grad-CAM panel. When the raw heatmap is available
+    (`result.gradcam_heatmap` — live/mock/cached backends), an opacity
+    slider re-blends it onto `display_slice` live via
+    `qknee.xai.gradcam.overlay_heatmap` on every drag — no re-inference,
+    just a resize + colormap + `cv2.addWeighted`, so it's effectively
+    free. HTTP API mode only ever returns a pre-blended overlay, so the
+    slider is hidden there and the static image is shown instead."""
     is_api = result.backend.startswith("api")
     st.markdown(f"#### Grad-CAM ({'unified' if is_api else 'ACL'} risk)")
-    if result.gradcam_overlay is not None:
-        caption = (
-            "Regions driving the predicted risk score"
-            if is_api else
-            "Regions driving the ACL tear-risk prediction"
+
+    caption = (
+        "Regions driving the predicted risk score"
+        if is_api else
+        "Regions driving the ACL tear-risk prediction"
+    )
+
+    if result.gradcam_heatmap is not None:
+        from qknee.xai.gradcam import overlay_heatmap
+
+        opacity = st.slider(
+            "Heatmap Opacity", min_value=0.0, max_value=1.0,
+            value=float(_config.gradcam.alpha), step=0.05,
+            key=f"gradcam_opacity_{result.backend}",
+            help="Blends the raw Grad-CAM heatmap onto the slice live — no re-inference needed.",
         )
+        overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=opacity)
+        st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
+    elif result.gradcam_overlay is not None:
         st.image(result.gradcam_overlay, channels="BGR", use_container_width=True, caption=caption)
+        st.caption("Opacity control unavailable — this backend only returns a pre-rendered overlay.")
     else:
         st.info("Grad-CAM overlay unavailable for this slice.")
 
@@ -472,20 +510,200 @@ def render_latency_metrics(result: InferenceResult) -> None:
                f"({result.backend} backend)")
 
 
+# --------------------------------------------------------------------------- #
+# Demo Mode / Latency Fallback: precomputed "NISQ cache" of sample cases
+# --------------------------------------------------------------------------- #
+
+@st.cache_data(show_spinner=False)
+def load_demo_cache_index() -> Optional[List[Dict]]:
+    """Loads `qknee/artifacts/demo_cache/index.json` (built offline by
+    `scripts/build_demo_cache.py`) — a handful of MRNet-style sample cases
+    with precomputed risk scores, latency figures, and raw Grad-CAM
+    heatmaps. Returns `None` if no cache has been built yet, so the sidebar
+    toggle can disable itself with a clear message instead of erroring."""
+    if not DEMO_CACHE_INDEX_PATH.exists():
+        return None
+    try:
+        payload = json.loads(DEMO_CACHE_INDEX_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read demo cache index at %s: %s", DEMO_CACHE_INDEX_PATH, exc)
+        return None
+    return payload.get("cases", [])
+
+
+def load_cached_case(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
+    """Loads one demo-cache case's slice image + raw Grad-CAM heatmap +
+    precomputed scores/latency straight from disk — no model, no PennyLane
+    QNode, no ResNet forward pass. This is what makes "Use Precomputed NISQ
+    Cache" genuinely zero-latency rather than just "fast": nothing in this
+    function does any inference at all."""
+    import cv2
+
+    slice_path = DEMO_CACHE_DIR / case["slice_file"]
+    display_slice = cv2.imread(str(slice_path), cv2.IMREAD_GRAYSCALE)
+    if display_slice is None:
+        raise FileNotFoundError(f"Demo cache slice image missing/unreadable: {slice_path}")
+
+    heatmap: Optional[np.ndarray] = None
+    if case.get("heatmap_file"):
+        heatmap_path = DEMO_CACHE_DIR / case["heatmap_file"]
+        if heatmap_path.exists():
+            heatmap = np.load(heatmap_path)
+
+    result = InferenceResult(
+        acl_risk=float(case["acl_risk"]),
+        meniscus_risk=(float(case["meniscus_risk"]) if case.get("meniscus_risk") is not None else None),
+        resnet_latency_ms=float(case.get("resnet_latency_ms", 0.0)),
+        pca_latency_ms=float(case.get("pca_latency_ms", 0.0)),
+        quantum_latency_ms=float(case.get("quantum_latency_ms", 0.0)),
+        total_latency_ms=float(case.get("total_latency_ms", 0.0)),
+        backend=f"cached/{case.get('backend', 'unknown')}",
+        gradcam_heatmap=heatmap,
+    )
+    return display_slice, result
+
+
+def render_demo_cache_sidebar() -> Tuple[bool, Optional[Dict]]:
+    """Renders the 'Use Precomputed NISQ Cache' sidebar toggle plus (when
+    enabled) a sample-case picker. Returns `(use_cache, selected_case)` —
+    `selected_case` is `None` unless `use_cache` is True and at least one
+    case is available."""
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ⚡ Demo Mode")
+
+    cache_index = load_demo_cache_index()
+    cache_available = bool(cache_index)
+
+    use_cache = st.sidebar.toggle(
+        "Use Precomputed NISQ Cache",
+        value=False,
+        disabled=not cache_available,
+        help="Instantly replays precomputed predictions + Grad-CAM heatmaps for a handful "
+             "of sample MRNet cases — zero inference latency, for live judging.",
+    )
+
+    if not cache_available:
+        st.sidebar.caption(
+            "No demo cache found. Run `python scripts/build_demo_cache.py` to generate "
+            f"one at `{DEMO_CACHE_DIR}`."
+        )
+        return False, None
+
+    if not use_cache:
+        st.sidebar.caption(f"{len(cache_index)} precomputed case(s) available.")
+        return False, None
+
+    case_labels = [f"Case {case['case_id']}" for case in cache_index]
+    selected_label = st.sidebar.selectbox("Sample Case", case_labels)
+    selected_case = cache_index[case_labels.index(selected_label)]
+    st.sidebar.success(f"Loaded precomputed case '{selected_case['case_id']}' — 0 ms inference.")
+    return True, selected_case
+
+
+# --------------------------------------------------------------------------- #
+# Quantum vs. Classical benchmark tab
+# --------------------------------------------------------------------------- #
+
+def render_benchmark_tab() -> None:
+    """Renders the offline comparative benchmark (`scripts/run_benchmark.py`)
+    — ROC-AUC comparison and inference-latency-per-sample side by side, plus
+    a full metrics table (F1/Precision/Recall/Confusion Matrix are in the
+    underlying JSON; the table below surfaces the headline numbers)."""
+    st.markdown("### Quantum vs. Classical Benchmark")
+    st.caption(
+        "Offline comparison of three architectures on the same MRNet-style validation "
+        "subset (see `scripts/run_benchmark.py`) — not re-run live. Re-run that script to refresh."
+    )
+
+    if not BENCHMARK_RESULTS_PATH.exists():
+        st.info(
+            f"No benchmark results found at `{BENCHMARK_RESULTS_PATH}`. Run "
+            "`python scripts/run_benchmark.py` to generate them."
+        )
+        return
+
+    try:
+        payload = json.loads(BENCHMARK_RESULTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        st.error(f"Failed to read {BENCHMARK_RESULTS_PATH}: {exc}")
+        return
+
+    models = payload.get("models", [])
+    if not models:
+        st.info("Benchmark results file has no models recorded.")
+        return
+
+    dataset_info = payload.get("dataset", {})
+    generated_at = payload.get("generated_at", "unknown")
+    st.caption(
+        f"Generated {generated_at} · dataset: {dataset_info.get('source', '?')} "
+        f"({dataset_info.get('n_test', '?')} test samples, "
+        f"{dataset_info.get('plane', '?')} plane)"
+    )
+
+    import pandas as pd
+
+    roc_col, latency_col = st.columns(2)
+
+    with roc_col:
+        st.markdown("#### ROC-AUC Comparison")
+        if BENCHMARK_ROC_PATH.exists():
+            st.image(str(BENCHMARK_ROC_PATH), use_container_width=True)
+        else:
+            roc_df = pd.DataFrame({
+                "Model": [m["name"] for m in models],
+                "ROC-AUC": [m["roc_auc"] for m in models],
+            }).set_index("Model")
+            st.bar_chart(roc_df)
+            st.caption(f"Pre-rendered ROC curve not found at `{BENCHMARK_ROC_PATH}`; showing a bar chart instead.")
+
+    with latency_col:
+        st.markdown("#### Inference Latency (ms/sample)")
+        latency_df = pd.DataFrame({
+            "Model": [m["name"] for m in models],
+            "Latency (ms)": [m.get("latency_ms_per_sample") or 0.0 for m in models],
+        }).set_index("Model")
+        st.bar_chart(latency_df)
+        st.caption("Single-sample (batch-size-1) wall-clock latency — reflects real one-slice-at-a-time inference.")
+
+    st.markdown("#### Full Metrics")
+    metrics_df = pd.DataFrame([
+        {
+            "Model": m["name"],
+            "ROC-AUC": m["roc_auc"],
+            "F1": m["f1_score"],
+            "Precision": m["precision"],
+            "Recall": m["recall"],
+            "Latency (ms/sample)": m.get("latency_ms_per_sample"),
+            "Test Samples": m.get("n_test_samples"),
+        }
+        for m in models
+    ])
+    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+
+
 def render_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
     """Renders a 'Download Radiology PDF Report' button, in the summary
     (Tear Risk Assessment) panel, compiling the current slice, Grad-CAM
     overlay, and ACL/meniscus risk scores into a one-page radiology-style
     PDF via `qknee.xai.report_generator`. A failed generation degrades to
     a warning rather than crashing the dashboard."""
+    from qknee.xai.gradcam import overlay_heatmap
     from qknee.xai.report_generator import generate_radiology_report
+
+    # Cached (demo-mode) and mock/live results carry the raw heatmap rather
+    # than a pre-blended overlay; build one at the default opacity for the
+    # PDF if only the raw heatmap is available.
+    gradcam_overlay = result.gradcam_overlay
+    if gradcam_overlay is None and result.gradcam_heatmap is not None:
+        gradcam_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
 
     st.markdown("#### Report")
     try:
         pdf_bytes = generate_radiology_report(
             output_path=None,
             mri_slice=display_slice,
-            gradcam_overlay=result.gradcam_overlay,
+            gradcam_overlay=gradcam_overlay,
             prediction_results={
                 "acl_risk": result.acl_risk,
                 "meniscus_risk": result.meniscus_risk,
@@ -519,9 +737,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
 # Main app
 # --------------------------------------------------------------------------- #
 
-def main() -> None:
-    render_header()
-
+def render_diagnostic_tab() -> None:
     pipeline, acl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
 
@@ -530,64 +746,75 @@ def main() -> None:
     mode = "api" if use_api else ("live" if backend_ready else "mock")
     render_quantum_status(mode, backend_ready, api_url)
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### Upload MRI Volume")
-    uploaded_files = st.sidebar.file_uploader(
-        "DICOM series (.dcm, select all files), single DICOM, NumPy volume (.npy), or NIfTI (.nii/.nii.gz)",
-        type=["dcm", "dicom", "npy", "nii", "gz"],
-        accept_multiple_files=True,
-    )
+    use_demo_cache, cached_case = render_demo_cache_sidebar()
 
-    if not uploaded_files:
-        st.info("Upload a `.npy`/`.nii`/`.nii.gz` volume or one or more `.dcm` files "
-                 "(a full series) from the sidebar to begin, or explore the dashboard "
-                 "below with synthetic demo data.")
-        rng = np.random.default_rng(123)
-        volume = rng.normal(loc=128, scale=40, size=(24, 224, 224)).clip(0, 255)
-        st.sidebar.caption("Currently viewing: synthetic demo volume (24 slices)")
+    if use_demo_cache and cached_case is not None:
+        # Demo Mode: skip upload/plane/slice/inference entirely and replay a
+        # precomputed case straight from disk — genuinely zero-latency.
+        display_slice, result = load_cached_case(cached_case)
     else:
-        volume = load_volume(uploaded_files)
-        if volume is None:
-            st.stop()
-        display_name = (
-            f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### Upload MRI Volume")
+        uploaded_files = st.sidebar.file_uploader(
+            "DICOM series (.dcm, select all files — drag & drop supported), single DICOM, "
+            "NumPy volume (.npy), or NIfTI (.nii/.nii.gz)",
+            type=["dcm", "dicom", "npy", "nii", "gz"],
+            accept_multiple_files=True,
         )
-        st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### View Controls")
-    view = st.sidebar.radio(
-        "Anatomical Plane", ["Axial", "Coronal", "Sagittal"], horizontal=False,
-        help="Scroll slice-by-slice through the loaded 3D volume in any of the three anatomical planes.",
-    )
-
-    max_index = max(view_axis_size(volume, view) - 1, 0)
-    slice_index = st.sidebar.slider("Slice", min_value=0, max_value=max_index, value=max_index // 2)
-
-    raw_slice = get_slice(volume, view, slice_index)
-    display_slice = normalize_for_display(raw_slice)
-
-    result: Optional[InferenceResult] = None
-    if use_api:
-        try:
-            result = run_api_inference(raw_slice, api_url)
-        except Exception as exc:  # noqa: BLE001 - a failed request degrades to in-process/mock, not a crash
-            logger.warning("API inference failed (%s); falling back to in-process/mock.", exc)
-
-    if result is None:
-        if backend_ready:
-            result = run_live_inference(raw_slice, pipeline, acl_model, meniscus_model)
+        if not uploaded_files:
+            st.info("Upload a `.npy`/`.nii`/`.nii.gz` volume or one or more `.dcm` files "
+                     "(a full series) from the sidebar to begin, or explore the dashboard "
+                     "below with synthetic demo data.")
+            rng = np.random.default_rng(123)
+            volume = rng.normal(loc=128, scale=40, size=(24, 224, 224)).clip(0, 255)
+            st.sidebar.caption("Currently viewing: synthetic demo volume (24 slices)")
         else:
-            result = run_mock_inference(raw_slice)
+            volume = load_volume(uploaded_files)
+            if volume is None:
+                st.stop()
+            display_name = (
+                f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
+            )
+            st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("### View Controls")
+        view = st.sidebar.radio(
+            "Anatomical Plane", ["Axial", "Coronal", "Sagittal"], horizontal=False,
+            help="Scroll slice-by-slice through the loaded 3D volume in any of the three anatomical planes.",
+        )
+
+        max_index = max(view_axis_size(volume, view) - 1, 0)
+        slice_index = st.sidebar.slider("Slice", min_value=0, max_value=max_index, value=max_index // 2)
+
+        raw_slice = get_slice(volume, view, slice_index)
+        display_slice = normalize_for_display(raw_slice)
+
+        result = None
+        if use_api:
+            try:
+                result = run_api_inference(raw_slice, api_url)
+            except Exception as exc:  # noqa: BLE001 - a failed request degrades to in-process/mock, not a crash
+                logger.warning("API inference failed (%s); falling back to in-process/mock.", exc)
+
+        if result is None:
+            if backend_ready:
+                result = run_live_inference(raw_slice, pipeline, acl_model, meniscus_model)
+            else:
+                result = run_mock_inference(raw_slice)
 
     image_col, gradcam_col, results_col = st.columns([1, 1, 1])
 
     with image_col:
-        st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
+        if use_demo_cache and cached_case is not None:
+            st.markdown(f"#### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
+        else:
+            st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
         st.image(display_slice, use_container_width=True, clamp=True)
 
     with gradcam_col:
-        render_gradcam_panel(result)
+        render_gradcam_panel(display_slice, result)
 
     with results_col:
         st.markdown("#### Tear Risk Assessment")
@@ -605,6 +832,18 @@ def main() -> None:
         "VQC → classical readout. Grad-CAM is backpropagated from the ACL risk score "
         "itself (not embedding energy), so the heatmap explains that prediction."
     )
+
+
+def main() -> None:
+    render_header()
+
+    tab_diagnostic, tab_benchmark = st.tabs(["🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"])
+
+    with tab_diagnostic:
+        render_diagnostic_tab()
+
+    with tab_benchmark:
+        render_benchmark_tab()
 
 
 if __name__ == "__main__":

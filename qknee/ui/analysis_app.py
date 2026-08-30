@@ -30,7 +30,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import matplotlib
 
@@ -46,6 +46,8 @@ _config = load_config()
 logger = get_logger(__name__)
 RISK_THRESHOLD = _config.api.tear_risk_threshold
 
+PLANES = ["Axial", "Coronal", "Sagittal"]
+
 
 # --------------------------------------------------------------------------- #
 # Result schema
@@ -58,7 +60,9 @@ class AnalysisResult:
     quantum_latency_ms: float
     total_latency_ms: float
     backend: str  # "live" or "mock"
-    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8, or None if generation failed
+    gradcam_overlay: Optional[np.ndarray] = None  # (H, W, 3) BGR uint8 pre-blended overlay, or None
+    gradcam_heatmap: Optional[np.ndarray] = None  # (h, w) float32 in [0, 1], raw Grad-CAM — lets the
+    # UI re-blend at any opacity live (see the opacity slider in `main()`) without re-running inference.
 
 
 # --------------------------------------------------------------------------- #
@@ -82,23 +86,18 @@ def load_backend():
         return None
 
 
-def _mock_gradcam_overlay(slice_2d: np.ndarray) -> np.ndarray:
-    """Cheap, torch-free stand-in Grad-CAM overlay for mock mode (a soft
-    radial gradient blended onto the slice via OpenCV only), so the heatmap
-    panel is exercised in the UI even without a live backend."""
-    import cv2
-
+def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
+    """Cheap, torch-free stand-in *raw* Grad-CAM heatmap for mock mode (a
+    soft radial gradient), so the heatmap panel — including its live
+    opacity slider — is exercised in the UI even without a live backend.
+    Blended into a displayable overlay via `qknee.xai.gradcam.overlay_heatmap`,
+    the same function the live backend uses."""
     display = normalize_uint8(slice_2d)
     height, width = display.shape[:2]
     yy, xx = np.mgrid[0:height, 0:width]
     cy, cx = height / 2, width / 2
     radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
-    fake_heatmap = np.clip(1 - radius / radius.max(), 0, 1)
-
-    gray_bgr = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-    heatmap_uint8 = (fake_heatmap * 255).astype(np.uint8)
-    color_heatmap = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    return cv2.addWeighted(color_heatmap, 0.45, gray_bgr, 0.55, 0)
+    return np.clip(1 - radius / radius.max(), 0, 1).astype(np.float32)
 
 
 def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
@@ -118,9 +117,10 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     t2 = time.perf_counter()
 
     gradcam_overlay: Optional[np.ndarray] = None
+    gradcam_heatmap: Optional[np.ndarray] = None
     try:
-        heatmap = runner.explain(batch[:, 0])
-        gradcam_overlay = overlay_heatmap(heatmap, slice_2d)
+        gradcam_heatmap = runner.explain(batch[:, 0])
+        gradcam_overlay = overlay_heatmap(gradcam_heatmap, slice_2d)
     except Exception as exc:  # noqa: BLE001 - a failed heatmap shouldn't hide the risk score
         logger.warning("Grad-CAM generation failed; showing risk score without an overlay: %s", exc)
 
@@ -135,12 +135,15 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         total_latency_ms=total_latency_ms,
         backend="live",
         gradcam_overlay=gradcam_overlay,
+        gradcam_heatmap=gradcam_heatmap,
     )
 
 
 def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
     """Deterministic (seeded from slice content) mock, used when no trained
     backend is available."""
+    from qknee.xai.gradcam import overlay_heatmap
+
     digest = hashlib.sha256(slice_2d.tobytes()).digest()
     seed = int.from_bytes(digest[:4], "big")
     rng = np.random.default_rng(seed)
@@ -149,6 +152,7 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
     total_latency_ms = quantum_latency_ms + float(rng.uniform(20, 35))
     risk_score = float(rng.uniform(0.05, 0.95))
     label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
+    heatmap = _mock_gradcam_heatmap(slice_2d)
 
     return AnalysisResult(
         risk_score=risk_score,
@@ -156,7 +160,8 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
         quantum_latency_ms=quantum_latency_ms,
         total_latency_ms=total_latency_ms,
         backend="mock",
-        gradcam_overlay=_mock_gradcam_overlay(slice_2d),
+        gradcam_overlay=overlay_heatmap(heatmap, slice_2d),
+        gradcam_heatmap=heatmap,
     )
 
 
@@ -171,23 +176,38 @@ def run_analysis(slice_2d: np.ndarray) -> AnalysisResult:
 # Image loading + display adjustment
 # --------------------------------------------------------------------------- #
 
-def load_scan(uploaded_file) -> Optional[np.ndarray]:
-    """Loads a .png/.jpg/.jpeg (single slice) or .npy (single slice or
-    volume) upload into a 3D (D, H, W) array."""
-    suffix = Path(uploaded_file.name).suffix.lower()
+def load_scan(uploaded_files: List) -> Optional[np.ndarray]:
+    """Loads one or more drag-and-dropped uploads into a `(D, H, W)`
+    volume, via `qknee.data.ingestion.DataIngestion.load_volume_array` —
+    the same DICOM-series/.npy/single-DICOM loading path
+    `qknee.ui.dashboard` uses, so a multi-file `.dcm` series (one file per
+    slice) stacks into a real tri-planar volume here too, not just a flat
+    single image.
+
+    Args:
+        uploaded_files: One or more Streamlit `UploadedFile`s (`.png`,
+            `.jpg`, `.jpeg`, `.npy`, or `.dcm`/`.dicom` — multiple `.dcm`
+            files are treated as one series, sorted and stacked by
+            `InstanceNumber`/`SliceLocation`).
+
+    Returns `None` (and shows a Streamlit error) if the upload can't be parsed.
+    """
+    from qknee.data.ingestion import DataIngestion, IngestionError
+
+    files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+    if not files:
+        return None
+
+    source = files if len(files) > 1 else files[0]
+    display_name = f"{len(files)}-file DICOM series" if len(files) > 1 else files[0].name
 
     try:
-        if suffix == ".npy":
-            array = np.load(uploaded_file)
-        elif suffix in (".png", ".jpg", ".jpeg"):
-            from PIL import Image
-
-            array = np.array(Image.open(uploaded_file).convert("L"))
-        else:
-            st.error(f"Unsupported file type '{suffix}'. Upload a .png, .jpg, or .npy file.")
-            return None
+        array = DataIngestion().load_volume_array(source)
+    except IngestionError as exc:
+        st.error(f"Failed to read '{display_name}': {exc}")
+        return None
     except Exception as exc:  # noqa: BLE001
-        st.error(f"Failed to read '{uploaded_file.name}': {exc}")
+        st.error(f"Failed to read '{display_name}': {exc}")
         return None
 
     array = np.asarray(array)
@@ -318,11 +338,14 @@ def render_header() -> None:
     )
 
 
-def render_sidebar() -> tuple[Optional[np.ndarray], int, float]:
+def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float]:
     st.sidebar.markdown("### 📤 Upload Scan")
-    uploaded_file = st.sidebar.file_uploader(
-        "PNG, JPG, or NumPy volume (.npy)",
-        type=["png", "jpg", "jpeg", "npy"],
+    uploaded_files = st.sidebar.file_uploader(
+        "DICOM series (.dcm, select/drag multiple files), single DICOM, PNG, JPG, or NumPy volume (.npy)",
+        type=["dcm", "dicom", "png", "jpg", "jpeg", "npy"],
+        accept_multiple_files=True,
+        help="Drag and drop one or more files — a multi-file .dcm selection is stacked into "
+             "one 3D series, sorted by InstanceNumber/SliceLocation.",
     )
 
     runner = load_backend()
@@ -336,20 +359,30 @@ def render_sidebar() -> tuple[Optional[np.ndarray], int, float]:
         if error:
             st.sidebar.caption(f"Reason: {error}")
 
-    if uploaded_file is None:
-        st.sidebar.info("Upload a scan to enable slice/contrast controls.")
-        return None, 0, 1.0
+    if not uploaded_files:
+        st.sidebar.info("Upload a scan to enable plane/slice/contrast controls.")
+        return None, PLANES[0], 0, 1.0
 
-    volume = load_scan(uploaded_file)
+    volume = load_scan(uploaded_files)
     if volume is None:
-        return None, 0, 1.0
+        return None, PLANES[0], 0, 1.0
 
-    st.sidebar.success(f"Loaded '{uploaded_file.name}' — {volume.shape[0]} slice(s)")
+    display_name = (
+        f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
+    )
+    st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🎚️ View Controls")
 
-    max_index = volume.shape[0] - 1
+    plane = st.sidebar.radio(
+        "Anatomical Plane", PLANES, horizontal=True,
+        help="Scroll through the loaded volume in any of the three anatomical planes.",
+    )
+
+    from qknee.data.ingestion import MultiPlaneViewSelector
+
+    max_index = MultiPlaneViewSelector(volume).num_slices(plane.lower()) - 1
     if max_index > 0:
         slice_index = st.sidebar.slider("Slice", 0, max_index, max_index // 2)
     else:
@@ -358,24 +391,29 @@ def render_sidebar() -> tuple[Optional[np.ndarray], int, float]:
 
     contrast = st.sidebar.slider("Contrast", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
 
-    return volume, slice_index, contrast
+    return volume, plane, slice_index, contrast
 
 
 def main() -> None:
     render_header()
-    volume, slice_index, contrast = render_sidebar()
+    volume, plane, slice_index, contrast = render_sidebar()
 
     if volume is None:
-        st.info("👈 Upload a `.png`, `.jpg`, or `.npy` scan from the sidebar to begin.")
+        st.info("👈 Upload a `.png`, `.jpg`, `.npy`, or `.dcm` scan (drag & drop supported) "
+                 "from the sidebar to begin.")
         return
 
-    raw_slice = volume[slice_index]
+    from qknee.data.ingestion import MultiPlaneViewSelector
+
+    selector = MultiPlaneViewSelector(volume)
+    max_index = selector.num_slices(plane.lower()) - 1
+    raw_slice = selector.get_slice(plane.lower(), slice_index)
     display_slice = apply_contrast(normalize_uint8(raw_slice), contrast)
 
     image_col, gradcam_col, action_col = st.columns([1, 1, 1.2])
 
     with image_col:
-        st.markdown(f"#### Slice {slice_index + 1} / {volume.shape[0]}")
+        st.markdown(f"#### {plane} View — Slice {slice_index + 1} / {max_index + 1}")
         st.image(display_slice, use_container_width=True, clamp=True)
 
     result_key = "last_analysis_result"
@@ -405,6 +443,19 @@ def main() -> None:
         result = st.session_state.get(result_key)
         if result is None:
             st.info("Run the analysis to generate a Grad-CAM overlay.")
+        elif result.gradcam_heatmap is not None:
+            # Live opacity re-blend: overlay_heatmap is just a resize +
+            # colormap + cv2.addWeighted, so re-blending on every slider
+            # drag is effectively free — no re-inference required.
+            from qknee.xai.gradcam import overlay_heatmap
+
+            opacity = st.slider(
+                "Heatmap Opacity", min_value=0.0, max_value=1.0,
+                value=float(_config.gradcam.alpha), step=0.05,
+                help="Blends the raw Grad-CAM heatmap onto the slice live.",
+            )
+            overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=opacity)
+            st.image(overlay, channels="BGR", use_container_width=True, caption="Regions driving the risk prediction")
         elif result.gradcam_overlay is not None:
             st.image(
                 result.gradcam_overlay,
