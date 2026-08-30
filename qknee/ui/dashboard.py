@@ -55,6 +55,16 @@ DEMO_CACHE_INDEX_PATH = DEMO_CACHE_DIR / "index.json"
 BENCHMARK_RESULTS_PATH = Path("qknee/artifacts/benchmark_results.json")
 BENCHMARK_ROC_PATH = Path("qknee/artifacts/benchmark_roc_curve.png")
 
+# The PRD's Plan B latency-risk mitigation cache (`scripts/generate_demo_cache.py`)
+# — 10 cases' full pipeline outputs (quantum angles, Pauli-Z expectations,
+# risk scores, Grad-CAM overlays) serialized to one JSON file, with each
+# heatmap also embedded as base64 so nothing needs a second filesystem
+# read. Pre-warmed into `@st.cache_resource` memory at startup (see
+# `load_precomputed_cache` and its eager call in `main()`) — a cold-start
+# handler distinct from (and in addition to) `load_demo_cache_index`'s
+# sidebar-toggle cache above.
+PRECOMPUTED_CACHE_PATH = Path("qknee/artifacts/precomputed_cache.json")
+
 
 @dataclass
 class InferenceResult:
@@ -234,9 +244,16 @@ def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
     return np.clip(1 - radius / radius.max(), 0, 1).astype(np.float32)
 
 
+@st.cache_data(show_spinner=False, max_entries=128)
 def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     """Seeded, deterministic mock scores + plausible latency numbers, used
-    whenever the real pipeline/model backend isn't available."""
+    whenever the real pipeline/model backend isn't available.
+
+    Cached by `slice_2d` content: Streamlit reruns this whole script on
+    every widget interaction (e.g. dragging the slice slider back to a
+    slice already viewed), so without this cache the same slice's mock
+    Grad-CAM heatmap would be regenerated from scratch on every one of
+    those reruns even though the result is already deterministic."""
     from qknee.xai.gradcam import overlay_heatmap
 
     rng = np.random.default_rng(_seed_from_slice(slice_2d))
@@ -260,14 +277,26 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     )
 
 
-def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) -> InferenceResult:
+@st.cache_data(show_spinner=False, max_entries=128)
+def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _meniscus_model) -> InferenceResult:
     """Runs the real DataIngestion -> ResNet18 -> PCA -> VQC pipeline (via
     `PipelineRunner`'s stage methods) on one 2D slice, timing each stage,
     and generates a Grad-CAM overlay backpropagated from the ACL risk score
     (`PipelineRunner.explain(..., vqc=acl_model)`) — not embedding energy —
     so the heatmap reflects what actually drove that prediction.
+
+    Cached by `slice_2d` content only: the leading underscore on
+    `_runner`/`_acl_model`/`_meniscus_model` tells `st.cache_data` to
+    exclude them from the cache key (they're not hashable torch/PennyLane
+    objects, and are effectively constant for the app process's lifetime
+    anyway). Without this, the full ResNet18 forward pass and Grad-CAM
+    backprop — the expensive part of every rerun — would re-execute on
+    every Streamlit script rerun, including ones triggered by a completely
+    unrelated widget, as long as the viewed slice hasn't actually changed.
     """
     from qknee.xai.gradcam import overlay_heatmap
+
+    runner, acl_model, meniscus_model = _runner, _acl_model, _meniscus_model
 
     t0 = time.perf_counter()
     batch = runner.ingest(slice_2d)
@@ -310,9 +339,43 @@ def run_live_inference(slice_2d: np.ndarray, runner, acl_model, meniscus_model) 
 # Volume ingestion + tri-planar slicing
 # --------------------------------------------------------------------------- #
 
+@st.cache_data(show_spinner="Decoding uploaded MRI volume...", max_entries=8)
+def _decode_volume_cached(file_payloads: Tuple[Tuple[str, bytes], ...]) -> np.ndarray:
+    """Pure DICOM-series/.nii/.nii.gz/.npy volume decode — the actual
+    expensive step `load_volume` wraps. Keyed on `(filename, bytes)` tuples
+    (real file content) rather than Streamlit `UploadedFile` objects, and
+    deliberately free of any `st.*` calls: Streamlit only replays a cached
+    function's *return value* on a cache hit, not side effects like
+    `st.error` performed inside it, so those must live in the uncached
+    `load_volume` wrapper below instead.
+
+    Without this cache, the same uploaded DICOM series/NIfTI/.npy volume
+    would be fully re-decoded on every Streamlit script rerun — which
+    includes every slice-slider drag and every unrelated widget
+    interaction, not just a new upload.
+    """
+    import io
+
+    from qknee.data.ingestion import DataIngestion
+
+    if len(file_payloads) > 1:
+        sources = []
+        for name, content in file_payloads:
+            buffer = io.BytesIO(content)
+            buffer.name = name
+            sources.append(buffer)
+        return DataIngestion().load_volume_array(sources)
+
+    name, content = file_payloads[0]
+    buffer = io.BytesIO(content)
+    buffer.name = name
+    return DataIngestion().load_volume_array(buffer)
+
+
 def load_volume(uploaded_files) -> Optional[np.ndarray]:
     """Loads uploaded file(s) into a 3D (D, H, W) array via
-    `DataIngestion.load_volume_array` — the same DICOM-series/.nii/
+    `DataIngestion.load_volume_array` (through the cached
+    `_decode_volume_cached` above) — the same DICOM-series/.nii/
     .nii.gz/.npy/.dcm loading path used elsewhere in the pipeline, so the
     dashboard's tri-planar Axial/Coronal/Sagittal slicing (`get_slice`)
     works consistently over any of those formats.
@@ -325,14 +388,14 @@ def load_volume(uploaded_files) -> Optional[np.ndarray]:
 
     Returns None (and shows a Streamlit error) if the file(s) can't be parsed.
     """
-    from qknee.data.ingestion import DataIngestion, IngestionError
+    from qknee.data.ingestion import IngestionError
 
     files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
-    source = files if len(files) > 1 else files[0]
     display_name = f"{len(files)}-file DICOM series" if len(files) > 1 else files[0].name
+    file_payloads = tuple((f.name, f.getvalue()) for f in files)
 
     try:
-        volume = DataIngestion().load_volume_array(source)
+        volume = _decode_volume_cached(file_payloads)
     except IngestionError as exc:
         st.error(f"Failed to read '{display_name}': {exc}")
         return None
@@ -513,6 +576,40 @@ def render_latency_metrics(result: InferenceResult) -> None:
 # --------------------------------------------------------------------------- #
 # Demo Mode / Latency Fallback: precomputed "NISQ cache" of sample cases
 # --------------------------------------------------------------------------- #
+
+@st.cache_resource(show_spinner=False)
+def load_precomputed_cache() -> Optional[Dict]:
+    """Cold-start pre-warm hook: eagerly parses
+    `qknee/artifacts/precomputed_cache.json` into `@st.cache_resource`
+    process memory (see the eager call in `main()`) so its JSON-parse/disk-I/O
+    cost is paid once at boot, before any user's first request, rather than
+    lazily on whichever request happens to touch it first.
+
+    `cache_resource` (process-scoped, shared read-only across every
+    session on this container) rather than `cache_data` (which would
+    additionally pickle/copy the payload per session) — same reasoning as
+    `load_backend()`'s model objects above.
+
+    Returns `None` (logged) if the cache hasn't been built yet
+    (`python scripts/generate_demo_cache.py`) or fails to parse.
+    """
+    if not PRECOMPUTED_CACHE_PATH.exists():
+        logger.info(
+            "No precomputed cache found at %s; skipping cold-start pre-warm "
+            "(run `python scripts/generate_demo_cache.py` to build one).",
+            PRECOMPUTED_CACHE_PATH,
+        )
+        return None
+    try:
+        payload = json.loads(PRECOMPUTED_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read precomputed cache at %s: %s", PRECOMPUTED_CACHE_PATH, exc)
+        return None
+    logger.info(
+        "Pre-warmed precomputed cache: %d case(s) from %s", payload.get("n_cases", 0), PRECOMPUTED_CACHE_PATH,
+    )
+    return payload
+
 
 @st.cache_data(show_spinner=False)
 def load_demo_cache_index() -> Optional[List[Dict]]:
@@ -835,7 +932,17 @@ def render_diagnostic_tab() -> None:
 
 
 def main() -> None:
+    # Pre-warmed cold-start handler: called eagerly, before any UI renders,
+    # so the precomputed cache is already resident in `@st.cache_resource`
+    # process memory by the time the first real user interaction happens —
+    # `st.cache_resource` runs its body once per process and reuses the
+    # result across every subsequent call/session, so this "first boot"
+    # call is what actually does the pre-warming.
+    precomputed_cache = load_precomputed_cache()
+
     render_header()
+    if precomputed_cache is not None:
+        st.sidebar.caption(f"⚡ Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
     tab_diagnostic, tab_benchmark = st.tabs(["🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"])
 

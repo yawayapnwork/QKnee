@@ -1,0 +1,13 @@
+# Debian/apt system packages for Streamlit Community Cloud and Hugging
+# Face Spaces (both read a repo-root `packages.txt` and `apt-get install`
+# its contents into the build container before `pip install -r
+# requirements.txt` runs).
+#
+# opencv-python-headless (see requirements.txt) is built specifically to
+# avoid the GTK/Qt GUI stack, so this list is intentionally short — just
+# the handful of shared libraries some of its manylinux wheel's image/video
+# codecs still dlopen at import time on a bare Debian slim base image,
+# which doesn't ship them by default. Small (a few MB total), not a
+# memory/build-time risk.
+libgl1
+libglib2.0-0

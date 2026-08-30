@@ -8,3 +8,23 @@ font = "sans serif"
 
 [server]
 maxUploadSize = 512
+# Cold-start / memory tuning for a <1GB free-tier container (Streamlit
+# Community Cloud, Hugging Face Spaces): the dev-mode file watcher has no
+# purpose in a deployed container (the source tree never changes underneath
+# a running app there) but still costs a background thread + open file
+# handles per watched module, so it's disabled outright.
+fileWatcherType = "none"
+enableStaticServing = true
+
+[browser]
+# Skip Streamlit's telemetry ping on every session — one less outbound
+# network call competing for bandwidth/latency during a cold boot, and one
+# less thing that can stall app startup if the platform's egress is slow.
+gatherUsageStats = false
+
+[runner]
+# Skips Streamlit's implicit-write AST rewrite pass (magic commands) on
+# every script rerun — this app never relies on it (every render goes
+# through explicit st.* calls), so it's a small free win on a slow/cold
+# cloud CPU with every rerun this app triggers (e.g. dragging a slider).
+magicEnabled = false

@@ -1,6 +1,34 @@
+# Q-Knee dependencies, audited for Streamlit Community Cloud / Hugging
+# Face Spaces (free-tier: <1GB RAM during container spin-up, and a build
+# times out if pip has to resolve/download multi-GB wheels). The two
+# levers that actually matter at that scale are below; everything else in
+# this file is comparatively small (single-digit-to-low-double-digit MB).
+#
+#   1. CPU-only torch/torchvision wheels (`--extra-index-url` + the `+cpu`
+#      local version below) instead of PyPI's default CUDA build. This is
+#      the dominant win: PyPI's default `torch` wheel bundles the NVIDIA
+#      CUDA/cuDNN runtime and is 800MB-2GB+ depending on version, which
+#      alone can blow both the RAM budget and the build-time limit on a
+#      free-tier container that has no GPU to use it with anyway. The
+#      `+cpu` local-version pin forces pip to resolve against the PyTorch
+#      CPU index (~150-200MB total for both packages) instead.
+#   2. `opencv-python-headless`, not `opencv-python` — ships without the
+#      Qt/GTK GUI toolchain a headless server container never uses, which
+#      is both a much smaller wheel and avoids missing-shared-library
+#      install failures on a minimal Debian slim base image.
+#
+# PennyLane note: this project only ever simulates a 4-qubit circuit
+# (`config.yaml`'s `quantum.n_qubits`), whose full state vector is 16
+# complex amplitudes — trivial for PennyLane's default `default.qubit`
+# (pure-Python/NumPy) simulator. The compiled `pennylane-lightning`
+# backend exists for much larger qubit counts; pulling it in here would
+# add a native-extension wheel for no simulation-speed benefit at n=4, so
+# it's deliberately not listed.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+
 pyyaml==6.0.3
-torch==2.13.0
-torchvision==0.28.0
 pennylane==0.45.1
 numpy==2.5.2
 opencv-python-headless==5.0.0.93
@@ -12,12 +40,21 @@ pydicom==3.0.2
 matplotlib==3.11.1
 seaborn==0.13.2
 pandas==3.0.5
-fastapi==0.141.1
-uvicorn[standard]==0.52.4
-python-multipart==0.0.32
 requests==2.34.2
 reportlab==5.0.1
 nibabel==5.4.2
 SimpleITK==2.5.6
+
+# API-server-only (qknee/api/*) — unused by the Streamlit dashboard itself
+# (qknee/ui/dashboard.py, the app_file for both cloud targets), but kept
+# here since this file is shared with the Docker Compose "api" service.
+# All three are pure-Python/small wheels, not a spin-up memory/timeout risk.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+python-multipart==0.0.32
+
+# ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) —
+# unused unless a caller explicitly opts into the ONNX backend; also kept
+# for the shared Docker image.
 onnx==1.22.0
 onnxruntime==1.29.0

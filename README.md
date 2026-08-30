@@ -1,3 +1,15 @@
+---
+title: Q-Knee
+emoji: 🦵
+colorFrom: green
+colorTo: blue
+sdk: streamlit
+sdk_version: "1.62.0"
+app_file: qknee/ui/dashboard.py
+pinned: false
+license: mit
+---
+
 # Q-Knee
 
 **Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via FastAPI and a Streamlit clinical dashboard.**
@@ -11,6 +23,19 @@
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#)
 
 > ⚠️ **Research prototype.** Q-Knee is not a certified medical device and is not validated for clinical use. All metrics below are measured on a synthetic benchmark dataset (see [`qknee/models/evaluate.py`](qknee/models/evaluate.py)) used to exercise the pipeline end-to-end — they demonstrate that the quantum stage is competitive with classical baselines on this task shape, not real-world diagnostic accuracy. Retrain and clinically validate on a real, IRB-approved MRI dataset before any clinical use.
+
+---
+
+## Deploying the dashboard (zero-cost)
+
+The Streamlit clinical dashboard (`qknee/ui/dashboard.py`, the `app_file` in this README's frontmatter above) deploys directly to either platform's free tier — no Docker image, no paid compute:
+
+- **Streamlit Community Cloud**: [share.streamlit.io](https://share.streamlit.io) → New app → point at this repo, branch, and `qknee/ui/dashboard.py`. Reads `requirements.txt` and `packages.txt` from the repo root automatically.
+- **Hugging Face Spaces**: create a Space with SDK "Streamlit" and push this repo — the frontmatter block at the top of this file *is* the Space's `README.md` metadata (`sdk`, `app_file`, etc.), so no separate configuration step is needed.
+
+Both platforms cap free-tier containers around 1GB RAM and enforce a build-time limit, so `requirements.txt` pins CPU-only PyTorch wheels (`torch==2.13.0+cpu` / `torchvision==0.28.0+cpu` via `--extra-index-url https://download.pytorch.org/whl/cpu`) instead of PyPI's default multi-GB CUDA build, and `opencv-python-headless` instead of the GUI-linked `opencv-python` — see the comments in [`requirements.txt`](requirements.txt) and [`packages.txt`](packages.txt) for the full audit. The dashboard also pre-warms `qknee/artifacts/precomputed_cache.json` into `@st.cache_resource` memory at boot and caches per-slice inference/Grad-CAM/DICOM-decode results, so a cold container's first few interactions don't pay full recomputation cost.
+
+Without a fitted PCA/VQC checkpoint (`qknee/artifacts/pca_scaler.pkl`, etc. — see [`.dockerignore`](.dockerignore)/`.gitignore` for what's excluded from the repo), the dashboard falls back to seeded mock inference automatically, so it stays fully demoable even on a from-scratch deploy.
 
 ---
 
