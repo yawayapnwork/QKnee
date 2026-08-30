@@ -23,6 +23,7 @@ env/
 *.pth
 /data/
 eval_outputs/
+/logs/
 *.npy
 *.nii
 *.nii.gz

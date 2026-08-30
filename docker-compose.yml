@@ -66,6 +66,10 @@ services:
       # host instead of vanishing when the container exits.
       - ./eval_outputs:/app/eval_outputs
       - ./deck_assets:/app/deck_assets
+      # Shared, host-visible log directory — both `api` and `ui` mount the
+      # same path so operators can tail/ship logs from one place regardless
+      # of which service emitted them, without shelling into a container.
+      - ./logs:/app/logs
     healthcheck:
       # No curl/wget in the slim runtime image (kept out to stay lean) —
       # a one-line Python check against FastAPI's own /health endpoint
@@ -78,6 +82,18 @@ services:
     restart: unless-stopped
     networks:
       - qknee-net
+    deploy:
+      resources:
+        # Bounds match this service's OMP_NUM_THREADS/MKL_NUM_THREADS/
+        # TORCH_NUM_THREADS=4 above — the CPU limit caps what the container
+        # can actually use, so the thread-pool tuning above isn't fighting
+        # a scheduler quota smaller than what it spins up.
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          cpus: "1.0"
+          memory: 1g
 
   ui:
     build:
@@ -105,6 +121,7 @@ services:
     volumes:
       - ./qknee/artifacts:/app/qknee/artifacts:ro
       - ./data:/app/data:ro
+      - ./logs:/app/logs
     depends_on:
       api:
         condition: service_healthy
@@ -117,6 +134,16 @@ services:
     restart: unless-stopped
     networks:
       - qknee-net
+    deploy:
+      resources:
+        # Bounds match this service's OMP_NUM_THREADS/MKL_NUM_THREADS/
+        # TORCH_NUM_THREADS=2 above.
+        limits:
+          cpus: "2.0"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.19.0
@@ -144,6 +171,17 @@ services:
     restart: unless-stopped
     networks:
       - qknee-net
+    deploy:
+      resources:
+        # MLflow's tracking server is a thin metadata/artifact-proxy
+        # process — no ML workload runs in this container, so it needs
+        # far less headroom than `api`/`ui`.
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.25"
+          memory: 256m
 
 networks:
   qknee-net:

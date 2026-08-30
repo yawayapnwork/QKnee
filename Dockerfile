@@ -21,15 +21,24 @@
 #   separate from the runtime stage so build-only tooling (a C compiler,
 #   pip's wheel cache, apt package lists) never ends up in the final image.
 # --------------------------------------------------------------------------- #
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 # build-essential: some scientific-Python deps (e.g. scipy, which PennyLane
 # and scikit-learn depend on) fall back to compiling from source on
 # platforms without a prebuilt manylinux wheel; keeping this in the builder
 # stage only (not runtime) avoids bloating the final image with a toolchain.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
+#
+# --mount=type=cache on /var/cache/apt and /var/lib/apt/lists (BuildKit-only,
+# hence the `# syntax=` pragma at the top of this file) persists apt's
+# downloaded .deb files and package lists across builds *without* baking
+# them into any image layer — a rebuild on a warm BuildKit cache re-hits
+# this package from local disk instead of the network, while the final
+# layer stays exactly as clean as the old `rm -rf /var/lib/apt/lists/*`
+# one-liner produced.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends build-essential
 
 # Isolated virtualenv (rather than installing into the system site-packages)
 # so the whole dependency tree can be copied as one clean directory into the
@@ -40,16 +49,31 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /build
 COPY requirements.txt .
 
-# Install PyTorch/torchvision from the official CPU-only wheel index first.
-# This is the single most important line for image size and NISQ-simulator
-# CPU deployments: the default PyPI wheel can pull in multi-GB NVIDIA CUDA
-# libraries that are dead weight on a CPU-only host (PennyLane's
-# `default.qubit` simulator and this project's ResNet18 backbone both run
-# on CPU here — there is no GPU workload to justify the CUDA runtime).
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir torch==2.13.0 torchvision==0.28.0 \
-        --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir -r requirements.txt
+# pip itself: split into its own layer so a `requirements.txt`/torch-version
+# edit below never re-triggers a pip self-upgrade, and vice versa.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip
+
+# PyTorch/torchvision, from the official CPU-only wheel index, in its own
+# layer. This is the single most important line for image size and
+# NISQ-simulator CPU deployments: the default PyPI wheel can pull in
+# multi-GB NVIDIA CUDA libraries that are dead weight on a CPU-only host
+# (PennyLane's `default.qubit` simulator and this project's ResNet18
+# backbone both run on CPU here — there is no GPU workload to justify the
+# CUDA runtime). Kept in its own `RUN` (not chained with the
+# `requirements.txt` install below) specifically so an unrelated edit to
+# `requirements.txt` doesn't invalidate this layer and force re-downloading
+# these large wheels every time.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch==2.13.0 torchvision==0.28.0 \
+        --index-url https://download.pytorch.org/whl/cpu
+
+# Remaining Python dependencies, last — this is the layer most likely to
+# change from build to build (a new package, a version bump), so it's
+# ordered after the much larger, much more stable torch/torchvision layer
+# above rather than before it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 
 # --------------------------------------------------------------------------- #
@@ -57,7 +81,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 #   Minimal image: just the Python runtime, the prebuilt virtualenv, and the
 #   application source. No compiler, no pip cache, no apt package lists.
 # --------------------------------------------------------------------------- #
-FROM python:3.11-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 # libgl1 + libglib2.0-0: OpenCV's Python wheel (`opencv-python-headless`,
 # per requirements.txt) still dynamically links against a small set of
@@ -65,9 +89,15 @@ FROM python:3.11-slim AS runtime
 # (Qt, GTK, X11) is intentionally NOT installed here — that's what makes
 # `opencv-python-headless` the right choice over plain `opencv-python` for
 # a container.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+#
+# This RUN depends on nothing above it but the base image, so it's ordered
+# first in this stage — it changes only if these two package names/versions
+# change, which is far rarer than a `requirements.txt`/app-code edit, so it
+# stays cached across nearly every rebuild.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0
 
 # Run as a non-root user — standard container hardening practice; nothing
 # in this app needs root privileges at runtime.
