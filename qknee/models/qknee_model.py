@@ -123,6 +123,7 @@ class QKneeModel(nn.Module):
         n_qubits: int = N_QUBITS,
         n_layers: int = _config.quantum.n_layers,
         freeze_resnet: bool = _config.resnet.freeze_backbone,
+        vqc: Optional[nn.Module] = None,
     ):
         super().__init__()
 
@@ -134,7 +135,12 @@ class QKneeModel(nn.Module):
 
         self.resnet = ResNet18FeatureExtractor(freeze_backbone=freeze_resnet)
         self.pca_layer = PCAProjectionLayer.from_reducer(pca_reducer)
-        self.vqc = VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
+        # `vqc` lets a caller swap in a different ansatz (e.g.
+        # `DataReuploadingVQC`, `StronglyEntanglingVQCClassifier` — see
+        # `scripts/train.py --ansatz`) as long as it exposes the same
+        # `(B, n_qubits) -> (B, 1)` sigmoid-probability interface
+        # `VQCClassifier` does; defaults to the standard `VQCClassifier`.
+        self.vqc = vqc if vqc is not None else VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
 
         # PCA layer is a fixed, deterministic re-expression of a fitted
         # sklearn pipeline — never trainable, regardless of freeze_resnet.

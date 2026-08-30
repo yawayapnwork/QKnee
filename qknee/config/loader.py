@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -60,6 +61,7 @@ class PathsConfig:
     meniscus_checkpoint: Path
     eval_output_dir: Path
     deck_output_dir: Path
+    checkpoint_dir: Path
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,8 @@ class TrainingConfig:
     val_holdout_fraction: float
     pca_fit_max_samples: int
     max_train_samples: Optional[int]
+    early_stopping_patience: int
+    early_stopping_min_delta: float
 
 
 @dataclass(frozen=True)
@@ -209,6 +213,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             meniscus_checkpoint=Path(_require(paths_raw, "meniscus_checkpoint", "paths")),
             eval_output_dir=Path(_require(paths_raw, "eval_output_dir", "paths")),
             deck_output_dir=Path(_require(paths_raw, "deck_output_dir", "paths")),
+            checkpoint_dir=Path(_require(paths_raw, "checkpoint_dir", "paths")),
         )
 
         data_raw = raw["data"]
@@ -286,3 +291,80 @@ def load_config(config_path: Optional[Path] = None) -> QKneeConfig:
     """
     resolved = str((config_path or DEFAULT_CONFIG_PATH).resolve())
     return _load_cached(resolved)
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic dictionary merging — CLI/programmatic config overrides
+# --------------------------------------------------------------------------- #
+
+def deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merges `overrides` into a deep copy of `base` and returns
+    the result — `base` and `overrides` are both left unmodified.
+
+    Nested dicts merge key-by-key (so `overrides = {"training": {"n_epochs": 50}}`
+    only touches `training.n_epochs`, leaving every other `training.*` key
+    from `base` untouched); any other value in `overrides` (including an
+    explicit `None`) replaces the corresponding leaf in `base` outright.
+    This is the "dynamic dictionary merging" `load_config_with_overrides`
+    below applies CLI-supplied overrides through, so a caller only needs to
+    supply the handful of leaves it actually wants to change, shaped like a
+    fragment of `config.yaml` itself.
+
+    Args:
+        base: The starting nested dict (typically a parsed `config.yaml`).
+        overrides: A nested dict of the same shape (or a subset of it)
+            whose leaf values should win.
+
+    Returns:
+        A new merged dict; `base`/`overrides` are never mutated.
+    """
+    merged = copy.deepcopy(base)
+
+    def _merge_into(destination: Dict[str, Any], source: Dict[str, Any]) -> None:
+        for key, value in source.items():
+            if isinstance(value, dict) and isinstance(destination.get(key), dict):
+                _merge_into(destination[key], value)
+            else:
+                destination[key] = value
+
+    _merge_into(merged, overrides)
+    return merged
+
+
+def load_config_with_overrides(
+    overrides: Optional[Dict[str, Any]] = None,
+    config_path: Optional[Path] = None,
+) -> QKneeConfig:
+    """Loads `config.yaml` (env-var overrides still applied first, same as
+    `load_config`), deep-merges `overrides` on top via `deep_merge`, and
+    builds a fresh `QKneeConfig` from the result — the full
+    `_build_config` validation (e.g. `pca.n_components == quantum.n_qubits`)
+    still runs against the merged config, so an override that breaks a
+    cross-field invariant fails loudly here rather than silently producing
+    an inconsistent config downstream.
+
+    Unlike `load_config`, this is **not** cached — each call can supply
+    different overrides and must produce an independent `QKneeConfig` — so
+    it's meant for one-off CLI/script entry points (e.g.
+    `scripts/train.py`'s `--epochs`/`--batch_size`/`--learning_rate`
+    flags) rather than the module-level `_config = load_config()` pattern
+    used throughout the rest of the codebase.
+
+    Args:
+        overrides: A nested dict shaped like (a subset of) `config.yaml`,
+            e.g. `{"training": {"n_epochs": 50, "learning_rate": 0.02},
+            "data": {"batch_size": 16}}`. `None`/`{}` behaves exactly like
+            `load_config(config_path)`.
+        config_path: Optional alternate YAML path; defaults to the shipped
+            `config.yaml`.
+
+    Returns:
+        A `QKneeConfig` reflecting `config.yaml` + env-var overrides +
+        `overrides`, in that precedence order (later wins).
+    """
+    resolved_path = config_path or DEFAULT_CONFIG_PATH
+    raw = _read_yaml(resolved_path)
+    raw = _apply_env_overrides(raw)
+    if overrides:
+        raw = deep_merge(raw, overrides)
+    return _build_config(raw)

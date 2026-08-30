@@ -160,6 +160,38 @@ class VQCModel(nn.Module):
         return self.quantum_layer(x)
 
 
+class StronglyEntanglingVQCClassifier(nn.Module):
+    """`VQCModel` + a classical `Linear(1, 1) + Sigmoid` readout, so this
+    ansatz drops into any call site that expects the same `(B, n_qubits) ->
+    (B, 1)` probability-in-`[0, 1]` interface `VQCClassifier`
+    (`vqc.py`) and `DataReuploadingVQC` (`vqc_data_reuploading.py`) already
+    provide — e.g. `qknee.models.qknee_model.QKneeModel`'s pluggable `vqc`
+    argument, used by `scripts/train.py --ansatz strongly_entangling`.
+
+    `VQCModel` itself returns a single qubit's raw Pauli-Z expectation
+    value (a `(B,)` tensor in `[-1, 1]`, not a probability) with no
+    readout — this wrapper is the minimal addition needed to train it with
+    the same `BCELoss` full-batch loop the other two ansätze use.
+    """
+
+    def __init__(
+        self,
+        n_qubits: int = N_QUBITS,
+        n_layers: int = DEFAULT_N_LAYERS,
+        target_qubit: int = DEFAULT_TARGET_QUBIT,
+    ):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.circuit = VQCModel(n_qubits=n_qubits, n_layers=n_layers, target_qubit=target_qubit)
+        self.readout = nn.Linear(1, 1)
+        self.activation = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        expval = self.circuit(x).unsqueeze(-1)  # (B,) -> (B, 1)
+        return self.activation(self.readout(expval))
+
+
 if __name__ == "__main__":
     from qknee.config.logging_config import setup_logging
 
