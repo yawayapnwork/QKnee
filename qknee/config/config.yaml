@@ -34,7 +34,7 @@ resnet:
   freeze_backbone: true
   backend_engine: "pytorch"      # "pytorch" (eager ResNet18FeatureExtractor) or "onnx" (ONNXFeatureExtractor)
   onnx_path: "qknee/artifacts/resnet18_extractor.onnx"  # used only when backend_engine == "onnx"; see scripts/export_onnx.py
-  volumetric_aggregation: "attention"  # "mean" | "attention" | "topk_max" — see ResNet18FeatureExtractor.forward_volume
+  volumetric_aggregation: "mean"  # "mean" | "attention" | "topk_max" — see ResNet18FeatureExtractor.forward_volume
   topk_k: 5  # slices averaged per-channel when volumetric_aggregation == "topk_max"
 
 pca:

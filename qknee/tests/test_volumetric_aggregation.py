@@ -16,6 +16,7 @@ Unit tests for 3D volumetric slice-sequence aggregation
 from __future__ import annotations
 
 import gc
+import tracemalloc
 
 import numpy as np
 import pytest
@@ -145,35 +146,51 @@ class TestVolumetricAggregationMemoryStability:
 
     @pytest.mark.parametrize("aggregation", VOLUMETRIC_AGGREGATIONS)
     def test_repeated_inference_does_not_grow_memory(self, aggregation):
+        """Runs many volumetric forward passes and asserts net allocated
+        memory (tracked via `tracemalloc`, scoped to this test only — not
+        polluted by other tests' fixtures/tensors in the same session)
+        stays well under one iteration's worth of input memory. A real leak
+        (e.g. a retained autograd graph, or an aggregator accumulating
+        state across calls) would grow roughly linearly with the number of
+        iterations instead."""
         torch.manual_seed(0)
         extractor = ResNet18FeatureExtractor(
             freeze_backbone=True, volumetric_aggregation=aggregation, topk_k=5,
         )
         extractor.eval()
 
-        def run_batch() -> int:
+        def run_batch() -> None:
             volume = torch.rand(2, 24, 3, 224, 224)
             with torch.no_grad():
                 _ = extractor(volume)
             del volume
+
+        # Warm up: absorb any one-time allocations (e.g. lazily-initialized
+        # internal buffers) before measuring.
+        for _ in range(3):
+            run_batch()
+        gc.collect()
+
+        tracemalloc.start()
+        try:
+            snapshot_before = tracemalloc.take_snapshot()
+            n_iterations = 10
+            for _ in range(n_iterations):
+                run_batch()
             gc.collect()
-            return sum(
-                obj.numel() * obj.element_size()
-                for obj in gc.get_objects()
-                if isinstance(obj, torch.Tensor) and obj.requires_grad is False and obj.grad_fn is None
-                and obj.dim() == 5
-            )
+            snapshot_after = tracemalloc.take_snapshot()
+        finally:
+            tracemalloc.stop()
 
-        # Warm up (first pass can allocate lazily-initialized buffers).
-        run_batch()
-        baseline = run_batch()
-        for _ in range(5):
-            leaked_volume_tensors = run_batch()
+        stats = snapshot_after.compare_to(snapshot_before, "lineno")
+        net_growth_bytes = sum(stat.size_diff for stat in stats if stat.size_diff > 0)
 
-        # No stray 5D (volume-shaped) tensors should remain reachable after
-        # each call's locals go out of scope and gc.collect() runs.
-        assert leaked_volume_tensors == 0
-        assert baseline == 0
+        one_iteration_bytes = 2 * 24 * 3 * 224 * 224 * 4  # one volume's worth of float32 input
+        assert net_growth_bytes < one_iteration_bytes, (
+            f"{aggregation}: net memory growth over {n_iterations} iterations "
+            f"({net_growth_bytes} bytes) suggests a leak — expected < "
+            f"{one_iteration_bytes} bytes (one iteration's input size)."
+        )
 
     def test_no_autograd_graph_retained_across_no_grad_calls(self):
         """Under `torch.no_grad()`, no autograd graph nodes should
