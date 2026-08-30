@@ -477,17 +477,28 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
     Grad-CAM overlay, and ACL/meniscus risk scores into a radiology-style
     PDF via `qknee.xai.report_generator`. A failed generation degrades to
     a warning rather than crashing the dashboard."""
-    from qknee.xai.report_generator import PatientMetadata, generate_radiology_report_bytes
+    from qknee.xai.report_generator import generate_radiology_report
 
     st.markdown("#### Report")
     try:
-        pdf_bytes = generate_radiology_report_bytes(
+        pdf_bytes = generate_radiology_report(
+            output_path=None,
             mri_slice=display_slice,
-            acl_risk=result.acl_risk,
-            meniscus_risk=result.meniscus_risk,
             gradcam_overlay=result.gradcam_overlay,
-            patient_metadata=PatientMetadata(scan_description="Knee MRI — Q-Knee dashboard session"),
-            backend=result.backend,
+            prediction_results={
+                "acl_risk": result.acl_risk,
+                "meniscus_risk": result.meniscus_risk,
+                "resnet_latency_ms": result.resnet_latency_ms,
+                "pca_latency_ms": result.pca_latency_ms,
+                "quantum_latency_ms": result.quantum_latency_ms,
+                "total_latency_ms": result.total_latency_ms,
+                "backend": result.backend,
+            },
+            metadata={
+                "modality": "MRI Knee",
+                "clinical_indication": "Q-Knee dashboard session",
+                "scan_date": datetime.now().strftime("%Y-%m-%d"),
+            },
         )
     except Exception as exc:  # noqa: BLE001 - a failed report shouldn't crash the dashboard
         logger.warning("PDF report generation failed: %s", exc)
