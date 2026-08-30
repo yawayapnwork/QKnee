@@ -28,7 +28,7 @@ Regenerate this table and the accompanying charts with:
 
 ```bash
 python -m qknee.models.evaluate         # prints the table, saves eval_outputs/*.png
-python scripts/generate_deck_assets.py  # pitch-deck-ready figures in deck_assets/
+python scripts/generate_deck_assets.py  # pitch-deck-ready figures (.png + .svg) in qknee/artifacts/deck_figures/
 ```
 
 ---
@@ -237,7 +237,7 @@ qknee/
 └── artifacts/                      # fitted pca_scaler.pkl / qknee_model.pt (gitignored)
 
 scripts/
-├── generate_deck_assets.py         # pitch-deck figures (bar charts, slice/CAM/circuit triptych)
+├── generate_deck_assets.py         # pitch-deck figures: ROC+efficiency chart, VQC circuit diagram, clinical case walkthrough (.png+.svg in qknee/artifacts/deck_figures/)
 └── export_onnx.py                  # exports ResNet18FeatureExtractor to ONNX (see ONNXFeatureExtractor)
 
 .streamlit/config.toml              # dark theme config
