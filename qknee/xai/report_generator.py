@@ -134,32 +134,41 @@ def _get(d: Optional[Dict[str, Any]], key: str, default: Any = None) -> Any:
     return default if not d else d.get(key, default)
 
 
-def _predicted_condition(acl_risk: Optional[float], meniscus_risk: Optional[float]) -> str:
-    """Single overall predicted condition across the three demo categories
-    — Normal / ACL Tear / Meniscal Tear — for the Clinical Impression
-    section, derived from the two per-condition risk scores at the
-    standard 0.5 classification threshold. If both cross threshold, both
-    are named (a real dual pathology is clinically possible)."""
-    acl_positive = acl_risk is not None and acl_risk >= 0.5
-    meniscus_positive = meniscus_risk is not None and meniscus_risk >= 0.5
+# The three demo-category conditions this report breaks risk down by —
+# matches `qknee.models.vqc_multitarget.TRIAD_CONDITIONS`' primary clinical
+# triad (ACL, MCL, Medial Meniscus), the three conditions a trained
+# multi-target head scores with a dedicated quantum sub-circuit each.
+# `(display_name, prediction_results risk key, condition-name-for-"X Tear")`.
+CONDITIONS: Tuple[Tuple[str, str, str], ...] = (
+    ("ACL", "acl_risk", "ACL Tear"),
+    ("MCL", "mcl_risk", "MCL Tear"),
+    ("Meniscus", "meniscus_risk", "Meniscal Tear"),
+)
 
-    if acl_risk is None and meniscus_risk is None:
+
+def _predicted_condition(risks: Sequence[Optional[float]]) -> str:
+    """Single overall predicted condition across `CONDITIONS` — for the
+    Clinical Impression section, derived from each condition's risk score
+    at the standard 0.5 classification threshold. Every condition crossing
+    threshold is named (real multi-site pathology is clinically possible);
+    "Normal" only when every supplied risk is sub-threshold."""
+    if all(risk is None for risk in risks):
         return "N/A (insufficient data)"
-    if acl_positive and meniscus_positive:
-        return "ACL Tear & Meniscal Tear"
-    if acl_positive:
-        return "ACL Tear"
-    if meniscus_positive:
-        return "Meniscal Tear"
-    return "Normal"
+
+    positive_labels = [
+        tear_label
+        for (_, _, tear_label), risk in zip(CONDITIONS, risks)
+        if risk is not None and risk >= 0.5
+    ]
+    return " & ".join(positive_labels) if positive_labels else "Normal"
 
 
-def _overall_risk(acl_risk: Optional[float], meniscus_risk: Optional[float]) -> Optional[float]:
-    """Overall risk score for the Clinical Impression header: the higher
-    of the two condition-specific risks (worst-case/triage framing — the
-    report should not understate risk by averaging a clear positive
-    finding against an unrelated negative one)."""
-    candidates = [r for r in (acl_risk, meniscus_risk) if r is not None]
+def _overall_risk(risks: Sequence[Optional[float]]) -> Optional[float]:
+    """Overall risk score for the Clinical Impression header: the highest
+    of the supplied condition-specific risks (worst-case/triage framing —
+    the report should not understate risk by averaging a clear positive
+    finding against unrelated negative ones)."""
+    candidates = [r for r in risks if r is not None]
     return max(candidates) if candidates else None
 
 
@@ -231,9 +240,10 @@ def generate_radiology_text_snippet(
     Slack/API summary) rather than a full PDF page.
 
     Args:
-        prediction_results: Recognized keys: `acl_risk`, `meniscus_risk`
-            (floats in `[0, 1]`, or `None`/absent), plus optional
-            `acl_classification`/`meniscus_classification` override strings.
+        prediction_results: Recognized keys: `acl_risk`, `mcl_risk`,
+            `meniscus_risk` (floats in `[0, 1]`, or `None`/absent), plus
+            optional `acl_classification`/`mcl_classification`/
+            `meniscus_classification` override strings.
         metadata: Recognized keys: `patient_id`, `plane`/`modality`,
             `clinical_indication` — all optional, folded into the header
             line when present.
@@ -242,24 +252,23 @@ def generate_radiology_text_snippet(
         A multi-line plain-text string, always ending with the standard
         research-prototype disclaimer sentence.
     """
-    acl_risk = _get(prediction_results, "acl_risk")
-    meniscus_risk = _get(prediction_results, "meniscus_risk")
-    acl_tier = _risk_tier(acl_risk)
-    meniscus_tier = _risk_tier(meniscus_risk)
-    acl_label = _get(prediction_results, "acl_classification") or _classification_label(acl_risk)
-    meniscus_label = _get(prediction_results, "meniscus_classification") or _classification_label(meniscus_risk)
+    risks = [_get(prediction_results, risk_key) for _, risk_key, _ in CONDITIONS]
 
     case_id = _get(metadata, "patient_id", "N/A")
     plane = _get(metadata, "plane") or _get(metadata, "modality", "unspecified plane")
 
     lines = [
         f"Q-KNEE AUTOMATED SCREENING SUMMARY — Case {case_id} ({plane})",
-        f"Predicted condition: {_predicted_condition(acl_risk, meniscus_risk)}",
-        f"ACL: {_format_percent(acl_risk)} tear-risk probability, {acl_tier} tier — {acl_label}.",
-        f"Meniscus: {_format_percent(meniscus_risk)} tear-risk probability, {meniscus_tier} tier — {meniscus_label}.",
-        "Research prototype output, not for clinical use — findings require independent review by a "
-        "licensed radiologist or orthopedic clinician.",
+        f"Predicted condition: {_predicted_condition(risks)}",
     ]
+    for (display_name, _, _), risk in zip(CONDITIONS, risks):
+        tier = _risk_tier(risk)
+        label = _get(prediction_results, f"{display_name.lower()}_classification") or _classification_label(risk)
+        lines.append(f"{display_name}: {_format_percent(risk)} tear-risk probability, {tier} tier — {label}.")
+    lines.append(
+        "Research prototype output, not for clinical use — findings require independent review by a "
+        "licensed radiologist or orthopedic clinician."
+    )
     return "\n".join(lines)
 
 
@@ -358,11 +367,10 @@ def _draw_image_panel(
 # Tables
 # --------------------------------------------------------------------------- #
 def _clinical_impression_table(prediction_results: Dict[str, Any]) -> Table:
-    acl_risk = _get(prediction_results, "acl_risk")
-    meniscus_risk = _get(prediction_results, "meniscus_risk")
-    overall_risk = _overall_risk(acl_risk, meniscus_risk)
+    risks = [_get(prediction_results, risk_key) for _, risk_key, _ in CONDITIONS]
+    overall_risk = _overall_risk(risks)
     overall_tier = _risk_tier(overall_risk)
-    predicted_condition = _predicted_condition(acl_risk, meniscus_risk)
+    predicted_condition = _predicted_condition(risks)
 
     overall_ci = _confidence_interval(overall_risk, _get(prediction_results, "overall_risk_ci"))
     ci_source = "caller-supplied" if _get(prediction_results, "overall_risk_ci") is not None else "heuristic ±{:.0f}pp".format(DEFAULT_CI_MARGIN * 100)
@@ -474,21 +482,21 @@ def _quantum_attribution_table(prediction_results: Dict[str, Any]) -> Optional[T
 
 
 def _diagnostic_table(prediction_results: Dict[str, Any]) -> Table:
-    acl_risk = _get(prediction_results, "acl_risk")
-    meniscus_risk = _get(prediction_results, "meniscus_risk")
-    acl_tier = _risk_tier(acl_risk)
-    meniscus_tier = _risk_tier(meniscus_risk)
-    acl_label = _get(prediction_results, "acl_classification") or _classification_label(acl_risk)
-    meniscus_label = _get(prediction_results, "meniscus_classification") or _classification_label(meniscus_risk)
+    """Per-condition Diagnostic Breakdown table: one row per `CONDITIONS`
+    entry (ACL / MCL / Meniscus — the primary clinical triad
+    `qknee.models.vqc_multitarget` scores with a dedicated quantum
+    sub-circuit each), each with its tear-risk probability, confidence
+    interval, risk tier, and 0.5-threshold classification label."""
+    rows = [["Region", "Tear Risk", "95% CI", "Risk Tier", "Classification"]]
+    tiers = []
+    for display_name, risk_key, _ in CONDITIONS:
+        risk = _get(prediction_results, risk_key)
+        tier = _risk_tier(risk)
+        label = _get(prediction_results, f"{display_name.lower()}_classification") or _classification_label(risk)
+        ci = _confidence_interval(risk, _get(prediction_results, f"{risk_key}_ci"))
+        rows.append([display_name, _format_percent(risk), _format_ci(ci), tier, label])
+        tiers.append(tier)
 
-    acl_ci = _confidence_interval(acl_risk, _get(prediction_results, "acl_risk_ci"))
-    meniscus_ci = _confidence_interval(meniscus_risk, _get(prediction_results, "meniscus_risk_ci"))
-
-    rows = [
-        ["Region", "Tear Risk", "95% CI", "Risk Tier", "Classification"],
-        ["ACL", _format_percent(acl_risk), _format_ci(acl_ci), acl_tier, acl_label],
-        ["Meniscus", _format_percent(meniscus_risk), _format_ci(meniscus_ci), meniscus_tier, meniscus_label],
-    ]
     table = Table(rows, colWidths=[1.0 * inch, 1.0 * inch, 1.3 * inch, 1.0 * inch, 1.75 * inch])
     style = [
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
@@ -500,11 +508,10 @@ def _diagnostic_table(prediction_results: Dict[str, Any]) -> Table:
         ("ALIGN", (1, 0), (-1, -1), "CENTER"),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("TEXTCOLOR", (3, 1), (3, 1), _TIER_COLORS[acl_tier]),
-        ("FONTNAME", (3, 1), (3, 1), "Helvetica-Bold"),
-        ("TEXTCOLOR", (3, 2), (3, 2), _TIER_COLORS[meniscus_tier]),
-        ("FONTNAME", (3, 2), (3, 2), "Helvetica-Bold"),
     ]
+    for row_index, tier in enumerate(tiers, start=1):
+        style.append(("TEXTCOLOR", (3, row_index), (3, row_index), _TIER_COLORS[tier]))
+        style.append(("FONTNAME", (3, row_index), (3, row_index), "Helvetica-Bold"))
     table.setStyle(TableStyle(style))
     return table
 
@@ -614,13 +621,18 @@ def generate_radiology_report(
             `None` to render a placeholder panel.
         prediction_results: Diagnostic/inference payload. Recognized keys
             (all optional, missing ones render as "N/A"):
-                acl_risk, meniscus_risk           - floats in [0, 1]
-                acl_risk_ci, meniscus_risk_ci,
-                overall_risk_ci                   - optional (low, high)
+                acl_risk, mcl_risk, meniscus_risk - floats in [0, 1] — the
+                                                     primary clinical triad
+                                                     (matches
+                                                     qknee.models.vqc_multitarget.
+                                                     TRIAD_CONDITIONS)
+                acl_risk_ci, mcl_risk_ci,
+                meniscus_risk_ci, overall_risk_ci - optional (low, high)
                                                      confidence-interval
                                                      overrides; see
                                                      `_confidence_interval`
                 acl_classification,
+                mcl_classification,
                 meniscus_classification           - override label strings;
                                                      default is a 0.5-threshold
                                                      "TEAR LIKELY"/"NO TEAR
@@ -654,8 +666,6 @@ def generate_radiology_report(
     c.setTitle("Q-Knee Radiology Report")
 
     generated_at = datetime.now(timezone.utc)
-    acl_risk = _get(prediction_results, "acl_risk")
-    meniscus_risk = _get(prediction_results, "meniscus_risk")
     backend = _get(prediction_results, "backend", "live")
 
     # =================================================================== #
@@ -798,6 +808,7 @@ if __name__ == "__main__":
         gradcam_overlay=dummy_overlay,
         prediction_results={
             "acl_risk": 0.72,
+            "mcl_risk": 0.44,
             "meniscus_risk": 0.31,
             "pauli_z_expectations": [0.42, -0.18, 0.63, -0.07],
             "readout_weights": [0.85, -0.40, 1.10, 0.25],
@@ -825,7 +836,7 @@ if __name__ == "__main__":
         output_path=None,
         mri_slice=dummy_slice,
         gradcam_overlay=None,
-        prediction_results={"acl_risk": 0.15, "meniscus_risk": None, "backend": "mock"},
+        prediction_results={"acl_risk": 0.15, "mcl_risk": None, "meniscus_risk": None, "backend": "mock"},
         metadata={},
     )
     assert bytes_only[:4] == b"%PDF"
