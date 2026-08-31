@@ -540,8 +540,9 @@ def load_best_checkpoint_or_init(
     path = Path(path)
     if not path.exists():
         logger.warning(
-            "No checkpoint found at %s; proceeding with deterministic pretrained "
-            "ResNet18 backbone weights and randomly initialized quantum VQC parameters.",
+            "[WARN] Checkpoint not found. Initialized deterministic hybrid weights for "
+            "demo/eval mode. (looked for %s — proceeding with deterministic pretrained "
+            "ResNet18 backbone weights and randomly initialized quantum VQC parameters.)",
             path,
         )
         return model

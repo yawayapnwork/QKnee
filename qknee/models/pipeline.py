@@ -335,9 +335,20 @@ class PipelineRunner:
             self._load_vqc_checkpoint(checkpoint_path)
             logger.info("Loaded trained %s weights from %s", classifier_cls.__name__, checkpoint_path)
         else:
+            # Graceful missing-checkpoint handler: never raises
+            # FileNotFoundError here — a fresh checkout with no trained
+            # qknee/artifacts/checkpoints/best_qknee_model.pt yet must
+            # still construct a runnable PipelineRunner/QKneePipeline,
+            # backed by the classical ResNet18 backbone's deterministic
+            # ImageNet-pretrained weights (loaded unconditionally above,
+            # regardless of this checkpoint) and a freshly, randomly
+            # initialized quantum VQC (classifier_cls(...) above already
+            # did this — this branch only logs that fact).
             logger.warning(
-                "No %s checkpoint found at %s; proceeding with deterministic pretrained "
-                "ResNet18 backbone weights and randomly initialized quantum VQC parameters.",
+                "[WARN] Checkpoint not found. Initialized deterministic hybrid weights for "
+                "demo/eval mode. (looked for a %s checkpoint at %s — proceeding with "
+                "deterministic pretrained ResNet18 backbone weights and randomly initialized "
+                "quantum VQC parameters.)",
                 classifier_cls.__name__, checkpoint_path,
             )
         self.vqc.to(self.device)
@@ -619,6 +630,36 @@ class PipelineRunner:
 
         logger.info("PipelineRunner.run: risk_score=%.4f, source=%r", risk_score, source)
         return PipelineResult(risk_score=risk_score, quantum_angles=quantum_angles, gradcam_heatmap=heatmap)
+
+
+class QKneePipeline(PipelineRunner):
+    """`PipelineRunner` under the name/entry-point shape callers expect
+    when they just want "give it a volume, get a risk score" —
+    `predict_volume()` below is a thin convenience wrapper around `run()`,
+    defaulting `skip_gradcam=True` (most `predict`-style callers don't
+    need the explainability heatmap).
+
+    `QKneePipeline()` (zero arguments — the config-driven default paths)
+    is always safe to construct even on a completely fresh checkout with
+    no trained model checkpoint at
+    `qknee/artifacts/checkpoints/best_qknee_model.pt` yet: see
+    `PipelineRunner.__init__`'s missing-checkpoint branch, which logs a
+    warning and proceeds with the classical ResNet18 backbone's
+    deterministic ImageNet-pretrained weights plus a freshly, randomly
+    initialized quantum VQC, rather than raising. (A fitted PCA artifact —
+    `config.paths.pca_artifact`, a *scaler*, not a trained-model
+    checkpoint — is a separate, still-required input: unlike a VQC's
+    weights, a PCA projection cannot be meaningfully randomly initialized,
+    it has to be fit from real data.)
+    """
+
+    def predict_volume(self, volume: InputType, skip_gradcam: bool = True) -> PipelineResult:
+        """Runs one MRI slice/volume through the full DataIngestion ->
+        ResNet18 -> PCA -> VQC (-> GradCAM) chain and returns a
+        `PipelineResult`. Identical to `run()`, just defaulting
+        `skip_gradcam=True` for the common "just the score" case.
+        """
+        return self.run(volume, skip_gradcam=skip_gradcam)
 
 
 # --------------------------------------------------------------------------- #

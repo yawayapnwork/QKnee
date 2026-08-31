@@ -118,3 +118,102 @@ class TestSimulatorResourceLimitBehavior:
                 qknee_model(dummy_image_batch)
 
         assert resnet_call_count == 1
+
+
+class TestQuantumDeviceSafetyGuard:
+    """`qknee.models.vqc.load_quantum_device` is the single shared guard
+    every VQC ansatz's `build_qnode`/circuit-builder routes through —
+    verifies it actually falls back to `default.qubit` (never crashes the
+    caller) when the configured device/plugin is unavailable, memory-
+    exhausted, or otherwise broken, and that every VQC module in this
+    project (`vqc.py`, `vqc_data_reuploading.py`, `vqc_multitarget.py`,
+    `vqc_strongly_entangling.py`) actually uses it rather than calling
+    `qml.device(...)` directly and unguarded."""
+
+    def test_default_qubit_loads_normally(self):
+        from qknee.models.vqc import load_quantum_device
+
+        device = load_quantum_device("default.qubit", 4)
+        assert device is not None
+
+    def test_falls_back_to_default_qubit_for_an_unknown_device_name(self, caplog: pytest.LogCaptureFixture):
+        from qknee.models.vqc import load_quantum_device
+
+        with caplog.at_level("WARNING", logger="qknee.models.vqc"):
+            device = load_quantum_device("this.device.does.not.exist", 4)
+
+        assert device is not None
+        assert device.name == "default.qubit"
+        assert any("falling back to" in record.message.lower() for record in caplog.records)
+
+    def test_falls_back_when_the_configured_device_raises_a_memory_error(self):
+        """Simulates an accelerator backend failing to allocate its
+        state-vector buffer — `MemoryError` is a plain `Exception`
+        subclass, so the guard's generic `except Exception` already
+        covers it; this pins that behavior explicitly."""
+        from unittest.mock import patch
+
+        from qknee.models import vqc as vqc_module
+
+        real_device = vqc_module.qml.device
+
+        def _raise_memory_error(device_name, **kwargs):
+            if device_name == "some.accelerator.backend":
+                raise MemoryError("failed to allocate state-vector buffer")
+            return real_device(device_name, **kwargs)
+
+        with patch.object(vqc_module.qml, "device", side_effect=_raise_memory_error):
+            device = vqc_module.load_quantum_device("some.accelerator.backend", 4)
+
+        assert device is not None
+
+    def test_reraises_if_default_qubit_itself_is_broken(self):
+        """No infinite fallback loop: if even `default.qubit` fails to
+        load, the guard must propagate that failure rather than retry
+        forever or silently return `None`."""
+        from unittest.mock import patch
+
+        from qknee.models import vqc as vqc_module
+
+        with patch.object(
+            vqc_module.qml, "device", side_effect=RuntimeError("simulated total device failure"),
+        ):
+            with pytest.raises(RuntimeError, match="simulated total device failure"):
+                vqc_module.load_quantum_device("default.qubit", 4)
+
+    @pytest.mark.parametrize(
+        "module_name, builder_name, builder_kwargs",
+        [
+            ("qknee.models.vqc", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
+            ("qknee.models.vqc_data_reuploading", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
+            ("qknee.models.vqc_multitarget", "build_multi_observable_qnode", {"n_qubits": 4, "n_layers": 1}),
+            ("qknee.models.vqc_strongly_entangling", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
+        ],
+    )
+    def test_every_vqc_ansatz_builds_successfully_when_the_configured_device_is_broken(
+        self, module_name, builder_name, builder_kwargs, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The real regression test for this hardening pass: patches each
+        module's own `_config.quantum.device` to a nonexistent backend
+        name and confirms `build_qnode`/`build_multi_observable_qnode`
+        still succeeds (falls back to `default.qubit` via
+        `load_quantum_device`), rather than raising straight out of a
+        direct, unguarded `qml.device(...)` call — the exact gap
+        `vqc_strongly_entangling.py` had before this hardening pass."""
+        import dataclasses
+        import importlib
+
+        module = importlib.import_module(module_name)
+        # `QuantumConfig`/`QKneeConfig` are frozen dataclasses (see
+        # qknee.config.loader) — can't assign `.device` in place, so swap
+        # in a fresh config via `dataclasses.replace` instead.
+        broken_quantum_config = dataclasses.replace(
+            module._config.quantum, device="totally.nonexistent.accelerator.plugin",
+        )
+        broken_config = dataclasses.replace(module._config, quantum=broken_quantum_config)
+        monkeypatch.setattr(module, "_config", broken_config)
+
+        builder = getattr(module, builder_name)
+        circuit = builder(**builder_kwargs)
+
+        assert circuit is not None

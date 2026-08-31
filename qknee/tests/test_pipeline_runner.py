@@ -33,7 +33,7 @@ import pytest
 import torch
 
 from qknee.models.pca_reducer import QuantumDimReducer
-from qknee.models.pipeline import PipelineResult, PipelineRunner, PipelineValidationError
+from qknee.models.pipeline import PipelineResult, PipelineRunner, PipelineValidationError, QKneePipeline
 from qknee.models.qknee_model import QKneeModel, save_checkpoint
 from qknee.models.vqc import VQCClassifier
 
@@ -553,3 +553,129 @@ class TestReportGenerationValidation:
         )
         page_1_text = pypdf.PdfReader(BytesIO(pdf_bytes)).pages[0].extract_text()
         assert "TEST CLINIC LETTERHEAD" in page_1_text
+
+
+# --------------------------------------------------------------------------- #
+# 7. Graceful missing-checkpoint handling (QKneePipeline / QKneeModel)
+# --------------------------------------------------------------------------- #
+
+class TestGracefulMissingCheckpointFallback:
+    """Verifies `QKneePipeline` (a `PipelineRunner` subclass — see
+    `qknee.models.pipeline`) never raises `FileNotFoundError`/crashes when
+    `qknee/artifacts/checkpoints/best_qknee_model.pt` doesn't exist: it
+    falls back to the classical ResNet18 backbone's deterministic
+    ImageNet-pretrained weights plus a freshly, randomly initialized
+    quantum VQC, logging a specific warning instead. This is the offline
+    "fresh checkout, no trained checkpoint yet" scenario every other
+    inference entry point (the API server, the dashboards) already relies
+    on being safe."""
+
+    def test_predict_volume_executes_without_a_local_checkpoint_file(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        """The exact scenario from this task's spec: `QKneePipeline()`
+        constructed with no VQC checkpoint on disk, then
+        `.predict_volume(...)` run end to end on CPU."""
+        assert not missing_checkpoint_path.exists()
+
+        pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        rng = np.random.default_rng(11)
+        volume = rng.integers(0, 255, size=(6, 224, 224), dtype=np.uint8)
+
+        result = pipeline.predict_volume(volume)
+
+        assert isinstance(result, PipelineResult)
+        assert 0.0 <= result.risk_score <= 1.0
+        assert result.quantum_angles.shape == (1, 4)
+
+    def test_predict_volume_defaults_to_skipping_gradcam(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        rng = np.random.default_rng(12)
+        volume = rng.integers(0, 255, size=(4, 224, 224), dtype=np.uint8)
+
+        result = pipeline.predict_volume(volume)
+
+        assert result.gradcam_heatmap is None
+
+    def test_predict_volume_can_still_request_gradcam_explicitly(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        rng = np.random.default_rng(13)
+        volume = rng.integers(0, 255, size=(4, 224, 224), dtype=np.uint8)
+
+        result = pipeline.predict_volume(volume, skip_gradcam=False)
+
+        assert result.gradcam_heatmap is not None
+        assert result.gradcam_heatmap.ndim == 2
+
+    def test_missing_checkpoint_logs_the_required_warning_message(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path, caplog: pytest.LogCaptureFixture,
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="qknee.models.pipeline"):
+            QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+
+        assert any(
+            "[WARN] Checkpoint not found. Initialized deterministic hybrid weights for demo/eval mode."
+            in record.message
+            for record in caplog.records
+        )
+
+    def test_two_independently_constructed_pipelines_get_different_random_vqc_weights(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        """"Randomized variational parameters" per the spec — two
+        no-checkpoint pipelines built without a shared seed should not
+        coincidentally end up with identical quantum weights."""
+        torch.manual_seed(1)
+        pipeline_a = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        torch.manual_seed(2)
+        pipeline_b = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+
+        weights_a = next(iter(pipeline_a.vqc.quantum_layer.parameters())).detach()
+        weights_b = next(iter(pipeline_b.vqc.quantum_layer.parameters())).detach()
+        assert not torch.allclose(weights_a, weights_b)
+
+    def test_resnet_backbone_weights_are_deterministic_across_pipelines(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        """The classical ResNet18 half is unconditionally loaded from the
+        fixed, deterministic ImageNet-pretrained checkpoint regardless of
+        whether a qknee-trained VQC checkpoint exists — verified here by
+        comparing backbone weights across two independently constructed,
+        no-checkpoint pipelines."""
+        pipeline_a = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        pipeline_b = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+
+        conv1_a = pipeline_a.feature_extractor.backbone[0].weight.detach()
+        conv1_b = pipeline_b.feature_extractor.backbone[0].weight.detach()
+        torch.testing.assert_close(conv1_a, conv1_b)
+
+    def test_qknee_model_load_best_checkpoint_or_init_logs_the_required_warning(
+        self, tmp_path: Path, fitted_reducer, caplog: pytest.LogCaptureFixture,
+    ):
+        """`qknee.models.qknee_model.load_best_checkpoint_or_init` — the
+        `QKneeModel`-level counterpart of `QKneePipeline`'s constructor
+        fallback above — carries the same required log message."""
+        import logging
+
+        from qknee.models.qknee_model import QKneeModel, load_best_checkpoint_or_init
+
+        torch.manual_seed(0)
+        model = QKneeModel(pca_reducer=fitted_reducer, n_qubits=4, n_layers=3)
+        missing_path = tmp_path / "best_qknee_model.pt"
+        assert not missing_path.exists()
+
+        with caplog.at_level(logging.WARNING, logger="qknee.models.qknee_model"):
+            returned = load_best_checkpoint_or_init(model, path=missing_path)
+
+        assert returned is model
+        assert any(
+            "[WARN] Checkpoint not found. Initialized deterministic hybrid weights for demo/eval mode."
+            in record.message
+            for record in caplog.records
+        )

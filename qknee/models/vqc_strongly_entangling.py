@@ -38,6 +38,7 @@ import torch.nn as nn
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.models.vqc import load_quantum_device
 
 logger = get_logger(__name__)
 _config = load_config()
@@ -75,13 +76,16 @@ def build_qnode(
 
     Returns:
         A `qml.QNode` with signature `circuit(inputs, weights) -> scalar`,
-        using PennyLane's `default.qubit` simulator and the Torch interface
+        using PennyLane's `default.qubit` simulator (or `config.quantum.
+        device`, transparently falling back to `default.qubit` if that
+        backend/accelerator plugin is unavailable or fails to load — see
+        `qknee.models.vqc.load_quantum_device`) and the Torch interface
         with backprop-based differentiation.
     """
     if not 0 <= target_qubit < n_qubits:
         raise ValueError(f"target_qubit must be in [0, {n_qubits - 1}], got {target_qubit}")
 
-    device = qml.device(_config.quantum.device, wires=n_qubits)
+    device = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
     @qml.qnode(device, interface="torch", diff_method=_config.quantum.diff_method)

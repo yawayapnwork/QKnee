@@ -48,9 +48,14 @@ def load_quantum_device(device_name: str, n_qubits: int) -> "qml.Device":
     `default.qubit` state-vector simulator if the requested backend (e.g.
     Qiskit Aer's `qiskit.aer`, or PennyLane-Lightning's `lightning.qubit`)
     fails to load or throws an environment error — a missing optional
-    plugin, a missing compiled extension, etc. `default.qubit` ships with
-    PennyLane itself, so it's always available and is the safe universal
-    fallback the rest of this project trains/tests against.
+    plugin, a missing compiled extension, an accelerator/GPU backend that
+    isn't actually present on this host, a `MemoryError` allocating a
+    backend's state-vector buffer, etc. Every `qml.device(...)` construction
+    failure is caught generically (`except Exception`, `MemoryError`
+    included — it's a builtin `Exception` subclass) and treated the same
+    way: log and fall back. `default.qubit` ships with PennyLane itself, so
+    it's always available and is the safe universal fallback the rest of
+    this project trains/tests against.
     """
     try:
         return qml.device(device_name, wires=n_qubits)
