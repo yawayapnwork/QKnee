@@ -195,7 +195,12 @@ class TestLandingPageRendering:
             "③ Explainability & Report",
         ]
 
-    def test_launch_diagnostic_cta_switches_to_diagnostic_tab_first(self):
+    def test_launch_diagnostic_cta_routes_to_login_when_unauthenticated(self):
+        """As of `qknee.ui.auth_view`'s integration, the Diagnostic
+        workspace requires authentication — an unauthenticated visitor
+        clicking this CTA lands on the login page (with `qknee_active_view`
+        left as "diagnostic" so they land on that exact tab once they do
+        sign in; see `test_demo_login_after_launch_cta_lands_on_diagnostic_tab`)."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
         launch_button = next(b for b in at.button if "Launch Live Diagnostic" in b.label)
@@ -204,6 +209,23 @@ class TestLandingPageRendering:
 
         assert not at.exception
         assert at.session_state["qknee_active_view"] == "diagnostic"
+        assert at.session_state["current_page"] == "login"
+        assert [t.label for t in at.tabs] == ["🔐 Sign In", "📝 Create Account"]
+
+    def test_demo_login_after_launch_cta_lands_on_diagnostic_tab(self):
+        """The full unauthenticated-CTA-then-sign-in round trip: the
+        visitor's originally-requested "diagnostic" destination survives
+        the login detour."""
+        at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
+        at.run()
+        next(b for b in at.button if "Launch Live Diagnostic" in b.label).click().run()
+        demo_button = next(b for b in at.button if "Demo Account" in b.label)
+
+        demo_button.click().run()
+
+        assert not at.exception
+        assert at.session_state["authenticated"] is True
+        assert at.session_state["current_page"] == "workspace"
         assert at.tabs[0].label == "🔬 Diagnostic View"
 
     def test_explore_benchmarks_cta_switches_to_benchmark_tab_first(self):
@@ -218,15 +240,21 @@ class TestLandingPageRendering:
         assert at.tabs[0].label == "📊 Quantum vs Classical Benchmark"
 
     def test_back_to_home_returns_to_the_landing_view(self):
+        """The sidebar 'Back to Home' button only renders once inside the
+        workspace, which (for the Diagnostic tab) now requires signing in
+        first — so this test signs in via the Demo Account before
+        exercising it."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
         next(b for b in at.button if "Launch Live Diagnostic" in b.label).click().run()
+        next(b for b in at.button if "Demo Account" in b.label).click().run()
         home_button = next(b for b in at.sidebar.button if "Back to Home" in b.label)
 
         home_button.click().run()
 
         assert not at.exception
         assert at.session_state["qknee_active_view"] == "landing"
+        assert at.session_state["current_page"] == "landing"
         assert any("Launch Live Diagnostic" in b.label for b in at.button)
 
     def test_showcase_preview_click_reveals_the_case_risk_metric(self):

@@ -39,8 +39,10 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.ui import auth_view
 from qknee.ui.landing_page import (
     VIEW_BENCHMARK,
+    VIEW_DIAGNOSTIC,
     VIEW_LANDING,
     VIEW_STATE_KEY,
     render_landing_page,
@@ -235,6 +237,16 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     in-process — the two-service (api + ui) docker-compose
     architecture's intended data path.
 
+    `/predict` requires a bearer token for a `radiologist`/`triage_nurse`
+    account (see `qknee.api.auth.require_role`) — this is only ever called
+    from `render_diagnostic_tab`, which already gates on
+    `auth_view.can_run_inference()` before reaching here, so
+    `st.session_state[auth_view.TOKEN_KEY]` is expected to hold a real,
+    role-eligible JWT by this point. Sends it as `Authorization: Bearer
+    <token>`; a missing/expired/insufficient-role token surfaces as a 401
+    `HTTPError`, which `raise_for_status()` below turns into the same
+    "falls back to in-process/mock" path any other API failure takes.
+
     The API's `QKneeModel` exposes one unified risk score (no separate
     ACL/MCL/meniscus heads), so `mcl_risk`/`meniscus_risk` are left `None`
     here rather than fabricating scores; the UI renders those gauges as
@@ -254,10 +266,14 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     buffer = io.BytesIO()
     np.save(buffer, slice_2d)
 
+    token = st.session_state.get(auth_view.TOKEN_KEY)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
     t0 = time.perf_counter()
     response = requests.post(
         f"{api_url}/predict",
         files={"file": ("slice.npy", buffer.getvalue(), "application/octet-stream")},
+        headers=headers,
         timeout=30,
     )
     response.raise_for_status()
@@ -1046,6 +1062,35 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
 # --------------------------------------------------------------------------- #
 
 def render_diagnostic_tab() -> None:
+    # Live inference (`/predict`, `/explain`, and their in-process
+    # PipelineRunner equivalent) is a clinical action, so — unlike the
+    # Benchmark tab's static precomputed data — it requires an
+    # authenticated session (see `qknee.ui.auth_view`). The API layer
+    # already enforces this via `qknee.api.auth.require_role` when running
+    # in HTTP-API mode; this gate covers the in-process/mock modes too,
+    # where there's no HTTP boundary to enforce it at.
+    if not auth_view.is_authenticated():
+        st.info(
+            "🔒 Sign in to access the live diagnostic workspace — upload a scan and run real "
+            "ResNet18 + quantum-circuit inference.",
+        )
+        if st.button("🔐 Sign In", key="diagnostic_tab_signin", type="primary"):
+            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LOGIN
+            st.rerun()
+        return
+
+    if not auth_view.can_run_inference():
+        st.warning(
+            "👀 Your **Student Evaluator** account has read-only access. Live diagnostic inference "
+            "requires a **Radiologist** or **Clinical Researcher** account. Try the free sample cases "
+            "on the home page instead, or sign in with a clinical-role account.",
+        )
+        if st.button("🏠 Back to Home", key="diagnostic_tab_readonly_home"):
+            st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
+            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
+            st.rerun()
+        return
+
     pipeline, acl_model, mcl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
 
@@ -1196,22 +1241,46 @@ def main() -> None:
     precomputed_cache = load_precomputed_cache()
 
     render_header()
+    auth_view.render_top_nav()
     if precomputed_cache is not None:
         st.sidebar.caption(f"⚡ Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
-    # Public entry view: a first-time visitor (or a fresh session) lands on
-    # `qknee.ui.landing_page`'s hero/pipeline-explainer/sample-showcase
-    # first, not straight into the full diagnostic console. Its "Launch
-    # Live Diagnostic Console" / "Explore Clinical Benchmarks" CTAs write
-    # `VIEW_STATE_KEY` and rerun to switch into the view below.
-    active_view = st.session_state.get(VIEW_STATE_KEY, VIEW_LANDING)
-    if active_view == VIEW_LANDING:
+    # `qknee.ui.landing_page`'s CTAs / this module's own workspace-tab
+    # buttons write `VIEW_STATE_KEY` ("landing"/"diagnostic"/"benchmark")
+    # as a *destination hint*, independently of authentication — that
+    # module knows nothing about auth. `auth_view`'s `CURRENT_PAGE_KEY` is
+    # the authoritative top-level page router. Reconciling the two here
+    # (rather than in landing_page.py or auth_view.py) is what sends an
+    # unauthenticated visitor who clicks "Launch Live Diagnostic Console"
+    # to the login page instead of the workspace, then lands them on their
+    # originally-requested tab once they do sign in (VIEW_STATE_KEY is
+    # left untouched across that detour, so it's still "diagnostic" by the
+    # time `_navigate_after_auth` reads it back).
+    requested_view = st.session_state.get(VIEW_STATE_KEY, VIEW_LANDING)
+    current_page = st.session_state.get(auth_view.CURRENT_PAGE_KEY, auth_view.PAGE_LANDING)
+
+    if requested_view != VIEW_LANDING and current_page not in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
+        if requested_view == VIEW_DIAGNOSTIC and not auth_view.is_authenticated():
+            current_page = auth_view.PAGE_LOGIN
+        else:
+            # The Benchmarks tab is static precomputed data (no live
+            # inference), so it's reachable unauthenticated; Diagnostic
+            # only reaches here once `is_authenticated()` is True.
+            current_page = auth_view.PAGE_WORKSPACE
+        st.session_state[auth_view.CURRENT_PAGE_KEY] = current_page
+
+    if current_page in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
+        auth_view.render_auth_page(default_tab=current_page)
+        return
+
+    if current_page != auth_view.PAGE_WORKSPACE:
         render_landing_page()
         return
 
     st.sidebar.markdown("---")
     if st.sidebar.button("🏠 Back to Home", use_container_width=True):
         st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
+        st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
         st.rerun()
 
     # `st.tabs()` always opens on its first-listed tab with no programmatic
@@ -1220,7 +1289,7 @@ def main() -> None:
     # label first, rather than always defaulting to Diagnostic View.
     diagnostic_label, benchmark_label = "🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"
     tab_labels = (
-        [benchmark_label, diagnostic_label] if active_view == VIEW_BENCHMARK
+        [benchmark_label, diagnostic_label] if requested_view == VIEW_BENCHMARK
         else [diagnostic_label, benchmark_label]
     )
     tabs_by_label = dict(zip(tab_labels, st.tabs(tab_labels)))
