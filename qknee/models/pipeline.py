@@ -44,7 +44,7 @@ from qknee.config.logging_config import get_logger
 from qknee.data.dataset import RSNA_TARGET_COLUMNS
 from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pca_reducer import QuantumDimReducer
-from qknee.models.qknee_model import PCAProjectionLayer
+from qknee.models.qknee_model import DEFAULT_BEST_CHECKPOINT_PATH, PCAProjectionLayer
 from qknee.models.quantum_autoencoder import QuantumAutoencoder
 from qknee.models.resnet_extractor import ONNXFeatureExtractor, ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier, angle_encoding, variational_block
@@ -324,12 +324,20 @@ class PipelineRunner:
             n_layers=self.config.quantum.n_layers,
         )
         checkpoint_path = Path(vqc_checkpoint_path or self.config.paths.model_checkpoint)
+        if not checkpoint_path.exists() and vqc_checkpoint_path is None:
+            # Configured checkpoint (config.paths.model_checkpoint) is missing —
+            # fall back to the canonical "best" checkpoint location before
+            # giving up and running with randomly initialized weights, so a
+            # fresh checkout with only a training run's best-model artifact
+            # still loads trained weights automatically.
+            checkpoint_path = DEFAULT_BEST_CHECKPOINT_PATH
         if checkpoint_path.exists():
             self._load_vqc_checkpoint(checkpoint_path)
             logger.info("Loaded trained %s weights from %s", classifier_cls.__name__, checkpoint_path)
         else:
             logger.warning(
-                "No %s checkpoint found at %s; using randomly initialized weights.",
+                "No %s checkpoint found at %s; proceeding with deterministic pretrained "
+                "ResNet18 backbone weights and randomly initialized quantum VQC parameters.",
                 classifier_cls.__name__, checkpoint_path,
             )
         self.vqc.to(self.device)

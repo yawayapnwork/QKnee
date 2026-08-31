@@ -419,6 +419,15 @@ def train_qknee_multitarget_model(
 
 CHECKPOINT_REQUIRED_KEYS = ("vqc_state_dict", "model_state_dict", "n_qubits", "n_layers")
 
+# Canonical location for the "best" checkpoint `scripts/train.py` writes
+# (see its `checkpoint_dir / "best_checkpoint.pt"` convention) under the
+# name downstream inference entry points (PipelineRunner, demos, tests)
+# look for first. Deliberately *not* required to exist: a fresh checkout
+# with no trained checkpoint yet must still run end-to-end, backed by
+# deterministic pretrained ResNet18 weights + randomly initialized quantum
+# VQC parameters (see `load_best_checkpoint_or_init` below).
+DEFAULT_BEST_CHECKPOINT_PATH = Path("qknee/artifacts/checkpoints/best_qknee_model.pt")
+
 
 def save_checkpoint(
     model: QKneeModel,
@@ -509,6 +518,36 @@ def load_checkpoint(
 
     logger.info("Loaded checkpoint from %s (epoch=%s)", path, checkpoint.get("epoch"))
     return checkpoint
+
+
+def load_best_checkpoint_or_init(
+    model: QKneeModel,
+    path: Union[str, Path] = DEFAULT_BEST_CHECKPOINT_PATH,
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    map_location: Optional[str] = None,
+) -> QKneeModel:
+    """Loads `model`'s trained weights from `path` if it exists; otherwise
+    leaves `model` as-is (deterministic pretrained ResNet18 backbone +
+    randomly initialized VQC quantum parameters, exactly what `QKneeModel.
+    __init__` already builds) and logs a warning instead of letting a
+    missing checkpoint raise `FileNotFoundError`.
+
+    This is the safe entry point inference/demo callers (e.g.
+    `PipelineRunner`) should use instead of `load_checkpoint` directly when
+    a trained checkpoint is optional (a fresh checkout with no training run
+    yet should still produce a runnable, if untrained, model).
+    """
+    path = Path(path)
+    if not path.exists():
+        logger.warning(
+            "No checkpoint found at %s; proceeding with deterministic pretrained "
+            "ResNet18 backbone weights and randomly initialized quantum VQC parameters.",
+            path,
+        )
+        return model
+
+    load_checkpoint(model, path, optimizer=optimizer, map_location=map_location)
+    return model
 
 
 # --------------------------------------------------------------------------- #

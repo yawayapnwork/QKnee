@@ -43,6 +43,27 @@ N_QUBITS = _config.quantum.n_qubits
 ROTATIONS_PER_QUBIT_PER_LAYER = 3  # RX, RY, RZ
 
 
+def load_quantum_device(device_name: str, n_qubits: int) -> "qml.Device":
+    """Loads a PennyLane device, transparently falling back to the native
+    `default.qubit` state-vector simulator if the requested backend (e.g.
+    Qiskit Aer's `qiskit.aer`, or PennyLane-Lightning's `lightning.qubit`)
+    fails to load or throws an environment error — a missing optional
+    plugin, a missing compiled extension, etc. `default.qubit` ships with
+    PennyLane itself, so it's always available and is the safe universal
+    fallback the rest of this project trains/tests against.
+    """
+    try:
+        return qml.device(device_name, wires=n_qubits)
+    except Exception as exc:
+        if device_name == "default.qubit":
+            raise
+        logger.warning(
+            "Failed to load PennyLane device %r (%s: %s); falling back to "
+            "'default.qubit'.", device_name, type(exc).__name__, exc,
+        )
+        return qml.device("default.qubit", wires=n_qubits)
+
+
 def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
     """Continuous angle encoding: maps each input scalar (in [0, 2*pi]) onto
     one qubit via RX followed by RY.
@@ -82,7 +103,7 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_laye
 
     Uses PennyLane's `default.qubit` state-vector simulator.
     """
-    dev = qml.device(_config.quantum.device, wires=n_qubits)
+    dev = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
     @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)

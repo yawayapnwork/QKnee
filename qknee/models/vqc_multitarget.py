@@ -43,7 +43,7 @@ import torch.nn as nn
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
 from qknee.data.dataset import RSNA_TARGET_COLUMNS
-from qknee.models.vqc import angle_encoding, variational_block
+from qknee.models.vqc import angle_encoding, load_quantum_device, variational_block
 
 logger = get_logger(__name__)
 _config = load_config()
@@ -104,7 +104,7 @@ def build_multi_observable_qnode(n_qubits: int = N_QUBITS, n_layers: int = _conf
         raise ValueError(
             f"build_multi_observable_qnode's PAULI_WORD_WIRES layout is fixed for 4 qubits, got n_qubits={n_qubits}."
         )
-    device = qml.device(_config.quantum.device, wires=n_qubits)
+    device = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
     @qml.qnode(device, interface="torch", diff_method=_config.quantum.diff_method)

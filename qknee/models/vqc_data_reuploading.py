@@ -49,6 +49,7 @@ import torch.nn as nn
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.models.vqc import load_quantum_device
 
 logger = get_logger(__name__)
 _config = load_config()
@@ -122,7 +123,7 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = DEFAULT_N_LAYERS):
         `circuit(inputs, enc_weights, var_weights) -> List[scalar]`
         (one Pauli-Z expectation value per qubit).
     """
-    device = qml.device(_config.quantum.device, wires=n_qubits)
+    device = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
     @qml.qnode(device, interface="torch", diff_method=_config.quantum.diff_method)
