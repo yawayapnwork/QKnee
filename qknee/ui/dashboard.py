@@ -30,6 +30,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 
@@ -85,6 +89,7 @@ PRECOMPUTED_CACHE_PATH = _ARTIFACTS_DIR / "precomputed_cache.json"
 @dataclass
 class InferenceResult:
     acl_risk: float                    # [0, 1]
+    mcl_risk: Optional[float]          # [0, 1], or None when unavailable (e.g. "api" backend)
     meniscus_risk: Optional[float]     # [0, 1], or None when unavailable (e.g. "api" backend)
     resnet_latency_ms: float
     pca_latency_ms: float
@@ -95,18 +100,45 @@ class InferenceResult:
     gradcam_heatmap: Optional[np.ndarray] = None  # (h, w) float32 in [0, 1], raw Grad-CAM — lets the
     # UI re-blend at any opacity live (see `render_gradcam_panel`) without re-running inference.
     # None for backends that only ever produce a pre-blended overlay (HTTP API mode).
+    pauli_z_expectations: Optional[np.ndarray] = None  # (n_qubits,) in [-1, 1] — the ACL circuit's own
+    # raw per-qubit measurement, read before the classical Linear+Sigmoid readout collapses it to a
+    # single risk probability. None if unavailable for this backend (see get_pauli_z_expectations).
+
+
+def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[np.ndarray]:
+    """Raw per-qubit Pauli-Z expectation values in `[-1, 1]` — the 4-qubit
+    circuit's own measurement output, read directly from `vqc_model`'s
+    `quantum_layer` before the classical `Linear(n_qubits, 1)` + sigmoid
+    readout collapses it into a single risk probability. This is what the
+    Quantum Decision Metrics panel plots.
+
+    Returns `None` (rather than guessing) if `vqc_model` doesn't expose a
+    `.quantum_layer` attribute — e.g. a custom ansatz that doesn't follow
+    `VQCClassifier`'s structure.
+    """
+    quantum_layer = getattr(vqc_model, "quantum_layer", None)
+    if quantum_layer is None:
+        return None
+
+    import torch
+
+    with torch.no_grad():
+        angles_tensor = torch.from_numpy(np.asarray(quantum_angles)).float()
+        expvals = quantum_layer(angles_tensor)
+    return expvals.detach().cpu().numpy().reshape(-1)
 
 
 @st.cache_resource(show_spinner=False)
-def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]]:
+def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object], Optional[object]]:
     """Attempts to load the real ResNet18 -> PCA -> VQC pipeline.
 
-    Returns a tuple (runner, acl_model, meniscus_model) or (None, None, None)
-    if any dependency (torch, pennylane, or the fitted PCA artifact) is
-    unavailable — the caller falls back to mock inference in that case.
+    Returns a tuple (runner, acl_model, mcl_model, meniscus_model) or
+    (None, None, None, None) if any dependency (torch, pennylane, or the
+    fitted PCA artifact) is unavailable — the caller falls back to mock
+    inference in that case.
     """
     if not _config.paths.pca_artifact.exists():
-        return None, None, None
+        return None, None, None, None
 
     try:
         import torch
@@ -116,11 +148,14 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
 
         runner = PipelineRunner(config=_config)
 
-        # Two independent quantum heads: one scored for ACL tear risk, one
-        # for meniscus tear risk. Each loads its own trained checkpoint from
+        # Three independent quantum heads — the primary clinical triad
+        # (matches qknee.models.vqc_multitarget.TRIAD_CONDITIONS): ACL, MCL,
+        # and meniscus tear risk. Each loads its own trained checkpoint from
         # config.yaml's paths.acl_checkpoint / paths.meniscus_checkpoint when
         # available; a missing/invalid checkpoint falls back to randomly
         # initialized weights for that head only (not the whole backend).
+        # MCL has no dedicated config.yaml checkpoint path (yet), so it
+        # always uses a seeded-random head.
         torch.manual_seed(42)
         acl_model = VQCClassifier()
         if _config.paths.acl_checkpoint.exists():
@@ -134,6 +169,11 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
             logger.warning("No ACL checkpoint found at %s; using randomly initialized weights.",
                             _config.paths.acl_checkpoint)
         acl_model.eval()
+
+        torch.manual_seed(21)
+        mcl_model = VQCClassifier()
+        logger.warning("No MCL checkpoint configured (paths.mcl_checkpoint); using randomly initialized weights.")
+        mcl_model.eval()
 
         torch.manual_seed(7)
         meniscus_model = VQCClassifier()
@@ -149,10 +189,10 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
                             _config.paths.meniscus_checkpoint)
         meniscus_model.eval()
 
-        return runner, acl_model, meniscus_model
+        return runner, acl_model, mcl_model, meniscus_model
     except Exception as exc:  # noqa: BLE001 - surface any backend failure as "unavailable"
         st.session_state.setdefault("_backend_error", str(exc))
-        return None, None, None
+        return None, None, None, None
 
 
 # --------------------------------------------------------------------------- #
@@ -190,8 +230,9 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     architecture's intended data path.
 
     The API's `QKneeModel` exposes one unified risk score (no separate
-    ACL/meniscus heads), so `meniscus_risk` is left `None` here rather than
-    fabricating a second score; the UI renders that gauge as "N/A" in API mode.
+    ACL/MCL/meniscus heads), so `mcl_risk`/`meniscus_risk` are left `None`
+    here rather than fabricating scores; the UI renders those gauges as
+    "N/A" in API mode.
     Per-stage latency isn't reported by the API either, so only the measured
     HTTP round-trip is attributed, to `total_latency_ms`.
 
@@ -228,6 +269,7 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
 
     return InferenceResult(
         acl_risk=float(payload["risk_score"]),
+        mcl_risk=None,
         meniscus_risk=None,
         resnet_latency_ms=0.0,
         pca_latency_ms=0.0,
@@ -279,9 +321,11 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     quantum_ms = float(rng.uniform(4, 12))
 
     heatmap = _mock_gradcam_heatmap(slice_2d)
+    pauli_z_expectations = rng.uniform(-1.0, 1.0, size=_config.quantum.n_qubits).astype(np.float32)
 
     return InferenceResult(
         acl_risk=float(rng.uniform(0.05, 0.95)),
+        mcl_risk=float(rng.uniform(0.05, 0.95)),
         meniscus_risk=float(rng.uniform(0.05, 0.95)),
         resnet_latency_ms=resnet_ms,
         pca_latency_ms=pca_ms,
@@ -290,29 +334,34 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
         backend="mock",
         gradcam_overlay=overlay_heatmap(heatmap, slice_2d),
         gradcam_heatmap=heatmap,
+        pauli_z_expectations=pauli_z_expectations,
     )
 
 
 @st.cache_data(show_spinner=False, max_entries=128)
-def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _meniscus_model) -> InferenceResult:
+def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _meniscus_model) -> InferenceResult:
     """Runs the real DataIngestion -> ResNet18 -> PCA -> VQC pipeline (via
     `PipelineRunner`'s stage methods) on one 2D slice, timing each stage,
     and generates a Grad-CAM overlay backpropagated from the ACL risk score
     (`PipelineRunner.explain(..., vqc=acl_model)`) — not embedding energy —
-    so the heatmap reflects what actually drove that prediction.
+    so the heatmap reflects what actually drove that prediction. The
+    Quantum Decision Metrics panel's Pauli-Z bar chart is likewise read
+    from the ACL circuit (`get_pauli_z_expectations`), so both explain the
+    same head's decision.
 
     Cached by `slice_2d` content only: the leading underscore on
-    `_runner`/`_acl_model`/`_meniscus_model` tells `st.cache_data` to
-    exclude them from the cache key (they're not hashable torch/PennyLane
-    objects, and are effectively constant for the app process's lifetime
-    anyway). Without this, the full ResNet18 forward pass and Grad-CAM
-    backprop — the expensive part of every rerun — would re-execute on
-    every Streamlit script rerun, including ones triggered by a completely
-    unrelated widget, as long as the viewed slice hasn't actually changed.
+    `_runner`/`_acl_model`/`_mcl_model`/`_meniscus_model` tells
+    `st.cache_data` to exclude them from the cache key (they're not
+    hashable torch/PennyLane objects, and are effectively constant for the
+    app process's lifetime anyway). Without this, the full ResNet18
+    forward pass and Grad-CAM backprop — the expensive part of every
+    rerun — would re-execute on every Streamlit script rerun, including
+    ones triggered by a completely unrelated widget, as long as the viewed
+    slice hasn't actually changed.
     """
     from qknee.xai.gradcam import overlay_heatmap
 
-    runner, acl_model, meniscus_model = _runner, _acl_model, _meniscus_model
+    runner, acl_model, mcl_model, meniscus_model = _runner, _acl_model, _mcl_model, _meniscus_model
 
     t0 = time.perf_counter()
     batch = runner.ingest(slice_2d)
@@ -321,9 +370,11 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _meniscus_mode
     t1 = time.perf_counter()
 
     acl_score = runner.classify(quantum_angles, vqc=acl_model)
-    t2 = time.perf_counter()
+    mcl_score = runner.classify(quantum_angles, vqc=mcl_model)
     meniscus_score = runner.classify(quantum_angles, vqc=meniscus_model)
-    t3 = time.perf_counter()
+    t2 = time.perf_counter()
+
+    pauli_z_expectations = get_pauli_z_expectations(acl_model, quantum_angles)
 
     gradcam_overlay: Optional[np.ndarray] = None
     gradcam_heatmap: Optional[np.ndarray] = None
@@ -334,12 +385,13 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _meniscus_mode
         logger.warning("Grad-CAM generation failed; showing risk scores without an overlay: %s", exc)
 
     # ingest + ResNet18 + PCA time is attributed to "resnet_latency_ms"; the
-    # two quantum head evaluations are split into "quantum_latency_ms".
+    # three quantum head evaluations are folded into "quantum_latency_ms".
     feature_ms = (t1 - t0) * 1000
-    quantum_ms = (t3 - t1) * 1000
+    quantum_ms = (t2 - t1) * 1000
 
     return InferenceResult(
         acl_risk=acl_score,
+        mcl_risk=mcl_score,
         meniscus_risk=meniscus_score,
         resnet_latency_ms=feature_ms,
         pca_latency_ms=0.0,  # folded into feature_ms above
@@ -348,6 +400,7 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _meniscus_mode
         backend="live",
         gradcam_overlay=gradcam_overlay,
         gradcam_heatmap=gradcam_heatmap,
+        pauli_z_expectations=pauli_z_expectations,
     )
 
 
@@ -578,6 +631,42 @@ def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> 
         st.info("Grad-CAM overlay unavailable for this slice.")
 
 
+def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray]) -> None:
+    """Quantum Decision Metrics panel's bar chart: the 4-qubit circuit's
+    raw per-qubit Pauli-Z expectation values, each in `[-1.0, 1.0]` — the
+    quantum circuit's own measurement output, shown before the classical
+    readout layer collapses it into one risk probability, so a viewer can
+    see how each qubit individually contributed to the (ACL) prediction.
+
+    Renders an info message instead of a chart if `pauli_z_expectations`
+    is `None` (unavailable for this backend — e.g. HTTP API mode).
+    """
+    if pauli_z_expectations is None:
+        st.info("Per-qubit ⟨Z⟩ expectation values unavailable for this backend/case.")
+        return
+
+    n_qubits = len(pauli_z_expectations)
+    fig, ax = plt.subplots(figsize=(4, 2.6))
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor("none")
+
+    colors_ = ["#2ECC71" if value >= 0 else "#E74C3C" for value in pauli_z_expectations]
+    qubit_labels = [f"Q{i}" for i in range(n_qubits)]
+    ax.bar(qubit_labels, pauli_z_expectations, color=colors_, edgecolor="none")
+    ax.axhline(0.0, color="#8B949E", linewidth=0.8)
+
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_ylabel("⟨Z⟩", color="#E6EDF3")
+    ax.tick_params(colors="#E6EDF3")
+    for spine in ax.spines.values():
+        spine.set_color("#8B949E")
+
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩ (ACL circuit), read directly from the quantum "
+               "circuit before the classical readout layer.")
+
+
 def render_latency_metrics(result: InferenceResult) -> None:
     st.markdown("#### Processing Latency")
     if result.backend.startswith("api"):
@@ -669,6 +758,7 @@ def load_cached_case(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
 
     result = InferenceResult(
         acl_risk=float(case["acl_risk"]),
+        mcl_risk=(float(case["mcl_risk"]) if case.get("mcl_risk") is not None else None),
         meniscus_risk=(float(case["meniscus_risk"]) if case.get("meniscus_risk") is not None else None),
         resnet_latency_ms=float(case.get("resnet_latency_ms", 0.0)),
         pca_latency_ms=float(case.get("pca_latency_ms", 0.0)),
@@ -747,9 +837,13 @@ def build_fast_path_result(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
             overlay = cv2.imread(str(heatmap_path), cv2.IMREAD_COLOR)
 
     risk_score = float(case["risk_score"])
+    raw_pauli_z = case.get("pauli_z_expectations")
+    pauli_z_expectations = np.asarray(raw_pauli_z, dtype=np.float32) if raw_pauli_z else None
+
     result = InferenceResult(
         acl_risk=risk_score,
-        meniscus_risk=None,  # precomputed_cache.json scores one unified risk, not separate ACL/meniscus heads
+        mcl_risk=None,  # precomputed_cache.json scores one unified risk, not separate ACL/MCL/meniscus heads
+        meniscus_risk=None,
         resnet_latency_ms=float(case.get("resnet_latency_ms", 0.0)),
         pca_latency_ms=0.0,
         quantum_latency_ms=float(case.get("quantum_latency_ms", 0.0)),
@@ -757,6 +851,7 @@ def build_fast_path_result(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
         backend=f"cached-fastpath/{case.get('backend', 'unknown')}",
         gradcam_overlay=overlay,
         gradcam_heatmap=None,  # only the pre-blended overlay is cached, not the raw per-pixel heatmap
+        pauli_z_expectations=pauli_z_expectations,
     )
     return overlay, result
 
@@ -909,7 +1004,11 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
             gradcam_overlay=gradcam_overlay,
             prediction_results={
                 "acl_risk": result.acl_risk,
+                "mcl_risk": result.mcl_risk,
                 "meniscus_risk": result.meniscus_risk,
+                "pauli_z_expectations": (
+                    result.pauli_z_expectations.tolist() if result.pauli_z_expectations is not None else None
+                ),
                 "resnet_latency_ms": result.resnet_latency_ms,
                 "pca_latency_ms": result.pca_latency_ms,
                 "quantum_latency_ms": result.quantum_latency_ms,
@@ -941,7 +1040,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
 # --------------------------------------------------------------------------- #
 
 def render_diagnostic_tab() -> None:
-    pipeline, acl_model, meniscus_model = load_backend()
+    pipeline, acl_model, mcl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
 
     api_url = resolve_api_url()
@@ -951,6 +1050,9 @@ def render_diagnostic_tab() -> None:
 
     use_fast_path, fast_path_case = render_fast_path_sidebar()
     use_demo_cache, cached_case = render_demo_cache_sidebar()
+
+    volume: Optional[np.ndarray] = None
+    plane_index_for = None  # set below only when a real volume is loaded
 
     if use_fast_path and fast_path_case is not None:
         # Judge Mode: skip upload/plane/slice/inference entirely and replay a
@@ -990,13 +1092,26 @@ def render_diagnostic_tab() -> None:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### View Controls")
         view = st.sidebar.radio(
-            "Anatomical Plane", ["Axial", "Coronal", "Sagittal"], horizontal=False,
-            help="Scroll slice-by-slice through the loaded 3D volume in any of the three anatomical planes.",
+            "Primary Plane (quantum analysis target)", ["Axial", "Coronal", "Sagittal"], horizontal=False,
+            help="Which plane's slice is fed into the ResNet18 → PCA → VQC pipeline and Grad-CAM. "
+                 "All three planes are still shown, synchronized, below.",
         )
 
-        max_index = max(view_axis_size(volume, view) - 1, 0)
-        slice_index = st.sidebar.slider("Slice", min_value=0, max_value=max_index, value=max_index // 2)
+        # Shared slice-scrubbing slider: a single fractional position in
+        # [0, 1] mapped independently onto each plane's own slice-count
+        # range, so ONE slider keeps Sagittal/Coronal/Axial synchronized
+        # even though each has a different depth along its own axis.
+        slice_fraction = st.sidebar.slider(
+            "Slice Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
+            help="Scrubs the Sagittal, Coronal, and Axial views together — each plane maps this "
+                 "shared fractional position onto its own slice count.",
+        )
 
+        def plane_index_for(plane_name: str) -> Tuple[int, int]:
+            max_idx = max(view_axis_size(volume, plane_name) - 1, 0)
+            return round(slice_fraction * max_idx), max_idx
+
+        slice_index, max_index = plane_index_for(view)
         raw_slice = get_slice(volume, view, slice_index)
         display_slice = normalize_for_display(raw_slice)
 
@@ -1009,40 +1124,52 @@ def render_diagnostic_tab() -> None:
 
         if result is None:
             if backend_ready:
-                result = run_live_inference(raw_slice, pipeline, acl_model, meniscus_model)
+                result = run_live_inference(raw_slice, pipeline, acl_model, mcl_model, meniscus_model)
             else:
                 result = run_mock_inference(raw_slice)
 
-    image_col, gradcam_col, results_col = st.columns([1, 1, 1])
+    # ------------------------------------------------------------------ #
+    # Synchronized 3-Plane Layout — Sagittal / Coronal / Axial side by
+    # side, all driven by the one shared `slice_fraction` slider above.
+    # Only meaningful when a real volume was loaded (Judge Mode/Demo Mode
+    # cases carry a single precomputed image, not a volume).
+    # ------------------------------------------------------------------ #
+    if volume is not None and plane_index_for is not None:
+        st.markdown("#### 🧭 Synchronized Tri-Planar View")
+        plane_cols = st.columns(3)
+        for col, plane_name in zip(plane_cols, ["Sagittal", "Coronal", "Axial"]):
+            p_index, p_max = plane_index_for(plane_name)
+            p_display = normalize_for_display(get_slice(volume, plane_name, p_index))
+            with col:
+                is_primary = plane_name == view
+                caption = f"{plane_name}" + (" ⭐ primary" if is_primary else "") + f" — {p_index + 1}/{p_max + 1}"
+                st.image(p_display, use_container_width=True, clamp=True, caption=caption)
+        st.markdown("---")
 
-    with image_col:
-        if use_fast_path and fast_path_case is not None:
-            st.markdown(f"#### ⚡ Fast-Path Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
-            st.caption("Served from `precomputed_cache.json` — 0 ms inference.")
-        elif use_demo_cache and cached_case is not None:
-            st.markdown(f"#### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
-        else:
-            st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
-        if display_slice is not None:
-            st.image(
-                display_slice, use_container_width=True, clamp=True,
-                channels="BGR" if (use_fast_path and fast_path_case is not None) else "RGB",
-            )
-        else:
-            st.warning("No cached image available for this fast-path case.")
+    gradcam_col, results_col, attribution_col = st.columns([1, 1, 1])
 
     with gradcam_col:
+        if use_fast_path and fast_path_case is not None:
+            st.markdown(f"##### ⚡ Fast-Path Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
+            st.caption("Served from `precomputed_cache.json` — 0 ms inference.")
+        elif use_demo_cache and cached_case is not None:
+            st.markdown(f"##### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
         render_gradcam_panel(display_slice, result)
 
     with results_col:
         st.markdown("#### Tear Risk Assessment")
         render_risk_gauge("ACL", result.acl_risk)
+        render_risk_gauge("MCL", result.mcl_risk)
         render_risk_gauge("Meniscus", result.meniscus_risk)
         st.markdown("---")
         render_latency_metrics(result)
         st.markdown("---")
         if display_slice is not None:
             render_report_download(display_slice, result)
+
+    with attribution_col:
+        st.markdown("#### ⚛️ Quantum Decision Metrics")
+        render_quantum_attribution_panel(result.pauli_z_expectations)
 
     st.markdown("---")
     st.caption(

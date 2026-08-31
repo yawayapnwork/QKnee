@@ -67,11 +67,6 @@ PRECOMPUTED_CACHE_PATH = _ARTIFACTS_DIR / "precomputed_cache.json"
 
 PLANES = ["Axial", "Coronal", "Sagittal"]
 
-# The two reference planes always shown for anatomical cross-checking
-# alongside whichever plane is primary (task spec names these two
-# specifically, regardless of which plane the main slice explorer is on).
-CROSS_REFERENCE_PLANES = ["Sagittal", "Coronal"]
-
 # Multi-slice Grad-CAM runs one full ResNet18 forward + backward pass per
 # slice — a volume deep enough to matter (dozens to low-hundreds of
 # slices) would otherwise block the UI for a long time on CPU. Volumes
@@ -88,7 +83,7 @@ MAX_VOLUMETRIC_SLICES = 40
 
 @dataclass
 class AnalysisResult:
-    risk_score: float
+    risk_score: float             # overall (worst-case) risk driving the single verdict badge/gauge
     prediction_label: str
     quantum_latency_ms: float
     total_latency_ms: float
@@ -99,6 +94,13 @@ class AnalysisResult:
     pauli_z_expectations: Optional[np.ndarray] = None  # (n_qubits,) in [-1, 1] — the quantum circuit's
     # own raw per-qubit output, read before the classical Linear+Sigmoid readout collapses it to a
     # single risk probability. None if the VQC backbone doesn't expose one (see get_pauli_z_expectations).
+    # Per-condition breakdown (the primary clinical triad — matches
+    # qknee.models.vqc_multitarget.TRIAD_CONDITIONS) for the Quantum Decision
+    # Metrics panel; None for a condition whose head isn't available for this
+    # backend/case (e.g. an API-only or precomputed-cache result).
+    acl_risk: Optional[float] = None
+    mcl_risk: Optional[float] = None
+    meniscus_risk: Optional[float] = None
 
 
 @dataclass
@@ -173,6 +175,56 @@ def load_backend():
     except Exception as exc:  # noqa: BLE001
         st.session_state["_backend_error"] = str(exc)
         return None
+
+
+@st.cache_resource(show_spinner=False)
+def load_condition_models() -> Optional[Dict[str, object]]:
+    """Three independent quantum heads for the primary clinical triad
+    (ACL / MCL / Meniscus — matches `qknee.models.vqc_multitarget.
+    TRIAD_CONDITIONS`), used by the Quantum Decision Metrics panel's
+    per-condition risk breakdown (`run_live_analysis` feeds the same
+    quantum-angle vector `runner.classify()`s each on, so all three scores
+    plus the overall verdict come from one ResNet18/PCA forward pass).
+
+    ACL and Meniscus each load their own trained checkpoint from
+    `config.yaml`'s `paths.acl_checkpoint`/`paths.meniscus_checkpoint` when
+    available; MCL has no dedicated checkpoint path (yet) and always uses
+    seeded-random weights. Returns `None` if torch/pennylane aren't
+    importable, so the caller can render "N/A" badges instead."""
+    try:
+        import torch
+
+        from qknee.models.pipeline import PipelineValidationError, load_vqc_weights
+        from qknee.models.vqc import VQCClassifier
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to build condition-specific VQC heads: %s", exc)
+        return None
+
+    torch.manual_seed(42)
+    acl_model = VQCClassifier()
+    if _config.paths.acl_checkpoint.exists():
+        try:
+            load_vqc_weights(acl_model, _config.paths.acl_checkpoint)
+        except PipelineValidationError as exc:
+            logger.warning("Failed to load ACL checkpoint (%s); using random weights: %s",
+                            _config.paths.acl_checkpoint, exc)
+    acl_model.eval()
+
+    torch.manual_seed(21)
+    mcl_model = VQCClassifier()
+    mcl_model.eval()
+
+    torch.manual_seed(7)
+    meniscus_model = VQCClassifier()
+    if _config.paths.meniscus_checkpoint.exists():
+        try:
+            load_vqc_weights(meniscus_model, _config.paths.meniscus_checkpoint)
+        except PipelineValidationError as exc:
+            logger.warning("Failed to load meniscus checkpoint (%s); using random weights: %s",
+                            _config.paths.meniscus_checkpoint, exc)
+    meniscus_model.eval()
+
+    return {"ACL": acl_model, "MCL": mcl_model, "Meniscus": meniscus_model}
 
 
 @st.cache_resource(show_spinner=False)
@@ -272,6 +324,11 @@ def build_fast_path_result(case: dict) -> Tuple[Optional[np.ndarray], AnalysisRe
         gradcam_overlay=overlay,
         gradcam_heatmap=None,  # only the pre-blended overlay is cached, not the raw per-pixel heatmap
         pauli_z_expectations=pauli_z_expectations,
+        # precomputed_cache.json scores one unified risk, not a per-condition
+        # ACL/MCL/Meniscus breakdown — the panel renders "N/A" for MCL/Meniscus.
+        acl_risk=risk_score,
+        mcl_risk=None,
+        meniscus_risk=None,
     )
     return overlay, result
 
@@ -304,6 +361,14 @@ def render_fast_path_view(case: dict) -> None:
         st.caption(f"Backend: **{result.backend}**")
 
     with attrib_col:
+        st.markdown("##### Diagnostic Breakdown")
+        badge_cols = st.columns(3)
+        with badge_cols[0]:
+            render_condition_risk_badge("ACL Tear", result.acl_risk)
+        with badge_cols[1]:
+            render_condition_risk_badge("MCL Sprain", result.mcl_risk)
+        with badge_cols[2]:
+            render_condition_risk_badge("Meniscal Tear", result.meniscus_risk)
         fig = render_quantum_attribution_panel(result.pauli_z_expectations)
         if fig is not None:
             st.pyplot(fig, use_container_width=True)
@@ -363,6 +428,16 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
     pauli_z_expectations = get_pauli_z_expectations(runner.vqc, quantum_angles)
 
+    # Per-condition breakdown for the Quantum Decision Metrics panel: reuse
+    # the same quantum_angles vector (no extra ResNet18/PCA work) against
+    # each of the three condition-specific heads.
+    acl_risk = mcl_risk = meniscus_risk = None
+    condition_models = load_condition_models()
+    if condition_models is not None:
+        acl_risk = runner.classify(quantum_angles, vqc=condition_models["ACL"])
+        mcl_risk = runner.classify(quantum_angles, vqc=condition_models["MCL"])
+        meniscus_risk = runner.classify(quantum_angles, vqc=condition_models["Meniscus"])
+
     return AnalysisResult(
         risk_score=risk_score,
         prediction_label=label,
@@ -372,6 +447,9 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         gradcam_overlay=gradcam_overlay,
         gradcam_heatmap=gradcam_heatmap,
         pauli_z_expectations=pauli_z_expectations,
+        acl_risk=acl_risk,
+        mcl_risk=mcl_risk,
+        meniscus_risk=meniscus_risk,
     )
 
 
@@ -400,6 +478,9 @@ def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
         gradcam_overlay=overlay_heatmap(heatmap, slice_2d),
         gradcam_heatmap=heatmap,
         pauli_z_expectations=pauli_z_expectations,
+        acl_risk=float(rng.uniform(0.05, 0.95)),
+        mcl_risk=float(rng.uniform(0.05, 0.95)),
+        meniscus_risk=float(rng.uniform(0.05, 0.95)),
     )
 
 
@@ -670,6 +751,28 @@ def render_prediction_badge(result: AnalysisResult) -> None:
     )
 
 
+def render_condition_risk_badge(label: str, value: Optional[float]) -> None:
+    """Color-coded triage badge (🟢 Low / 🟠 Moderate / 🔴 High) for one
+    condition's tear-risk score — mirrors `qknee.ui.dashboard.
+    render_risk_gauge`'s LOW/MODERATE/HIGH tiering (thresholds 0.33/0.66)
+    so the two apps agree. Renders "N/A" when `value` is `None` (the
+    condition's head isn't available for this backend/case)."""
+    if value is None:
+        st.metric(label=f"⚪ {label}", value="N/A")
+        st.progress(0.0)
+        return
+
+    if value >= 0.66:
+        color, tier = "🔴", "HIGH"
+    elif value >= 0.33:
+        color, tier = "🟠", "MODERATE"
+    else:
+        color, tier = "🟢", "LOW"
+
+    st.metric(label=f"{color} {label}", value=f"{value * 100:.1f}%", delta=tier)
+    st.progress(min(max(value, 0.0), 1.0))
+
+
 def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray]) -> Optional[plt.Figure]:
     """Quantum State Attribution panel: a bar chart of the 4-qubit
     circuit's raw per-qubit Pauli-Z expectation values, each in
@@ -732,7 +835,7 @@ def render_header() -> None:
     )
 
 
-def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]:
+def render_sidebar() -> Tuple[Optional[np.ndarray], str, float, float, str, float]:
     st.sidebar.markdown("### 📤 Upload Scan")
     uploaded_files = st.sidebar.file_uploader(
         "DICOM series (.dcm, select/drag multiple files), single DICOM, PNG, JPG, or NumPy volume (.npy)",
@@ -757,11 +860,11 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]
 
     if not uploaded_files:
         st.sidebar.info("Upload a scan to enable plane/slice/contrast controls.")
-        return None, PLANES[0], 0, 1.0, default_colormap, default_alpha
+        return None, PLANES[0], 0.5, 1.0, default_colormap, default_alpha
 
     volume = load_scan(uploaded_files)
     if volume is None:
-        return None, PLANES[0], 0, 1.0, default_colormap, default_alpha
+        return None, PLANES[0], 0.5, 1.0, default_colormap, default_alpha
 
     display_name = (
         f"{len(uploaded_files)}-file DICOM series" if len(uploaded_files) > 1 else uploaded_files[0].name
@@ -772,18 +875,21 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]
     st.sidebar.markdown("### 🎚️ View Controls")
 
     plane = st.sidebar.radio(
-        "Anatomical Plane", PLANES, horizontal=True,
-        help="Scroll through the loaded volume in any of the three anatomical planes.",
+        "Primary Plane (quantum analysis target)", PLANES, horizontal=True,
+        help="Which plane's slice is fed into the ResNet18 → PCA → VQC pipeline and Grad-CAM. "
+             "All three planes are still shown, synchronized, below.",
     )
 
-    from qknee.data.ingestion import MultiPlaneViewSelector
-
-    max_index = MultiPlaneViewSelector(volume).num_slices(plane.lower()) - 1
-    if max_index > 0:
-        slice_index = st.sidebar.slider("Slice", 0, max_index, max_index // 2)
-    else:
-        slice_index = 0
-        st.sidebar.caption("Single-slice image — slider disabled.")
+    # Shared slice-scrubbing slider: a single fractional position in [0, 1]
+    # mapped independently onto each plane's own slice-count range, so ONE
+    # slider keeps Sagittal/Coronal/Axial synchronized even though each has
+    # a different depth along its own axis (see `_plane_slice_index` in
+    # `main()`).
+    slice_fraction = st.sidebar.slider(
+        "Slice Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
+        help="Scrubs the Axial, Coronal, and Sagittal views together — each plane maps this "
+             "shared fractional position onto its own slice count.",
+    )
 
     contrast = st.sidebar.slider("Contrast", min_value=0.5, max_value=3.0, value=1.0, step=0.1)
 
@@ -806,36 +912,37 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]
              "(0 = only the slice, 1 = only the heatmap).",
     )
 
-    return volume, plane, slice_index, contrast, colormap_name, alpha
+    return volume, plane, slice_fraction, contrast, colormap_name, alpha
 
 
-def render_cross_reference_panel(volume: np.ndarray, contrast: float, primary_plane: str) -> None:
-    """Dual-plane anatomical cross-referencing: Sagittal + Coronal
-    thumbnails, each independently scrubbable (their own slider, keyed so
-    Streamlit persists each plane's position across reruns), so a viewer
-    can confirm the primary view's anatomical location on the two
-    complementary planes. Always shows both, regardless of which plane is
-    currently primary."""
+def _plane_slice_index(selector, plane: str, slice_fraction: float) -> Tuple[int, int]:
+    """Maps the shared `slice_fraction` (`[0, 1]`) onto `plane`'s own
+    slice-count range, so one fractional slider position keeps Axial /
+    Coronal / Sagittal synchronized even though each has a different depth
+    along its own axis. Returns `(index, max_index)`."""
+    max_index = selector.num_slices(plane.lower()) - 1
+    return round(slice_fraction * max_index), max_index
+
+
+def render_synchronized_tri_plane_view(volume: np.ndarray, contrast: float, slice_fraction: float, primary_plane: str) -> None:
+    """Synchronized 3-Plane Layout: Sagittal, Coronal, and Axial rendered
+    simultaneously, all driven by the one shared `slice_fraction` slider
+    (see `_plane_slice_index`) — dragging that single sidebar slider
+    scrubs all three views together, instead of three independent
+    per-plane sliders."""
     from qknee.data.ingestion import MultiPlaneViewSelector
 
     selector = MultiPlaneViewSelector(volume)
-    st.markdown("#### 🧭 Dual-Plane Cross-Reference")
-    columns = st.columns(len(CROSS_REFERENCE_PLANES))
-    for column, ref_plane in zip(columns, CROSS_REFERENCE_PLANES):
+    st.markdown("#### 🧭 Synchronized Tri-Planar View")
+    columns = st.columns(len(PLANES))
+    for column, plane in zip(columns, PLANES):
         with column:
-            ref_max_index = selector.num_slices(ref_plane.lower()) - 1
-            is_primary = ref_plane == primary_plane
-            label = f"{ref_plane} slice" + (" (primary view)" if is_primary else "")
-            if ref_max_index > 0:
-                ref_index = st.slider(
-                    label, 0, ref_max_index, ref_max_index // 2, key=f"crossref_slice_{ref_plane}",
-                )
-            else:
-                ref_index = 0
-                st.caption(f"{label}: single slice.")
-            ref_slice = selector.get_slice(ref_plane.lower(), ref_index)
-            ref_display = apply_contrast(normalize_uint8(ref_slice), contrast)
-            st.image(ref_display, use_container_width=True, clamp=True, caption=f"{ref_plane} — {ref_index + 1}/{ref_max_index + 1}")
+            index, max_index = _plane_slice_index(selector, plane, slice_fraction)
+            is_primary = plane == primary_plane
+            plane_slice = selector.get_slice(plane.lower(), index)
+            plane_display = apply_contrast(normalize_uint8(plane_slice), contrast)
+            caption = f"{plane}" + (" ⭐ primary" if is_primary else "") + f" — {index + 1}/{max_index + 1}"
+            st.image(plane_display, use_container_width=True, clamp=True, caption=caption)
 
 
 def main() -> None:
@@ -848,7 +955,7 @@ def main() -> None:
         render_deck_figures_expander()
         return
 
-    volume, plane, slice_index, contrast, colormap_name, alpha = render_sidebar()
+    volume, plane, slice_fraction, contrast, colormap_name, alpha = render_sidebar()
 
     if volume is None:
         st.info("👈 Upload a `.png`, `.jpg`, `.npy`, or `.dcm` scan (drag & drop supported) "
@@ -861,7 +968,7 @@ def main() -> None:
     colormap_value = COLORMAP_OPTIONS[colormap_name]
 
     selector = MultiPlaneViewSelector(volume)
-    max_index = selector.num_slices(plane.lower()) - 1
+    slice_index, max_index = _plane_slice_index(selector, plane, slice_fraction)
     raw_slice = selector.get_slice(plane.lower(), slice_index)
     display_slice = apply_contrast(normalize_uint8(raw_slice), contrast)
 
@@ -902,14 +1009,16 @@ def main() -> None:
                 rank = volumetric_result.top_k_indices.index(slice_index) + 1
                 st.success(f"⭐ Slice {slice_index + 1} is a top-{rank} high-salience slice.")
 
-    image_col, gradcam_col, action_col = st.columns([1, 1, 1.2])
+    render_synchronized_tri_plane_view(volume, contrast, slice_fraction, primary_plane=plane)
+    if volumetric_active and volumetric_result.top_k_indices:
+        jump_labels = [f"Slice {i + 1}" for i in volumetric_result.top_k_indices]
+        st.caption(
+            f"Primary plane ({plane}) slice {slice_index + 1}/{max_index + 1} — jump to a high-salience "
+            "slice using the sidebar's Slice Position control: " + ", ".join(jump_labels)
+        )
+    st.markdown("---")
 
-    with image_col:
-        st.markdown(f"#### {plane} View — Slice {slice_index + 1} / {max_index + 1}")
-        st.image(display_slice, use_container_width=True, clamp=True)
-        if volumetric_active and volumetric_result.top_k_indices:
-            jump_labels = [f"Slice {i + 1}" for i in volumetric_result.top_k_indices]
-            st.caption("Jump to a high-salience slice using the sidebar's Slice control: " + ", ".join(jump_labels))
+    gradcam_col, action_col = st.columns([1, 1.2])
 
     with action_col:
         st.markdown("#### Run Analysis")
@@ -966,10 +1075,27 @@ def main() -> None:
             st.info("Run the single-slice or volumetric analysis to generate a Grad-CAM overlay.")
 
     st.markdown("---")
-    attribution_col, crossref_col = st.columns([1, 2])
-    with attribution_col:
-        st.markdown("#### ⚛️ Quantum State Attribution")
-        result = st.session_state.get(result_key)
+    st.markdown("#### ⚛️ Quantum Decision Metrics")
+    result = st.session_state.get(result_key)
+
+    badge_col, chart_col = st.columns([1, 1])
+    with badge_col:
+        st.markdown("##### Diagnostic Prediction & Probability Breakdown")
+        acl_risk = result.acl_risk if result is not None else None
+        mcl_risk = result.mcl_risk if result is not None else None
+        meniscus_risk = result.meniscus_risk if result is not None else None
+        badge_cols = st.columns(3)
+        with badge_cols[0]:
+            render_condition_risk_badge("ACL Tear", acl_risk)
+        with badge_cols[1]:
+            render_condition_risk_badge("MCL Sprain", mcl_risk)
+        with badge_cols[2]:
+            render_condition_risk_badge("Meniscal Tear", meniscus_risk)
+        if result is None:
+            st.info("Run **Q-Knee Analysis** to populate the per-condition risk breakdown.")
+
+    with chart_col:
+        st.markdown("##### 4-Qubit Pauli-Z Expectation Attribution")
         pauli_z = result.pauli_z_expectations if result is not None else None
         fig = render_quantum_attribution_panel(pauli_z)
         if fig is not None:
@@ -978,9 +1104,6 @@ def main() -> None:
                        "before the classical readout layer.")
         else:
             st.info("Run **Q-Knee Analysis** to display this slice's per-qubit ⟨Z⟩ expectation values.")
-
-    with crossref_col:
-        render_cross_reference_panel(volume, contrast, primary_plane=plane)
 
     render_deck_figures_expander()
 
