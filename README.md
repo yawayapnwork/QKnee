@@ -5,7 +5,7 @@ colorFrom: green
 colorTo: blue
 sdk: streamlit
 sdk_version: "1.62.0"
-app_file: qknee/ui/dashboard.py
+app_file: streamlit_app.py
 pinned: false
 license: mit
 ---
@@ -28,10 +28,12 @@ license: mit
 
 ## Deploying the dashboard (zero-cost)
 
-The Streamlit clinical dashboard (`qknee/ui/dashboard.py`, the `app_file` in this README's frontmatter above) deploys directly to either platform's free tier — no Docker image, no paid compute:
+The Streamlit clinical dashboard (`qknee/ui/dashboard.py`, wrapped by the root-level [`streamlit_app.py`](streamlit_app.py) — the `app_file` in this README's frontmatter above) deploys directly to either platform's free tier — no Docker image, no paid compute:
 
-- **Streamlit Community Cloud**: [share.streamlit.io](https://share.streamlit.io) → New app → point at this repo, branch, and `qknee/ui/dashboard.py`. Reads `requirements.txt` and `packages.txt` from the repo root automatically.
+- **Streamlit Community Cloud**: [share.streamlit.io](https://share.streamlit.io) → New app → point at this repo, branch, and `streamlit_app.py`. Reads `requirements.txt` and `packages.txt` from the repo root automatically.
 - **Hugging Face Spaces**: create a Space with SDK "Streamlit" and push this repo — the frontmatter block at the top of this file *is* the Space's `README.md` metadata (`sdk`, `app_file`, etc.), so no separate configuration step is needed.
+
+`streamlit_app.py` exists purely so `app_file` can point at a *repo-root* script: both platforms run `streamlit run <app_file>` with only that script's own directory on `sys.path`, not the repo root, so pointing `app_file` straight at the nested `qknee/ui/dashboard.py` would break every `from qknee....` import in it (`ModuleNotFoundError: No module named 'qknee'`). The wrapper adds the repo root to `sys.path` first, then delegates to `qknee.ui.dashboard.main()`.
 
 Both platforms cap free-tier containers around 1GB RAM and enforce a build-time limit, so `requirements.txt` pins CPU-only PyTorch wheels (`torch==2.13.0+cpu` / `torchvision==0.28.0+cpu` via `--extra-index-url https://download.pytorch.org/whl/cpu`) instead of PyPI's default multi-GB CUDA build, and `opencv-python-headless` instead of the GUI-linked `opencv-python` — see the comments in [`requirements.txt`](requirements.txt) and [`packages.txt`](packages.txt) for the full audit. The dashboard also pre-warms `qknee/artifacts/precomputed_cache.json` into `@st.cache_resource` memory at boot and caches per-slice inference/Grad-CAM/DICOM-decode results, so a cold container's first few interactions don't pay full recomputation cost.
 

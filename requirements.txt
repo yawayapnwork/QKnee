@@ -46,16 +46,28 @@ nibabel==5.4.2
 SimpleITK==2.5.6
 
 # API-server-only (qknee/api/*) — unused by the Streamlit dashboard itself
-# (qknee/ui/dashboard.py, the app_file for both cloud targets), but kept
-# here since this file is shared with the Docker Compose "api" service.
-# All three are pure-Python/small wheels, not a spin-up memory/timeout risk.
+# (qknee/ui/dashboard.py, wrapped by streamlit_app.py, the app_file for
+# both cloud targets), but kept here since this file is shared with the
+# Docker Compose "api" service. All three are pure-Python/small wheels,
+# not a spin-up memory/timeout risk.
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 
-# qknee/api/auth.py — password hashing (Argon2id, not passlib[bcrypt]: passlib
-# 1.7.4's bcrypt backend is incompatible with bcrypt>=4.1, which removed the
-# `bcrypt.__about__` attribute passlib reads at import time) + JWT signing.
+# qknee/api/auth.py — JWT signing/verification + password hashing.
+# Deliberately PyJWT + argon2-cffi (Argon2id), NOT python-jose[cryptography]
+# / passlib[bcrypt]:
+#   - passlib[bcrypt]: passlib 1.7.4's bcrypt backend reads a
+#     `bcrypt.__about__` attribute that bcrypt>=4.1 removed, breaking every
+#     hash()/verify() call outright (`AttributeError`) — verified against
+#     this project's actual pinned `bcrypt` transitive version, not a
+#     hypothetical. Argon2id is also the current OWASP-recommended default
+#     for new applications, not just a workaround.
+#   - python-jose[cryptography]: no compatibility issue, just redundant —
+#     PyJWT already covers this project's one JWT use case (HS256
+#     sign/verify), and this file's whole premise is minimizing free-tier
+#     footprint, so a second full JWT library sitting unused isn't added
+#     for its own sake.
 argon2-cffi==25.1.0
 PyJWT==2.13.0
 
