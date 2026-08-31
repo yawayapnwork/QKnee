@@ -28,6 +28,21 @@ Outputs:
     qknee/artifacts/benchmark_results.json   - structured per-model metrics
     qknee/artifacts/benchmark_roc_curve.png  - ROC curve, all 3 models
 
+Verification (complete end-to-end coverage, not just metric computation):
+    Before training the comparison suite, `run_pipeline_sanity_check()`
+    drives a synthetic `(Batch, Slices, Channels, H, W)` volumetric batch
+    through the real `PipelineRunner` (DataIngestion -> ResNet18 -> PCA ->
+    PennyLane VQC), asserting the quantum stage's Pauli-Z expectations and
+    calibrated risk probabilities are strictly within their mathematical
+    bounds — the same contract `qknee/tests/test_pipeline_runner.py`'s
+    `TestVolumetricBatchParity` checks in CI, run here as a live smoke test
+    against whatever code is currently checked out. After training,
+    `verify_benchmark_results()` asserts every exported metric (ROC-AUC,
+    F1, precision, recall, latency) is finite and within its valid range
+    before anything is written to disk, so a broken metric fails loudly
+    here rather than silently reaching the deck/dashboard. Skip either
+    check with `--skip-sanity-check` / `--skip-metrics-verification`.
+
 Usage:
     python scripts/run_benchmark.py
     python scripts/run_benchmark.py --data-root /path/to/real/mrnet --plane axial --n-cases 120
@@ -55,6 +70,7 @@ from qknee.models.evaluate import (
     DEFAULT_ARTIFACTS_DIR,
     BENCHMARK_RESULTS_FILENAME,
     BENCHMARK_ROC_FILENAME,
+    ModelMetrics,
     PerformanceEvaluator,
     build_mrnet_validation_subset,
     export_benchmark_results_json,
@@ -66,10 +82,112 @@ from qknee.models.evaluate import (
     train_linear_bottleneck_classifier,
     train_pca_svm_classifier,
 )
+from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 
 logger = get_logger(__name__)
 _config = load_config()
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end verification: pipeline sanity check (pre-training smoke test)
+# --------------------------------------------------------------------------- #
+
+def run_pipeline_sanity_check(seed: int = _config.evaluation.random_seed) -> None:
+    """Drives a synthetic `(Batch, Slices, Channels, H, W)` volumetric batch
+    through a real `PipelineRunner` end-to-end (DataIngestion's later
+    stages -> ResNet18 -> PCA -> PennyLane VQC) and asserts the quantum
+    stage's outputs are strictly bounded, so a broken pipeline is caught
+    before spending time training the comparison suite.
+
+    Uses a freshly fitted `QuantumDimReducer` (persisted to a throwaway
+    temp file) and a randomly initialized VQC — this is a structural smoke
+    test of the pipeline's stage-to-stage contracts, not a check of any
+    particular trained checkpoint's accuracy.
+
+    Raises `RuntimeError` (with the underlying assertion message) if any
+    bound is violated.
+    """
+    from qknee.models.pipeline import PipelineRunner
+
+    print("\nRunning pipeline sanity check (synthetic (B, S, C, H, W) volumetric batch)...")
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+
+    reducer = QuantumDimReducer().fit(rng.normal(size=(300, _config.resnet.feature_dim)).astype(np.float32))
+    with tempfile.TemporaryDirectory(prefix="qknee_sanity_check_") as tmp_dir:
+        pca_artifact_path = Path(tmp_dir) / "pca_scaler.pkl"
+        reducer.save(pca_artifact_path)
+        missing_checkpoint_path = Path(tmp_dir) / "no_such_checkpoint.pt"
+
+        try:
+            runner = PipelineRunner(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+
+            batch_size, n_slices = 3, 5
+            generator = torch.Generator().manual_seed(seed)
+            volumetric_batch = torch.rand(batch_size, n_slices, 3, 224, 224, generator=generator)
+
+            features = runner.extract_resnet_features(volumetric_batch)
+            if features.shape != (batch_size, _config.resnet.feature_dim):
+                raise RuntimeError(f"expected ResNet18 features shaped ({batch_size}, {_config.resnet.feature_dim}), got {features.shape}")
+
+            angles = runner.reduce_to_quantum_angles(features)
+            if angles.shape != (batch_size, _config.quantum.n_qubits):
+                raise RuntimeError(f"expected {batch_size} x {_config.quantum.n_qubits} quantum angles, got {angles.shape}")
+
+            with torch.no_grad():
+                angles_tensor = torch.from_numpy(angles).float()
+                pauli_z_expvals = runner.vqc.quantum_layer(angles_tensor).detach().numpy()
+            if not (np.all(pauli_z_expvals >= -1.0) and np.all(pauli_z_expvals <= 1.0)):
+                raise RuntimeError(
+                    f"Pauli-Z expectation values out of [-1.0, 1.0] bounds: "
+                    f"min={pauli_z_expvals.min():.6f}, max={pauli_z_expvals.max():.6f}"
+                )
+
+            risk_scores = [runner.classify(angles[i : i + 1]) for i in range(batch_size)]
+            if not all(0.0 <= score <= 1.0 for score in risk_scores):
+                raise RuntimeError(f"calibrated risk probabilities out of [0.0, 1.0] bounds: {risk_scores}")
+        except Exception as exc:
+            raise RuntimeError(f"Pipeline sanity check FAILED: {exc}") from exc
+
+    print(
+        f"  PASS — {batch_size} samples x {n_slices} slices ran end-to-end; "
+        f"Pauli-Z in [{pauli_z_expvals.min():.4f}, {pauli_z_expvals.max():.4f}], "
+        f"risk scores in [{min(risk_scores):.4f}, {max(risk_scores):.4f}]."
+    )
+
+
+def verify_benchmark_results(results: list[ModelMetrics]) -> None:
+    """Asserts every exported metric is finite and within its valid range
+    before `run_benchmark()` writes anything to disk — catches a silently
+    broken metric (e.g. an unstratified split collapsing ROC-AUC to NaN,
+    or a negative latency from a clock issue) before it reaches the
+    dashboard/deck rather than after.
+
+    Raises `RuntimeError` (naming the offending model/metric) on any
+    violation.
+    """
+    print("\nVerifying benchmark results are finite and within valid ranges...")
+    for metrics in results:
+        for bounded_field in ("roc_auc", "sensitivity", "specificity", "f1", "precision", "recall"):
+            value = getattr(metrics, bounded_field)
+            if value is None or not np.isfinite(value) or not (0.0 <= value <= 1.0):
+                raise RuntimeError(
+                    f"Benchmark verification FAILED: {metrics.name}.{bounded_field} = {value!r} "
+                    "is not a finite value in [0.0, 1.0]"
+                )
+        if metrics.latency_ms_per_sample is not None and (
+            not np.isfinite(metrics.latency_ms_per_sample) or metrics.latency_ms_per_sample < 0.0
+        ):
+            raise RuntimeError(
+                f"Benchmark verification FAILED: {metrics.name}.latency_ms_per_sample = "
+                f"{metrics.latency_ms_per_sample!r} is not a finite non-negative value"
+            )
+        if len(metrics.y_prob) and not np.all((metrics.y_prob >= 0.0) & (metrics.y_prob <= 1.0)):
+            raise RuntimeError(
+                f"Benchmark verification FAILED: {metrics.name}.y_prob contains values outside [0.0, 1.0]"
+            )
+    print(f"  PASS — {len(results)} model(s) verified.")
 
 
 def build_validation_subset(
@@ -131,14 +249,24 @@ def run_benchmark(
     latency_repeats: int = 20,
     output_dir: Path = DEFAULT_ARTIFACTS_DIR,
     seed: int = _config.evaluation.random_seed,
+    skip_sanity_check: bool = False,
+    skip_metrics_verification: bool = False,
 ) -> Path:
     """Runs the full 3-model comparative benchmark end-to-end and writes
     `benchmark_results.json` + `benchmark_roc_curve.png` to `output_dir`.
+
+    Unless disabled, brackets the benchmark with two verification passes
+    (see the module docstring): `run_pipeline_sanity_check()` before
+    training, `verify_benchmark_results()` after — both raise `RuntimeError`
+    on failure rather than letting a broken pipeline/metric reach disk.
 
     Returns the path to the written JSON results file.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    if not skip_sanity_check:
+        run_pipeline_sanity_check(seed=seed)
 
     logger.info("Building MRNet validation subset (plane=%s, condition=%s)...", plane, condition)
     features, labels, dataset_info = build_validation_subset(data_root, plane, condition, split, n_cases, seed)
@@ -192,6 +320,9 @@ def run_benchmark(
     print("\n=== Comparative Benchmark Results ===")
     print_benchmark_table(results)
 
+    if not skip_metrics_verification:
+        verify_benchmark_results(results)
+
     output_dir = Path(output_dir)
     json_path = export_benchmark_results_json(
         results, output_path=output_dir / BENCHMARK_RESULTS_FILENAME, dataset_info=dataset_info,
@@ -222,6 +353,14 @@ def main() -> None:
     parser.add_argument("--latency-repeats", type=int, default=20, help="Timed single-sample calls averaged per model.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_ARTIFACTS_DIR)
     parser.add_argument("--seed", type=int, default=_config.evaluation.random_seed)
+    parser.add_argument(
+        "--skip-sanity-check", action="store_true",
+        help="Skip the pre-training PipelineRunner (B,S,C,H,W) volumetric smoke test.",
+    )
+    parser.add_argument(
+        "--skip-metrics-verification", action="store_true",
+        help="Skip the post-training bounds-check on exported ROC-AUC/F1/precision/recall/latency.",
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -236,6 +375,8 @@ def main() -> None:
         latency_repeats=args.latency_repeats,
         output_dir=args.output_dir,
         seed=args.seed,
+        skip_sanity_check=args.skip_sanity_check,
+        skip_metrics_verification=args.skip_metrics_verification,
     )
 
 

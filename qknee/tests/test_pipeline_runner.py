@@ -2,17 +2,30 @@
 Tests for `qknee.models.pipeline.PipelineRunner` — the canonical
 DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM orchestration class.
 
-Covers three things:
+Covers six things:
     1. End-to-end execution (`run()`) on single-slice and multi-slice inputs.
     2. Input boundary assertions on each individual stage method.
     3. Error handling: invalid inputs, malformed artifacts, and mismatched
        configuration all raise `PipelineValidationError` with an actionable
        message, rather than a raw exception from deep inside
        PyTorch/PennyLane/sklearn.
+    4. Volumetric batch parity: a genuine `(Batch, Slices, Channels, H, W)`
+       multi-sample batch runs end-to-end (ResNet18 -> PCA -> PennyLane VQC)
+       without exceptions, with Pauli-Z expectations and calibrated
+       probabilities strictly bounded.
+    5. Offline precomputed-cache parity: `qknee.ui.analysis_app`'s Judge
+       Fast-Path cache loader reproduces `precomputed_cache.json`'s exact
+       metrics, fast enough to serve as a live-demo fallback.
+    6. Report generation validation: `ReportGenerator.build_pdf_report()`
+       produces a valid, non-empty PDF with embedded images/tables and no
+       deprecation warnings.
 """
 
 from __future__ import annotations
 
+import json
+import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -217,3 +230,326 @@ class TestErrorHandling:
 
         with pytest.raises(PipelineValidationError, match="n_qubits"):
             PipelineRunner(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=checkpoint_path)
+
+
+# --------------------------------------------------------------------------- #
+# 4. Volumetric batch parity: (Batch, Slices, Channels, H, W) end-to-end
+# --------------------------------------------------------------------------- #
+
+class TestVolumetricBatchParity:
+    """Verifies the full ResNet18 -> PCA -> PennyLane VQC chain on a
+    genuine multi-sample, multi-slice `(B, S, C, H, W)` batch — the shape a
+    real batch of volumetric cases takes once ingestion has run — rather
+    than the single-sample `(1, S, C, H, W)` shape the end-to-end tests
+    above exercise."""
+
+    @pytest.fixture
+    def volumetric_batch(self) -> torch.Tensor:
+        """Deterministic `(B=3, S=5, C=3, H=224, W=224)` synthetic batch —
+        3 cases, 5 slices each."""
+        generator = torch.Generator().manual_seed(2024)
+        return torch.rand(3, 5, 3, 224, 224, generator=generator)
+
+    def test_batch_executes_end_to_end_without_exceptions(
+        self, pipeline_runner: PipelineRunner, volumetric_batch: torch.Tensor
+    ):
+        features = pipeline_runner.extract_resnet_features(volumetric_batch)
+        assert features.shape == (3, 512)
+        assert np.all(np.isfinite(features))
+
+        angles = pipeline_runner.reduce_to_quantum_angles(features)
+        assert angles.shape == (3, 4)
+        assert angles.min() >= 0.0 and angles.max() <= 2 * np.pi + 1e-6
+
+        risk_scores = [pipeline_runner.classify(angles[i : i + 1]) for i in range(angles.shape[0])]
+        assert len(risk_scores) == 3
+        assert all(isinstance(score, float) for score in risk_scores)
+
+    def test_pauli_z_expectations_are_strictly_within_bounds(
+        self, pipeline_runner: PipelineRunner, volumetric_batch: torch.Tensor
+    ):
+        """Reads the VQC's raw per-qubit measurement output (before the
+        classical Linear+Sigmoid readout collapses it to a risk score) for
+        every sample in the batch and asserts it is strictly bounded to
+        `[-1.0, 1.0]` — the exact `default.qubit` state-vector simulator
+        guarantees this analytically, with no floating-point slack needed."""
+        features = pipeline_runner.extract_resnet_features(volumetric_batch)
+        angles = pipeline_runner.reduce_to_quantum_angles(features)
+
+        with torch.no_grad():
+            angles_tensor = torch.from_numpy(angles).float()
+            expvals = pipeline_runner.vqc.quantum_layer(angles_tensor).detach().numpy()
+
+        assert expvals.shape == (3, 4)
+        assert np.all(expvals >= -1.0) and np.all(expvals <= 1.0)
+
+    def test_calibrated_probabilities_are_within_bounds_per_sample(
+        self, pipeline_runner: PipelineRunner, volumetric_batch: torch.Tensor
+    ):
+        features = pipeline_runner.extract_resnet_features(volumetric_batch)
+        angles = pipeline_runner.reduce_to_quantum_angles(features)
+
+        for i in range(angles.shape[0]):
+            risk = pipeline_runner.classify(angles[i : i + 1])
+            assert 0.0 <= risk <= 1.0
+
+    def test_batch_run_via_run_method_over_multiple_volumes(self, pipeline_runner: PipelineRunner):
+        """Same batch-parity contract exercised through the public `run()`
+        convenience entry point, one synthetic `(S, H, W)` volume per
+        simulated case, confirming per-case results are independently
+        well-formed (not just the raw-tensor stage chain above)."""
+        rng = np.random.default_rng(2024)
+        for case_index in range(3):
+            volume = rng.integers(0, 255, size=(5, 224, 224), dtype=np.uint8)
+            result = pipeline_runner.run(volume, skip_gradcam=True)
+
+            assert isinstance(result, PipelineResult)
+            assert 0.0 <= result.risk_score <= 1.0
+            assert result.quantum_angles.shape == (1, 4)
+
+
+# --------------------------------------------------------------------------- #
+# 5. Offline precomputed-cache parity (Judge Fast-Path, qknee.ui.analysis_app)
+# --------------------------------------------------------------------------- #
+
+_CACHE_PATH = Path("qknee/artifacts/precomputed_cache.json")
+
+
+@pytest.mark.skipif(
+    not _CACHE_PATH.exists(),
+    reason=f"{_CACHE_PATH} not generated yet; run `python scripts/generate_demo_cache.py` first.",
+)
+class TestPrecomputedCacheParity:
+    """Verifies `qknee.ui.analysis_app`'s Judge Fast-Path fallback cache
+    loader reproduces exactly the prediction metrics recorded in
+    `precomputed_cache.json` (no live inference, no recomputation drift)
+    and stays fast enough to actually serve as a live-demo latency-risk
+    fallback — the entire point of the PRD's Plan B cache."""
+
+    @pytest.fixture(scope="class")
+    def analysis_app(self):
+        pytest.importorskip("streamlit")
+        import qknee.ui.analysis_app as module
+
+        return module
+
+    @pytest.fixture(scope="class")
+    def raw_cases(self):
+        with _CACHE_PATH.open("r", encoding="utf-8") as handle:
+            return json.load(handle)["cases"]
+
+    def test_load_precomputed_cache_matches_the_json_file_on_disk(self, analysis_app, raw_cases):
+        cache = analysis_app.load_precomputed_cache()
+        assert cache is not None
+        assert [case["case_id"] for case in cache["cases"]] == [case["case_id"] for case in raw_cases]
+
+    def test_fast_path_result_reproduces_exact_metrics_for_every_case(self, analysis_app, raw_cases):
+        for raw_case in raw_cases:
+            _, result = analysis_app.build_fast_path_result(raw_case)
+
+            assert result.risk_score == pytest.approx(raw_case["risk_score"])
+            expected_label = (
+                "Abnormality Detected" if raw_case["risk_score"] >= analysis_app.RISK_THRESHOLD else "Normal"
+            )
+            assert result.prediction_label == expected_label
+            assert result.quantum_latency_ms == pytest.approx(raw_case.get("quantum_latency_ms", 0.0))
+            assert result.acl_risk == pytest.approx(raw_case["risk_score"])
+
+            expected_pauli_z = raw_case.get("pauli_z_expectations")
+            if expected_pauli_z:
+                assert result.pauli_z_expectations is not None
+                np.testing.assert_allclose(
+                    result.pauli_z_expectations, expected_pauli_z, rtol=1e-6, atol=1e-6,
+                )
+
+    def test_fast_path_result_serves_each_sample_in_under_10_milliseconds(self, analysis_app, raw_cases):
+        # Warm the one-time cv2 import cost outside the timed loop — a live
+        # demo session imports cv2 once at app startup, not per case served,
+        # so per-sample timing should reflect steady-state serving cost.
+        analysis_app.build_fast_path_result(raw_cases[0])
+
+        for raw_case in raw_cases:
+            start = time.perf_counter()
+            analysis_app.build_fast_path_result(raw_case)
+            elapsed_ms = (time.perf_counter() - start) * 1000
+
+            assert elapsed_ms < 10.0, (
+                f"case '{raw_case['case_id']}' took {elapsed_ms:.2f}ms to serve from cache, "
+                "expected < 10ms"
+            )
+
+    def test_fast_path_result_does_not_invoke_the_quantum_simulator(self, analysis_app, raw_cases):
+        """Structural guarantee (not just "it happened to be fast"): the
+        fallback cache path must never re-run PennyLane circuit execution,
+        the exact failure mode this cache exists to route around."""
+        import pennylane as qml
+        from unittest.mock import patch
+
+        with patch.object(
+            qml.QNode, "__call__",
+            side_effect=AssertionError("QNode was invoked while serving the precomputed cache"),
+        ):
+            for raw_case in raw_cases:
+                analysis_app.build_fast_path_result(raw_case)
+
+
+# --------------------------------------------------------------------------- #
+# 6. Report generation validation (qknee.xai.report_generator.ReportGenerator)
+# --------------------------------------------------------------------------- #
+
+class TestReportGenerationValidation:
+    """Verifies `ReportGenerator.build_pdf_report()` produces a valid,
+    non-empty PDF with embedded slice/Grad-CAM images and an attribution
+    table — without triggering any deprecation warnings from the
+    reportlab/PIL rendering stack."""
+
+    @pytest.fixture
+    def sample_prediction_results(self) -> dict:
+        return {
+            "acl_risk": 0.62,
+            "mcl_risk": 0.21,
+            "meniscus_risk": 0.35,
+            "pauli_z_expectations": [0.41, -0.18, 0.63, -0.07],
+            "readout_weights": [0.85, -0.40, 1.10, 0.25],
+            "resnet_latency_ms": 18.4,
+            "pca_latency_ms": 1.2,
+            "quantum_latency_ms": 42.7,
+            "total_latency_ms": 62.3,
+            "backend": "live",
+        }
+
+    @pytest.fixture
+    def sample_slice_and_overlay(self):
+        rng = np.random.default_rng(11)
+        mri_slice = rng.integers(0, 255, size=(64, 64), dtype=np.uint8)
+        gradcam_overlay = np.dstack([mri_slice] * 3)
+        return mri_slice, gradcam_overlay
+
+    def test_build_pdf_report_returns_a_valid_nonempty_pdf_without_deprecation_warnings(
+        self, sample_prediction_results, sample_slice_and_overlay,
+    ):
+        from qknee.xai.report_generator import ReportGenerator
+
+        mri_slice, gradcam_overlay = sample_slice_and_overlay
+        generator = ReportGenerator()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            pdf_bytes = generator.build_pdf_report(
+                prediction_results=sample_prediction_results,
+                mri_slice=mri_slice,
+                gradcam_overlay=gradcam_overlay,
+                metadata={"patient_id": "TEST-CASE-01", "plane": "sagittal"},
+            )
+
+        assert isinstance(pdf_bytes, bytes)
+        assert len(pdf_bytes) > 0
+        assert pdf_bytes[:4] == b"%PDF"
+        assert pdf_bytes.rstrip().endswith(b"%%EOF")
+
+    def test_build_pdf_report_embeds_slice_and_gradcam_images_only_when_supplied(
+        self, sample_prediction_results, sample_slice_and_overlay,
+    ):
+        from qknee.xai.report_generator import ReportGenerator
+
+        mri_slice, gradcam_overlay = sample_slice_and_overlay
+        generator = ReportGenerator()
+
+        with_images = generator.build_pdf_report(
+            prediction_results=sample_prediction_results,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            metadata={"patient_id": "TEST-CASE-02"},
+        )
+        without_images = generator.build_pdf_report(
+            prediction_results=sample_prediction_results,
+            mri_slice=None,
+            gradcam_overlay=None,
+            metadata={"patient_id": "TEST-CASE-02"},
+        )
+
+        # `/Subtype /Image` marks a real embedded Image XObject in the PDF's
+        # object dictionary (unlike raw "/Image", which also matches the
+        # always-present `/ProcSet [... /ImageB /ImageC /ImageI]` entry) —
+        # two per page 1 (slice + Grad-CAM overlay) only when real image
+        # arrays are supplied, none when both panels fall back to a
+        # placeholder box.
+        assert with_images.count(b"/Subtype /Image") == 2
+        assert without_images.count(b"/Subtype /Image") == 0
+        assert len(with_images) > len(without_images)
+
+    def test_build_pdf_report_includes_attribution_table_when_pauli_z_supplied(
+        self, sample_prediction_results, sample_slice_and_overlay,
+    ):
+        pypdf = pytest.importorskip("pypdf")
+        from io import BytesIO
+
+        from qknee.xai.report_generator import ReportGenerator
+
+        mri_slice, gradcam_overlay = sample_slice_and_overlay
+        generator = ReportGenerator()
+
+        with_pauli_z = generator.build_pdf_report(
+            prediction_results=sample_prediction_results,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            metadata={"patient_id": "TEST-CASE-03"},
+        )
+        results_without_pauli_z = {k: v for k, v in sample_prediction_results.items() if k != "pauli_z_expectations"}
+        without_pauli_z = generator.build_pdf_report(
+            prediction_results=results_without_pauli_z,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            metadata={"patient_id": "TEST-CASE-03"},
+        )
+
+        with_pauli_z_reader = pypdf.PdfReader(BytesIO(with_pauli_z))
+        without_pauli_z_reader = pypdf.PdfReader(BytesIO(without_pauli_z))
+
+        assert len(with_pauli_z_reader.pages) == 2
+        page_2_text_with = with_pauli_z_reader.pages[1].extract_text()
+        page_2_text_without = without_pauli_z_reader.pages[1].extract_text()
+
+        assert "Quantum Feature Attribution" in page_2_text_with
+        assert "Q0" in page_2_text_with and "Q3" in page_2_text_with  # per-qubit rows rendered
+        assert "Per-qubit measurement data not available" in page_2_text_without
+
+    def test_build_pdf_report_writes_to_disk_matching_returned_bytes(
+        self, sample_prediction_results, sample_slice_and_overlay, tmp_path: Path,
+    ):
+        from qknee.xai.report_generator import ReportGenerator
+
+        mri_slice, gradcam_overlay = sample_slice_and_overlay
+        output_path = tmp_path / "report.pdf"
+        generator = ReportGenerator()
+
+        pdf_bytes = generator.build_pdf_report(
+            prediction_results=sample_prediction_results,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            metadata={"patient_id": "TEST-CASE-04"},
+            output_path=output_path,
+        )
+
+        assert output_path.exists()
+        assert output_path.read_bytes() == pdf_bytes
+
+    def test_build_pdf_report_merges_instance_and_call_site_metadata(
+        self, sample_prediction_results, sample_slice_and_overlay,
+    ):
+        pypdf = pytest.importorskip("pypdf")
+        from io import BytesIO
+
+        from qknee.xai.report_generator import ReportGenerator
+
+        mri_slice, gradcam_overlay = sample_slice_and_overlay
+        generator = ReportGenerator(metadata={"clinic_name": "TEST CLINIC LETTERHEAD"})
+
+        pdf_bytes = generator.build_pdf_report(
+            prediction_results=sample_prediction_results,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            metadata={"patient_id": "TEST-CASE-05"},
+        )
+        page_1_text = pypdf.PdfReader(BytesIO(pdf_bytes)).pages[0].extract_text()
+        assert "TEST CLINIC LETTERHEAD" in page_1_text

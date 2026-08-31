@@ -793,6 +793,52 @@ def generate_radiology_report(
     return pdf_bytes
 
 
+class ReportGenerator:
+    """Thin object-oriented facade over `generate_radiology_report`/
+    `generate_radiology_text_snippet`, for callers (and tests) that prefer a
+    reusable reporter instance — e.g. one that pins shared `metadata`
+    defaults (clinic name, referring physician) across many per-case report
+    builds — over calling the module-level functions directly. Delegates
+    its entire implementation to those functions; no report-building logic
+    lives here.
+    """
+
+    def __init__(self, metadata: Optional[Dict[str, Any]] = None) -> None:
+        self.metadata: Dict[str, Any] = dict(metadata) if metadata else {}
+
+    def build_pdf_report(
+        self,
+        prediction_results: Dict[str, Any],
+        mri_slice: Optional[np.ndarray] = None,
+        gradcam_overlay: Optional[np.ndarray] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        output_path: Optional[Union[str, Path]] = None,
+    ) -> bytes:
+        """Builds the same two-page clinical PDF report as
+        `generate_radiology_report` (see its docstring for the full
+        recognized `prediction_results`/`metadata` key list), merging
+        this instance's `self.metadata` defaults with the call-site
+        `metadata` (call-site keys win on conflict). Returns raw PDF
+        bytes; also writes them to `output_path` when one is given.
+        """
+        merged_metadata = {**self.metadata, **(metadata or {})}
+        return generate_radiology_report(
+            output_path=output_path,
+            mri_slice=mri_slice,
+            gradcam_overlay=gradcam_overlay,
+            prediction_results=prediction_results,
+            metadata=merged_metadata,
+        )
+
+    def build_text_snippet(
+        self, prediction_results: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Same merged-metadata convenience as `build_pdf_report`, for the
+        short plain-text summary (`generate_radiology_text_snippet`)."""
+        merged_metadata = {**self.metadata, **(metadata or {})}
+        return generate_radiology_text_snippet(prediction_results, merged_metadata)
+
+
 if __name__ == "__main__":
     from qknee.config.logging_config import setup_logging
 
