@@ -44,26 +44,42 @@ from qknee.config.logging_config import get_logger
 _config = load_config()
 logger = get_logger(__name__)
 
+# All demo/deck assets are resolved relative to the repo root (this file's
+# grandparent directory: qknee/ui/dashboard.py -> qknee/ -> repo root),
+# never the process's current working directory — `streamlit run` (and the
+# various ways docker-compose/CI can invoke it) doesn't guarantee cwd is
+# the repo root, and a bare relative `Path("qknee/artifacts/...")` silently
+# resolves to nothing (no error, just `.exists() == False`, degrading every
+# demo-cache/benchmark/deck-figure feature below) when it isn't.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ARTIFACTS_DIR = _REPO_ROOT / "qknee" / "artifacts"
+
 # Demo Mode / Latency Fallback: precomputed predictions + Grad-CAM heatmaps
 # for a handful of sample cases, built offline by `scripts/build_demo_cache.py`,
 # so live judging never waits on a cold model/QNode.
-DEMO_CACHE_DIR = Path("qknee/artifacts/demo_cache")
+DEMO_CACHE_DIR = _ARTIFACTS_DIR / "demo_cache"
 DEMO_CACHE_INDEX_PATH = DEMO_CACHE_DIR / "index.json"
 
 # Quantum-vs-classical comparative benchmark, built offline by
 # `scripts/run_benchmark.py`.
-BENCHMARK_RESULTS_PATH = Path("qknee/artifacts/benchmark_results.json")
-BENCHMARK_ROC_PATH = Path("qknee/artifacts/benchmark_roc_curve.png")
+BENCHMARK_RESULTS_PATH = _ARTIFACTS_DIR / "benchmark_results.json"
+BENCHMARK_ROC_PATH = _ARTIFACTS_DIR / "benchmark_roc_curve.png"
+
+# Offline-rendered slide-deck figures (`scripts/generate_deck_assets.py`) —
+# e.g. the circuit diagram — surfaced inline as reference material (see
+# `render_benchmark_tab`).
+DECK_FIGURES_DIR = _ARTIFACTS_DIR / "deck_figures"
 
 # The PRD's Plan B latency-risk mitigation cache (`scripts/generate_demo_cache.py`)
 # — 10 cases' full pipeline outputs (quantum angles, Pauli-Z expectations,
 # risk scores, Grad-CAM overlays) serialized to one JSON file, with each
 # heatmap also embedded as base64 so nothing needs a second filesystem
 # read. Pre-warmed into `@st.cache_resource` memory at startup (see
-# `load_precomputed_cache` and its eager call in `main()`) — a cold-start
-# handler distinct from (and in addition to) `load_demo_cache_index`'s
-# sidebar-toggle cache above.
-PRECOMPUTED_CACHE_PATH = Path("qknee/artifacts/precomputed_cache.json")
+# `load_precomputed_cache` and its eager call in `main()`) and served
+# directly by the "Judge Mode" sidebar toggle (`render_fast_path_sidebar`)
+# — a cold-start handler distinct from (and in addition to)
+# `load_demo_cache_index`'s sidebar-toggle cache above.
+PRECOMPUTED_CACHE_PATH = _ARTIFACTS_DIR / "precomputed_cache.json"
 
 
 @dataclass
@@ -543,11 +559,15 @@ def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> 
     if result.gradcam_heatmap is not None:
         from qknee.xai.gradcam import overlay_heatmap
 
+        # `overlay_heatmap` resizes/colormaps the raw heatmap then blends it
+        # onto `display_slice` via `cv2.addWeighted(color_heatmap, opacity,
+        # slice_bgr, 1 - opacity, 0)` — a resize + colormap + weighted-sum,
+        # effectively free, so this slider re-blends live on every drag
+        # with no re-inference.
         opacity = st.slider(
-            "Heatmap Opacity", min_value=0.0, max_value=1.0,
-            value=float(_config.gradcam.alpha), step=0.05,
+            "Heatmap Overlay Opacity", 0.0, 1.0, 0.45, step=0.05,
             key=f"gradcam_opacity_{result.backend}",
-            help="Blends the raw Grad-CAM heatmap onto the slice live — no re-inference needed.",
+            help="Blends the raw Grad-CAM heatmap onto the slice live via cv2.addWeighted — no re-inference needed.",
         )
         overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=opacity)
         st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
@@ -660,6 +680,87 @@ def load_cached_case(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
     return display_slice, result
 
 
+def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
+    """Renders the 'Judge Mode' sidebar toggle that bypasses live/mock
+    inference entirely and replays one of `precomputed_cache.json`'s 10
+    pre-scored cases straight from process memory (each case's Grad-CAM
+    overlay is embedded as base64, so serving it costs no filesystem read,
+    no model load, and no QNode execution) — insurance against a live
+    hackathon-judging session timing out on a cold model or a slow-CPU
+    inference. Returns `(use_fast_path, selected_case)`."""
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🏎️ Judge Mode")
+
+    cache = load_precomputed_cache()
+    cases: List[Dict] = (cache or {}).get("cases", [])
+
+    use_fast_path = st.sidebar.toggle(
+        "Enable NISQ Simulation Fast-Path (0-latency Cache)",
+        value=False,
+        disabled=not cases,
+        help=f"Instantly replays one of {len(cases)} precomputed case(s) from "
+             f"`{PRECOMPUTED_CACHE_PATH}` — zero model load, zero QNode "
+             "execution — for judge-facing demos where live inference "
+             "latency risks a UI timeout.",
+    )
+
+    if not cases:
+        st.sidebar.caption(
+            f"No precomputed cache found at `{PRECOMPUTED_CACHE_PATH}`. Run "
+            "`python scripts/generate_demo_cache.py` to build one."
+        )
+        return False, None
+    if not use_fast_path:
+        st.sidebar.caption(f"{len(cases)} fast-path case(s) available.")
+        return False, None
+
+    case_labels = [f"{case['case_id']} ({case.get('plane', '?')})" for case in cases]
+    selected_label = st.sidebar.selectbox("Fast-Path Case", case_labels)
+    selected_case = cases[case_labels.index(selected_label)]
+    st.sidebar.success(f"⚡ Serving '{selected_case['case_id']}' from cache — 0 ms inference.")
+    return True, selected_case
+
+
+def build_fast_path_result(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
+    """Decodes one `precomputed_cache.json` case's base64-embedded Grad-CAM
+    overlay (already resized/colormapped/blended at generation time by
+    `scripts/generate_demo_cache.py`) — genuinely zero-latency: no live
+    ResNet18/PCA/VQC forward pass, and no second filesystem read (the
+    base64 payload is preferred; a `heatmap_file` fallback is used only if
+    the embedded payload is missing)."""
+    import base64
+
+    import cv2
+
+    overlay: Optional[np.ndarray] = None
+    heatmap_b64 = case.get("heatmap_base64")
+    if heatmap_b64:
+        try:
+            png_bytes = base64.b64decode(heatmap_b64)
+            overlay = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception as exc:  # noqa: BLE001 - fall back to the on-disk copy below
+            logger.warning("Failed to decode base64 heatmap for case %s: %s", case.get("case_id"), exc)
+
+    if overlay is None and case.get("heatmap_file"):
+        heatmap_path = _ARTIFACTS_DIR / case["heatmap_file"]
+        if heatmap_path.exists():
+            overlay = cv2.imread(str(heatmap_path), cv2.IMREAD_COLOR)
+
+    risk_score = float(case["risk_score"])
+    result = InferenceResult(
+        acl_risk=risk_score,
+        meniscus_risk=None,  # precomputed_cache.json scores one unified risk, not separate ACL/meniscus heads
+        resnet_latency_ms=float(case.get("resnet_latency_ms", 0.0)),
+        pca_latency_ms=0.0,
+        quantum_latency_ms=float(case.get("quantum_latency_ms", 0.0)),
+        total_latency_ms=0.0,  # served straight from cache — no recomputation happened this request
+        backend=f"cached-fastpath/{case.get('backend', 'unknown')}",
+        gradcam_overlay=overlay,
+        gradcam_heatmap=None,  # only the pre-blended overlay is cached, not the raw per-pixel heatmap
+    )
+    return overlay, result
+
+
 def render_demo_cache_sidebar() -> Tuple[bool, Optional[Dict]]:
     """Renders the 'Use Precomputed NISQ Cache' sidebar toggle plus (when
     enabled) a sample-case picker. Returns `(use_cache, selected_case)` —
@@ -763,6 +864,11 @@ def render_benchmark_tab() -> None:
         st.bar_chart(latency_df)
         st.caption("Single-sample (batch-size-1) wall-clock latency — reflects real one-slice-at-a-time inference.")
 
+    circuit_diagram_path = DECK_FIGURES_DIR / "circuit_diagram.png"
+    if circuit_diagram_path.exists():
+        with st.expander("🧬 Quantum Circuit Diagram (reference)"):
+            st.image(str(circuit_diagram_path), use_container_width=True)
+
     st.markdown("#### Full Metrics")
     metrics_df = pd.DataFrame([
         {
@@ -843,9 +949,15 @@ def render_diagnostic_tab() -> None:
     mode = "api" if use_api else ("live" if backend_ready else "mock")
     render_quantum_status(mode, backend_ready, api_url)
 
+    use_fast_path, fast_path_case = render_fast_path_sidebar()
     use_demo_cache, cached_case = render_demo_cache_sidebar()
 
-    if use_demo_cache and cached_case is not None:
+    if use_fast_path and fast_path_case is not None:
+        # Judge Mode: skip upload/plane/slice/inference entirely and replay a
+        # precomputed_cache.json case straight from process memory — no
+        # filesystem read, no model, no QNode execution.
+        display_slice, result = build_fast_path_result(fast_path_case)
+    elif use_demo_cache and cached_case is not None:
         # Demo Mode: skip upload/plane/slice/inference entirely and replay a
         # precomputed case straight from disk — genuinely zero-latency.
         display_slice, result = load_cached_case(cached_case)
@@ -904,11 +1016,20 @@ def render_diagnostic_tab() -> None:
     image_col, gradcam_col, results_col = st.columns([1, 1, 1])
 
     with image_col:
-        if use_demo_cache and cached_case is not None:
+        if use_fast_path and fast_path_case is not None:
+            st.markdown(f"#### ⚡ Fast-Path Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
+            st.caption("Served from `precomputed_cache.json` — 0 ms inference.")
+        elif use_demo_cache and cached_case is not None:
             st.markdown(f"#### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
         else:
             st.markdown(f"#### {view} View — Slice {slice_index}/{max_index}")
-        st.image(display_slice, use_container_width=True, clamp=True)
+        if display_slice is not None:
+            st.image(
+                display_slice, use_container_width=True, clamp=True,
+                channels="BGR" if (use_fast_path and fast_path_case is not None) else "RGB",
+            )
+        else:
+            st.warning("No cached image available for this fast-path case.")
 
     with gradcam_col:
         render_gradcam_panel(display_slice, result)
@@ -920,7 +1041,8 @@ def render_diagnostic_tab() -> None:
         st.markdown("---")
         render_latency_metrics(result)
         st.markdown("---")
-        render_report_download(display_slice, result)
+        if display_slice is not None:
+            render_report_download(display_slice, result)
 
     st.markdown("---")
     st.caption(

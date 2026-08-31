@@ -47,6 +47,24 @@ logger = get_logger(__name__)
 RISK_THRESHOLD = _config.api.tear_risk_threshold
 N_QUBITS = _config.quantum.n_qubits
 
+# All demo/deck assets are resolved relative to the repo root (this file's
+# grandparent directory: qknee/ui/analysis_app.py -> qknee/ -> repo root),
+# never the process's current working directory — `streamlit run` doesn't
+# guarantee cwd is the repo root, and a bare relative
+# `Path("qknee/artifacts/...")` silently resolves to nothing (no error,
+# just `.exists() == False`) when it isn't.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ARTIFACTS_DIR = _REPO_ROOT / "qknee" / "artifacts"
+DEMO_CACHE_DIR = _ARTIFACTS_DIR / "demo_cache"
+DECK_FIGURES_DIR = _ARTIFACTS_DIR / "deck_figures"
+
+# The PRD's Plan B latency-risk mitigation cache (`scripts/generate_demo_cache.py`)
+# — 10 cases' full pipeline outputs serialized to one JSON file, each Grad-CAM
+# heatmap embedded as base64 so nothing needs a second filesystem read. Served
+# directly by the "Judge Mode" sidebar toggle (`render_fast_path_sidebar`) so a
+# live demo never blocks on a cold model/QNode load or slow CPU inference.
+PRECOMPUTED_CACHE_PATH = _ARTIFACTS_DIR / "precomputed_cache.json"
+
 PLANES = ["Axial", "Coronal", "Sagittal"]
 
 # The two reference planes always shown for anatomical cross-checking
@@ -155,6 +173,151 @@ def load_backend():
     except Exception as exc:  # noqa: BLE001
         st.session_state["_backend_error"] = str(exc)
         return None
+
+
+@st.cache_resource(show_spinner=False)
+def load_precomputed_cache() -> Optional[dict]:
+    """Judge Fast-Path source: `qknee/artifacts/precomputed_cache.json`'s
+    pre-scored cases (Grad-CAM overlay embedded as base64), so the "Enable
+    NISQ Simulation Fast-Path" toggle can serve a result with zero model
+    load and zero QNode execution — insurance against a live judging
+    session timing out on a cold backend or slow CPU inference. Returns
+    `None` (logged) if the cache hasn't been built yet
+    (`python scripts/generate_demo_cache.py`) or fails to parse."""
+    import json
+
+    if not PRECOMPUTED_CACHE_PATH.exists():
+        logger.info("No precomputed cache found at %s; Judge Fast-Path disabled.", PRECOMPUTED_CACHE_PATH)
+        return None
+    try:
+        return json.loads(PRECOMPUTED_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to read precomputed cache at %s: %s", PRECOMPUTED_CACHE_PATH, exc)
+        return None
+
+
+def render_fast_path_sidebar() -> Tuple[bool, Optional[dict]]:
+    """Renders the 'Judge Mode' sidebar toggle that bypasses upload/live/mock
+    inference entirely and replays one of `precomputed_cache.json`'s
+    pre-scored cases straight from process memory. Returns
+    `(use_fast_path, selected_case)`."""
+    st.sidebar.markdown("### 🏎️ Judge Mode")
+
+    cache = load_precomputed_cache()
+    cases: List[dict] = (cache or {}).get("cases", [])
+
+    use_fast_path = st.sidebar.toggle(
+        "Enable NISQ Simulation Fast-Path (0-latency Cache)",
+        value=False,
+        disabled=not cases,
+        help=f"Instantly replays one of {len(cases)} precomputed case(s) from "
+             f"`{PRECOMPUTED_CACHE_PATH}` — zero model load, zero QNode "
+             "execution — for judge-facing demos where live inference "
+             "latency risks a UI timeout.",
+    )
+
+    if not cases:
+        st.sidebar.caption(
+            f"No precomputed cache found at `{PRECOMPUTED_CACHE_PATH}`. Run "
+            "`python scripts/generate_demo_cache.py` to build one."
+        )
+        return False, None
+    if not use_fast_path:
+        st.sidebar.caption(f"{len(cases)} fast-path case(s) available.")
+        return False, None
+
+    case_labels = [f"{case['case_id']} ({case.get('plane', '?')})" for case in cases]
+    selected_label = st.sidebar.selectbox("Fast-Path Case", case_labels)
+    selected_case = cases[case_labels.index(selected_label)]
+    st.sidebar.success(f"⚡ Serving '{selected_case['case_id']}' from cache — 0 ms inference.")
+    return True, selected_case
+
+
+def build_fast_path_result(case: dict) -> Tuple[Optional[np.ndarray], AnalysisResult]:
+    """Decodes one `precomputed_cache.json` case's base64-embedded Grad-CAM
+    overlay (already resized/colormapped/blended at generation time) —
+    genuinely zero-latency: no live ResNet18/PCA/VQC forward pass, and no
+    second filesystem read (the base64 payload is preferred; a
+    `heatmap_file` fallback is used only if the embedded payload is
+    missing)."""
+    import base64
+
+    import cv2
+
+    overlay: Optional[np.ndarray] = None
+    heatmap_b64 = case.get("heatmap_base64")
+    if heatmap_b64:
+        try:
+            png_bytes = base64.b64decode(heatmap_b64)
+            overlay = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception as exc:  # noqa: BLE001 - fall back to the on-disk copy below
+            logger.warning("Failed to decode base64 heatmap for case %s: %s", case.get("case_id"), exc)
+
+    if overlay is None and case.get("heatmap_file"):
+        heatmap_path = _ARTIFACTS_DIR / case["heatmap_file"]
+        if heatmap_path.exists():
+            overlay = cv2.imread(str(heatmap_path), cv2.IMREAD_COLOR)
+
+    risk_score = float(case["risk_score"])
+    label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
+    raw_pauli_z = case.get("pauli_z_expectations")
+    pauli_z_expectations = np.asarray(raw_pauli_z, dtype=np.float32) if raw_pauli_z else None
+
+    result = AnalysisResult(
+        risk_score=risk_score,
+        prediction_label=label,
+        quantum_latency_ms=float(case.get("quantum_latency_ms", 0.0)),
+        total_latency_ms=0.0,  # served straight from cache — no recomputation happened this request
+        backend=f"cached-fastpath/{case.get('backend', 'unknown')}",
+        gradcam_overlay=overlay,
+        gradcam_heatmap=None,  # only the pre-blended overlay is cached, not the raw per-pixel heatmap
+        pauli_z_expectations=pauli_z_expectations,
+    )
+    return overlay, result
+
+
+def render_fast_path_view(case: dict) -> None:
+    """Renders a lightweight, fully self-contained view of one Judge
+    Fast-Path case — bypasses upload/plane/slice controls entirely, since
+    the cached case carries its own precomputed image/scores."""
+    st.info(
+        f"⚡ Judge Fast-Path active — serving precomputed case **{case['case_id']}** "
+        "from cache (0 ms inference)."
+    )
+    overlay, result = build_fast_path_result(case)
+
+    image_col, gauge_col, attrib_col = st.columns([1, 1, 1])
+
+    with image_col:
+        st.markdown(f"#### Precomputed Grad-CAM — {case.get('plane', '?').title()} plane")
+        if overlay is not None:
+            snippet = case.get("clinical_text_snippet")
+            caption = snippet.splitlines()[0] if snippet else None
+            st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
+        else:
+            st.warning("No cached heatmap available for this case.")
+
+    with gauge_col:
+        render_prediction_badge(result)
+        st.pyplot(render_risk_gauge(result.risk_score), use_container_width=True)
+        st.metric("Quantum Circuit Latency (cached)", f"{result.quantum_latency_ms:.1f} ms")
+        st.caption(f"Backend: **{result.backend}**")
+
+    with attrib_col:
+        fig = render_quantum_attribution_panel(result.pauli_z_expectations)
+        if fig is not None:
+            st.pyplot(fig, use_container_width=True)
+            st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩, precomputed offline for this case.")
+
+
+def render_deck_figures_expander() -> None:
+    """Surfaces the offline-generated deck figures (`scripts/generate_deck_assets.py`)
+    — e.g. the circuit diagram — inline for reference, when available."""
+    figure_path = DECK_FIGURES_DIR / "circuit_diagram.png"
+    if not figure_path.exists():
+        return
+    with st.expander("🧬 Quantum Circuit Diagram (reference)"):
+        st.image(str(figure_path), use_container_width=True)
 
 
 def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
@@ -590,7 +753,7 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]
         if error:
             st.sidebar.caption(f"Reason: {error}")
 
-    default_colormap, default_alpha = "jet", 0.5
+    default_colormap, default_alpha = "jet", 0.45
 
     if not uploaded_files:
         st.sidebar.info("Upload a scan to enable plane/slice/contrast controls.")
@@ -632,9 +795,15 @@ def render_sidebar() -> Tuple[Optional[np.ndarray], str, int, float, str, float]
         "Colormap", list(COLORMAP_OPTIONS.keys()), index=list(COLORMAP_OPTIONS.keys()).index(default_colormap),
         help="Color scheme used to render the Grad-CAM heatmap.",
     )
+    # Blends the raw Grad-CAM heatmap onto the MRI slice live via
+    # `qknee.xai.gradcam.overlay_heatmap`'s `cv2.addWeighted(color_heatmap,
+    # alpha, slice_bgr, 1 - alpha, 0)` call — a resize + colormap + weighted
+    # sum, effectively free, so this slider re-blends in real time on every
+    # drag with no re-inference.
     alpha = st.sidebar.slider(
-        "Heatmap Alpha", min_value=0.1, max_value=0.9, value=default_alpha, step=0.05,
-        help="Blend weight of the heatmap over the MRI slice (0.1 = mostly slice, 0.9 = mostly heatmap).",
+        "Heatmap Overlay Opacity", 0.0, 1.0, default_alpha, step=0.05,
+        help="Blend weight of the heatmap over the MRI slice, applied live via cv2.addWeighted "
+             "(0 = only the slice, 1 = only the heatmap).",
     )
 
     return volume, plane, slice_index, contrast, colormap_name, alpha
@@ -671,6 +840,14 @@ def render_cross_reference_panel(volume: np.ndarray, contrast: float, primary_pl
 
 def main() -> None:
     render_header()
+
+    use_fast_path, fast_path_case = render_fast_path_sidebar()
+    st.sidebar.markdown("---")
+    if use_fast_path and fast_path_case is not None:
+        render_fast_path_view(fast_path_case)
+        render_deck_figures_expander()
+        return
+
     volume, plane, slice_index, contrast, colormap_name, alpha = render_sidebar()
 
     if volume is None:
@@ -804,6 +981,8 @@ def main() -> None:
 
     with crossref_col:
         render_cross_reference_panel(volume, contrast, primary_plane=plane)
+
+    render_deck_figures_expander()
 
     st.markdown("---")
     st.caption(
