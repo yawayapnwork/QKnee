@@ -39,6 +39,12 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.ui.landing_page import (
+    VIEW_BENCHMARK,
+    VIEW_LANDING,
+    VIEW_STATE_KEY,
+    render_landing_page,
+)
 
 # --------------------------------------------------------------------------- #
 # Backend wiring: HTTP API (preferred, when $QKNEE_API_URL is set and
@@ -1193,12 +1199,36 @@ def main() -> None:
     if precomputed_cache is not None:
         st.sidebar.caption(f"⚡ Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
-    tab_diagnostic, tab_benchmark = st.tabs(["🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"])
+    # Public entry view: a first-time visitor (or a fresh session) lands on
+    # `qknee.ui.landing_page`'s hero/pipeline-explainer/sample-showcase
+    # first, not straight into the full diagnostic console. Its "Launch
+    # Live Diagnostic Console" / "Explore Clinical Benchmarks" CTAs write
+    # `VIEW_STATE_KEY` and rerun to switch into the view below.
+    active_view = st.session_state.get(VIEW_STATE_KEY, VIEW_LANDING)
+    if active_view == VIEW_LANDING:
+        render_landing_page()
+        return
 
-    with tab_diagnostic:
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🏠 Back to Home", use_container_width=True):
+        st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
+        st.rerun()
+
+    # `st.tabs()` always opens on its first-listed tab with no programmatic
+    # way to force a different one active — so a landing-page CTA that
+    # wants to land on a specific tab gets there by putting that tab's
+    # label first, rather than always defaulting to Diagnostic View.
+    diagnostic_label, benchmark_label = "🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"
+    tab_labels = (
+        [benchmark_label, diagnostic_label] if active_view == VIEW_BENCHMARK
+        else [diagnostic_label, benchmark_label]
+    )
+    tabs_by_label = dict(zip(tab_labels, st.tabs(tab_labels)))
+
+    with tabs_by_label[diagnostic_label]:
         render_diagnostic_tab()
 
-    with tab_benchmark:
+    with tabs_by_label[benchmark_label]:
         render_benchmark_tab()
 
 
