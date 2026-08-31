@@ -7,15 +7,25 @@ Run with:
     uvicorn qknee.api.server:app --reload --port 8000
 
 Endpoints:
-    GET  /health   - liveness/readiness probe, reports whether the real
-                     model backend loaded or the API is running in mock mode.
-    POST /predict  - accepts a DICOM (.dcm/.dicom) or NumPy (.npy) MRI
-                     slice/volume upload, returns risk score, diagnosis, and
-                     a base64-encoded Grad-CAM heatmap overlay (PNG).
-    POST /explain  - same upload contract as /predict, but returns just the
-                     explainability payload (Grad-CAM heatmap + risk score
-                     for context) — for a caller that only needs the visual
-                     explanation, not the full diagnosis response.
+    GET  /health              - liveness/readiness probe, reports whether the
+                                 real model backend loaded or the API is
+                                 running in mock mode. Unauthenticated.
+    POST /api/v1/auth/signup  - register a new user (hashed password,
+                                 role-assigned). See qknee.api.auth.
+    POST /api/v1/auth/login   - authenticate and receive a JWT bearer token.
+    GET  /api/v1/auth/me      - the authenticated caller's own profile.
+    POST /predict              - accepts a DICOM (.dcm/.dicom) or NumPy (.npy)
+                                 MRI slice/volume upload, returns risk score,
+                                 diagnosis, and a base64-encoded Grad-CAM
+                                 heatmap overlay (PNG). Requires a bearer
+                                 token for a `radiologist`/`triage_nurse`
+                                 account (see qknee.api.auth.require_role).
+    POST /explain              - same upload contract and auth requirement as
+                                 /predict, but returns just the
+                                 explainability payload (Grad-CAM heatmap +
+                                 risk score for context) — for a caller that
+                                 only needs the visual explanation, not the
+                                 full diagnosis response.
 """
 
 from __future__ import annotations
@@ -26,10 +36,12 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from qknee.api.auth import INFERENCE_ROLES, UserResponse, require_role
+from qknee.api.auth import router as auth_router
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger, setup_logging
 from qknee.data.ingestion import DataIngestion, IngestionError
@@ -265,6 +277,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
+
 backend = QKneeBackend()
 
 
@@ -279,29 +293,40 @@ def health() -> HealthResponse:
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
-async def predict(file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume")) -> PredictionResponse:
+async def predict(
+    file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
+    current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
+) -> PredictionResponse:
     """Runs one MRI slice (or the middle slice of a volume) through the
     Q-Knee pipeline and returns the tear-risk score, diagnosis label, and a
-    base64-encoded Grad-CAM overlay for visual explainability."""
+    base64-encoded Grad-CAM overlay for visual explainability. Requires a
+    bearer token for a `radiologist`/`triage_nurse` account — 401 with no
+    token, 403 for a `guest_demo` token."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+    logger.info("POST /predict by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
     return backend.predict(raw_bytes, file.filename or "upload")
 
 
 @app.post("/explain", response_model=ExplanationResponse, tags=["Inference"])
-async def explain(file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume")) -> ExplanationResponse:
+async def explain(
+    file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
+    current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
+) -> ExplanationResponse:
     """Runs one MRI slice (or the middle slice of a volume) through the
     Q-Knee pipeline and returns just its Grad-CAM explainability heatmap
     (plus the risk score for context) — the explanation-focused
-    counterpart to /predict. Shares /predict's exact upload contract, file
-    parsing, and error handling (delegates to the same `QKneeBackend.predict`
-    call), so a client can point either endpoint at the same file."""
+    counterpart to /predict. Shares /predict's exact upload contract, auth
+    requirement, file parsing, and error handling (delegates to the same
+    `QKneeBackend.predict` call), so a client can point either endpoint at
+    the same file with the same bearer token."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+    logger.info("POST /explain by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
     prediction = backend.predict(raw_bytes, file.filename or "upload")
     return ExplanationResponse(
         gradcam_heatmap=prediction.gradcam_heatmap,

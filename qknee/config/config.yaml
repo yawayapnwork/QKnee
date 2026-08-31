@@ -79,6 +79,12 @@ api:
     - "http://localhost:8501"
     - "http://127.0.0.1:8501"
   tear_risk_threshold: 0.5
+  # Dev-only fallback signing key — every non-dev deployment MUST override
+  # this via the $QKNEE_JWT_SECRET_KEY env var (see loader.py's
+  # _ENV_OVERRIDES); qknee.api.auth logs a loud warning at import time if
+  # this literal default is still in effect.
+  jwt_secret_key: "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
+  access_token_expire_minutes: 60
 
 device: null  # null -> auto-detect ("cuda" if available, else "cpu")
 

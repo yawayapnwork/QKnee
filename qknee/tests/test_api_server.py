@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
+import qknee.api.auth as auth_module
 import qknee.api.server as server_module
 
 pytestmark = [pytest.mark.slow]
@@ -34,25 +35,45 @@ pytestmark = [pytest.mark.slow]
 # Fixtures: live and mock backends, swapped into the module-level `backend`
 # --------------------------------------------------------------------------- #
 
+def _authenticated_as_radiologist(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """Points the shared `qknee.api.auth.user_store` at an isolated
+    per-test JSON file, registers a `radiologist` test account, and
+    attaches its bearer token to `client`'s default headers — every
+    request `client` makes (including to the now-protected /predict,
+    /explain) is pre-authenticated, so these tests keep exercising
+    inference/payload behavior rather than the auth layer itself (see
+    `test_auth.py` for that)."""
+    test_store = auth_module.UserStore(tmp_path / "auth" / "users.json")
+    monkeypatch.setattr(auth_module, "user_store", test_store)
+
+    stored = test_store.create_user(
+        auth_module.UserCreate(username="test_radiologist", password="test_password_123", role="radiologist")
+    )
+    token = auth_module.create_access_token(username=stored.username, role=stored.role)
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    return client
+
+
 @pytest.fixture
-def live_client(pca_artifact_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def live_client(pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """A TestClient wired to a real `QKneeBackend` (fitted PCA artifact,
     randomly-initialized VQC — no checkpoint needed to exercise the API
-    contract itself)."""
+    contract itself), pre-authenticated as a `radiologist` test account."""
     live_backend = server_module.QKneeBackend(pca_artifact_path=pca_artifact_path)
     assert live_backend.backend_ready, f"expected live backend to load: {live_backend.load_error}"
     monkeypatch.setattr(server_module, "backend", live_backend)
-    return TestClient(server_module.app)
+    return _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
 
 
 @pytest.fixture
 def mock_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """A TestClient wired to a `QKneeBackend` that deliberately fails to
-    load (nonexistent PCA artifact), forcing the deterministic mock path."""
+    load (nonexistent PCA artifact), forcing the deterministic mock path —
+    pre-authenticated as a `radiologist` test account."""
     mock_backend = server_module.QKneeBackend(pca_artifact_path=tmp_path / "no_such_artifact.pkl")
     assert not mock_backend.backend_ready
     monkeypatch.setattr(server_module, "backend", mock_backend)
-    return TestClient(server_module.app)
+    return _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
 
 
 def _npy_bytes(array: np.ndarray) -> bytes:

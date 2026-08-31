@@ -53,6 +53,12 @@ fastapi==0.141.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 
+# qknee/api/auth.py — password hashing (Argon2id, not passlib[bcrypt]: passlib
+# 1.7.4's bcrypt backend is incompatible with bcrypt>=4.1, which removed the
+# `bcrypt.__about__` attribute passlib reads at import time) + JWT signing.
+argon2-cffi==25.1.0
+PyJWT==2.13.0
+
 # ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) —
 # unused unless a caller explicitly opts into the ONNX backend; also kept
 # for the shared Docker image.

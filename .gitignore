@@ -26,6 +26,11 @@ htmlcov/
 .env
 .env.*
 
+# Runtime user store (qknee/api/auth.py) — created on first use; holds
+# whatever accounts get signed up on a given deployment (Argon2 hashes, not
+# plaintext, but still not something to commit).
+qknee/api/users.json
+
 # IDE
 .vscode/
 .idea/

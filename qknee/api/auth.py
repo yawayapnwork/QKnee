@@ -1,0 +1,398 @@
+"""
+Q-Knee API authentication & role-based access control.
+
+Cryptography & token pipeline:
+    - Password hashing/verification via `argon2-cffi` (Argon2id) — the
+      OWASP-recommended default for new applications, and avoids the
+      well-known `passlib[bcrypt]` incompatibility with `bcrypt>=4.1`
+      (passlib's bcrypt backend reads a `bcrypt.__about__` attribute that
+      newer `bcrypt` releases removed).
+    - JWT access-token signing/verification (`HS256`) via `PyJWT`, with a
+      fixed `ACCESS_TOKEN_EXPIRE_MINUTES = 60` lifetime.
+
+User store:
+    A JSON-file-backed store (`qknee/api/users.json`, created on first use)
+    keyed by lowercased username. Every account carries one of three roles
+    (`ROLES` below) — `radiologist` and `triage_nurse` are the clinical
+    roles permitted to run diagnostic inference (`/predict`, `/explain`);
+    `guest_demo` is a read-only demo/judge account. No accounts ship
+    pre-seeded: the store starts empty and is populated only via
+    `POST /api/v1/auth/signup`.
+
+    PRODUCTION CAVEAT: `/signup` currently lets a caller self-assign any
+    role, including the clinical ones — acceptable for this research-
+    prototype/hackathon demo (every diagnostic response elsewhere in this
+    codebase already carries a "not for clinical use" disclaimer), but a
+    real clinical deployment must gate `radiologist`/`triage_nurse`
+    issuance behind admin approval or an invite token rather than open
+    self-service signup.
+
+Route protection:
+    `get_current_user` extracts and validates the `Authorization: Bearer
+    <token>` header (via `OAuth2PasswordBearer`) and resolves it to the
+    live user record. `require_role([...])` builds on top of it to reject
+    (403) any authenticated user whose role isn't in the allowed set —
+    used by `qknee.api.server` to guard `/predict` and `/explain`.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Sequence
+
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, ConfigDict, Field
+
+from qknee.config.loader import load_config
+from qknee.config.logging_config import get_logger
+
+logger = get_logger(__name__)
+_config = load_config()
+
+# --------------------------------------------------------------------------- #
+# Roles
+# --------------------------------------------------------------------------- #
+
+ROLES: tuple[str, ...] = ("radiologist", "triage_nurse", "guest_demo")
+DEFAULT_ROLE = "guest_demo"
+
+# The two clinical roles permitted to run diagnostic inference
+# (`/predict`, `/explain`); `guest_demo` is intentionally excluded —
+# see `qknee.api.server`'s route wiring.
+INFERENCE_ROLES: tuple[str, ...] = ("radiologist", "triage_nurse")
+
+
+# --------------------------------------------------------------------------- #
+# Pydantic v2 schemas
+# --------------------------------------------------------------------------- #
+
+class UserCreate(BaseModel):
+    """Signup request body."""
+
+    username: str = Field(
+        ..., min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$",
+        description="Unique, case-insensitive username (letters, digits, '_', '.', '-').",
+    )
+    password: str = Field(..., min_length=8, max_length=128, description="Plaintext password; never stored or logged.")
+    role: str = Field(
+        default=DEFAULT_ROLE,
+        description=f"One of {ROLES}; defaults to '{DEFAULT_ROLE}' if omitted.",
+    )
+
+
+class UserLogin(BaseModel):
+    """Login request body."""
+
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    """Public-facing user profile — never includes the password hash."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    username: str
+    role: str
+    created_at: datetime
+
+
+class Token(BaseModel):
+    """`/login`'s response: a bearer JWT plus the authenticated user's profile."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in_minutes: int = _config.api.access_token_expire_minutes
+    user: UserResponse
+
+
+class TokenData(BaseModel):
+    """Decoded JWT payload, validated before being trusted by any dependency."""
+
+    username: Optional[str] = None
+    role: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Password hashing (Argon2id)
+# --------------------------------------------------------------------------- #
+
+_password_hasher = PasswordHasher()
+
+
+def hash_password(plain_password: str) -> str:
+    """Hashes a plaintext password with Argon2id. Returns the encoded hash
+    string (algorithm, parameters, salt, and digest all self-contained —
+    nothing else needs to be stored alongside it)."""
+    return _password_hasher.hash(plain_password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Constant-time-verifies `plain_password` against a stored Argon2 hash.
+    Returns `False` (never raises) for a wrong password or a malformed/
+    foreign hash string, so callers can treat this as a plain predicate.
+
+    `InvalidHashError` is caught alongside `VerificationError`/
+    `VerifyMismatchError` because it does NOT subclass `Argon2Error` the
+    way the other two do (it subclasses `ValueError` directly) — argon2-cffi
+    raises it for a `hashed_password` string that isn't recognizable Argon2
+    output at all (e.g. a stray/corrupted store entry), which should still
+    resolve to "verification failed," not an unhandled exception.
+    """
+    try:
+        return _password_hasher.verify(hashed_password, plain_password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# JWT access tokens
+# --------------------------------------------------------------------------- #
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = _config.api.access_token_expire_minutes
+_SECRET_KEY = _config.api.jwt_secret_key
+_INSECURE_DEFAULT_SECRET_KEY = "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
+
+if _SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:
+    logger.warning(
+        "qknee.api.auth is signing JWTs with the INSECURE DEFAULT dev secret key. "
+        "Set the $QKNEE_JWT_SECRET_KEY environment variable before deploying anywhere "
+        "reachable outside a local dev machine — tokens signed with the default key are "
+        "forgeable by anyone who has read this source file."
+    )
+
+
+def create_access_token(username: str, role: str, expires_delta: Optional[timedelta] = None) -> str:
+    """Signs a new `HS256` JWT for `username`/`role`, expiring after
+    `expires_delta` (default `ACCESS_TOKEN_EXPIRE_MINUTES`)."""
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload = {"sub": username, "role": role, "iat": now, "exp": expire}
+    return jwt.encode(payload, _SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _credentials_exception(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def decode_access_token(token: str) -> TokenData:
+    """Verifies signature + expiry and returns the decoded `TokenData`.
+    Raises a 401 `HTTPException` (never a raw `jwt` exception) on any
+    failure — expired, malformed, wrong signature, or missing claims."""
+    try:
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError as exc:
+        raise _credentials_exception("Access token has expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise _credentials_exception("Could not validate credentials") from exc
+
+    username = payload.get("sub")
+    role = payload.get("role")
+    if username is None or role is None:
+        raise _credentials_exception("Access token is missing required claims")
+    return TokenData(username=username, role=role)
+
+
+# --------------------------------------------------------------------------- #
+# User store (JSON-file-backed)
+# --------------------------------------------------------------------------- #
+
+USERS_STORE_PATH = Path(__file__).resolve().parent / "users.json"
+
+
+class UserAlreadyExistsError(Exception):
+    """Raised by `UserStore.create_user` when the username is already taken."""
+
+
+@dataclass
+class StoredUser:
+    id: str
+    username: str
+    hashed_password: str
+    role: str
+    created_at: str  # ISO 8601, UTC
+
+    def to_response(self) -> UserResponse:
+        return UserResponse(id=self.id, username=self.username, role=self.role, created_at=self.created_at)
+
+
+class UserStore:
+    """Minimal JSON-file user store, guarded by a `threading.Lock` for
+    read-modify-write safety under FastAPI's threadpool-executed sync
+    endpoints. Not a substitute for a real RDBMS under concurrent
+    multi-process deployment — see the module docstring's SQLite
+    alternative — but sufficient for a single-process demo/API server.
+    """
+
+    def __init__(self, path: Path = USERS_STORE_PATH) -> None:
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._path.exists():
+            self._write({"users": {}})
+
+    def _read(self) -> Dict[str, Any]:
+        with self._path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _write(self, data: Dict[str, Any]) -> None:
+        # Write-to-temp-then-replace so a crash mid-write can never leave
+        # users.json truncated/corrupted.
+        tmp_path = self._path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+        tmp_path.replace(self._path)
+
+    def get_by_username(self, username: str) -> Optional[StoredUser]:
+        record = self._read()["users"].get(username.lower())
+        return StoredUser(**record) if record is not None else None
+
+    def create_user(self, user_create: UserCreate) -> StoredUser:
+        role = user_create.role or DEFAULT_ROLE
+        if role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}, got {role!r}")
+
+        key = user_create.username.lower()
+        with self._lock:
+            data = self._read()
+            if key in data["users"]:
+                raise UserAlreadyExistsError(f"Username '{user_create.username}' is already taken")
+
+            stored = StoredUser(
+                id=uuid.uuid4().hex,
+                username=user_create.username,
+                hashed_password=hash_password(user_create.password),
+                role=role,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            data["users"][key] = stored.__dict__
+            self._write(data)
+        return stored
+
+    def authenticate(self, username: str, password: str) -> Optional[StoredUser]:
+        """Returns the `StoredUser` if `username`/`password` are valid,
+        else `None`."""
+        user = self.get_by_username(username)
+        if user is None:
+            # Returns immediately rather than hashing a dummy password to
+            # equalize timing against the "wrong password" branch below —
+            # username-enumeration-via-timing isn't this demo API's threat
+            # model priority; noted explicitly rather than silently
+            # accepted.
+            return None
+        if not verify_password(password, user.hashed_password):
+            return None
+        return user
+
+
+user_store = UserStore()
+
+
+# --------------------------------------------------------------------------- #
+# FastAPI dependencies: authentication + RBAC
+# --------------------------------------------------------------------------- #
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login", auto_error=True)
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)) -> UserResponse:
+    """Resolves the `Authorization: Bearer <token>` header to a live user
+    profile. Raises 401 if the token is missing/invalid/expired, or if it
+    decodes fine but no longer names an existing account (e.g. deleted
+    after the token was issued)."""
+    token_data = decode_access_token(token)
+    user = user_store.get_by_username(token_data.username)
+    if user is None:
+        raise _credentials_exception("User for this access token no longer exists")
+    return user.to_response()
+
+
+def require_role(allowed_roles: Sequence[str]) -> Callable[[UserResponse], UserResponse]:
+    """Builds a FastAPI dependency that requires the authenticated user's
+    role to be one of `allowed_roles`, e.g.:
+
+        @app.post("/predict")
+        def predict(..., user: UserResponse = Depends(require_role(["radiologist"]))):
+            ...
+
+    Layers on top of `get_current_user`, so an unauthenticated request
+    still gets 401 (not 403) — 403 is reserved for "authenticated, but
+    wrong role."
+    """
+    allowed = set(allowed_roles)
+
+    def _dependency(current_user: UserResponse = Depends(get_current_user)) -> UserResponse:
+        if current_user.role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Role '{current_user.role}' is not permitted to access this resource "
+                    f"(requires one of: {sorted(allowed)})."
+                ),
+            )
+        return current_user
+
+    return _dependency
+
+
+# --------------------------------------------------------------------------- #
+# FastAPI router: /api/v1/auth/{signup,login,me}
+# --------------------------------------------------------------------------- #
+
+router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
+
+
+@router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def signup(user_create: UserCreate) -> UserResponse:
+    """Registers a new user: hashes the password (Argon2id) and stores the
+    account with the requested role (defaulting to `guest_demo` if
+    omitted). 409s if the username is already taken."""
+    try:
+        stored = user_store.create_user(user_create)
+    except UserAlreadyExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        # 422 (Unprocessable Content/Entity — the constant name changed
+        # across starlette versions): the request was well-formed JSON but
+        # `role` isn't one of `ROLES`.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return stored.to_response()
+
+
+@router.post("/login", response_model=Token)
+def login(credentials: UserLogin) -> Token:
+    """Authenticates `username`/`password` and returns a signed JWT bearer
+    token (expiring after `ACCESS_TOKEN_EXPIRE_MINUTES`) alongside the
+    user's profile metadata."""
+    user = user_store.authenticate(credentials.username, credentials.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = create_access_token(username=user.username, role=user.role)
+    return Token(access_token=access_token, user=user.to_response())
+
+
+@router.get("/me", response_model=UserResponse)
+def me(current_user: UserResponse = Depends(get_current_user)) -> UserResponse:
+    """Returns the authenticated caller's own profile — proves the bearer
+    token round-trips correctly and is the simplest possible protected
+    endpoint to smoke-test a client's auth integration against."""
+    return current_user

@@ -47,6 +47,7 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "paths.model_checkpoint": "MODEL_CHECKPOINT_PATH",
     "paths.acl_checkpoint": "ACL_CHECKPOINT_PATH",
     "paths.meniscus_checkpoint": "MENISCUS_CHECKPOINT_PATH",
+    "api.jwt_secret_key": "QKNEE_JWT_SECRET_KEY",
 }
 
 
@@ -146,6 +147,11 @@ class APIConfig:
     port: int
     cors_origins: List[str]
     tear_risk_threshold: float
+    # Both default so a config.yaml predating auth.py's addition still loads;
+    # jwt_secret_key's shipped default is dev-only (see config.yaml) and is
+    # meant to be overridden via $QKNEE_JWT_SECRET_KEY in any real deployment.
+    jwt_secret_key: str = "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
+    access_token_expire_minutes: int = 60
 
 
 @dataclass(frozen=True)
