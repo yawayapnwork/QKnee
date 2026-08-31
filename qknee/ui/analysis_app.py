@@ -156,15 +156,45 @@ def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[
     return expvals.detach().cpu().numpy().reshape(-1)
 
 
+def _release_inference_memory() -> None:
+    """Frees intermediate tensors/buffers left over from a heavy
+    inference or Grad-CAM pass — a Streamlit Community Cloud container's
+    free tier caps out around 1GB, and this app is meant to stay
+    comfortably under a ~600MB resident footprint across a long-running
+    session with many uploads, not just at cold start.
+
+    `gc.collect()` unconditionally (a ResNet18 forward pass and Grad-CAM's
+    backward pass can leave short-lived reference cycles that outlive the
+    call that created them); `torch.cuda.empty_cache()` additionally when
+    CUDA is actually present — this project's pinned `requirements.txt` is
+    CPU-only torch by default, so on the typical deployment this is just
+    the `gc.collect()`, with the CUDA branch as a no-op safety net for
+    anyone running a GPU-enabled build locally.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Backend loading + inference (mock-fallback pattern shared with app.py)
 # --------------------------------------------------------------------------- #
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_backend():
     """Loads a `PipelineRunner` (DataIngestion -> ResNet18 -> PCA -> VQC ->
     GradCAM) if a fitted PCA artifact is available; returns None otherwise
-    so the UI can fall back to a deterministic mock."""
+    so the UI can fall back to a deterministic mock. `max_entries=1`: no
+    arguments, so there is only ever one possible entry — the ResNet18
+    backbone + VQC this loads is exactly the kind of heavyweight resource
+    the 1GB Streamlit Cloud ceiling means never to accidentally duplicate."""
     if not _config.paths.pca_artifact.exists():
         return None
 
@@ -177,7 +207,7 @@ def load_backend():
         return None
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_condition_models() -> Optional[Dict[str, object]]:
     """Three independent quantum heads for the primary clinical triad
     (ACL / MCL / Meniscus — matches `qknee.models.vqc_multitarget.
@@ -227,7 +257,7 @@ def load_condition_models() -> Optional[Dict[str, object]]:
     return {"ACL": acl_model, "MCL": mcl_model, "Meniscus": meniscus_model}
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_precomputed_cache() -> Optional[dict]:
     """Judge Fast-Path source: `qknee/artifacts/precomputed_cache.json`'s
     pre-scored cases (Grad-CAM overlay embedded as base64), so the "Enable
@@ -438,7 +468,7 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         mcl_risk = runner.classify(quantum_angles, vqc=condition_models["MCL"])
         meniscus_risk = runner.classify(quantum_angles, vqc=condition_models["Meniscus"])
 
-    return AnalysisResult(
+    result = AnalysisResult(
         risk_score=risk_score,
         prediction_label=label,
         quantum_latency_ms=quantum_latency_ms,
@@ -451,6 +481,15 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
         mcl_risk=mcl_risk,
         meniscus_risk=meniscus_risk,
     )
+
+    # `batch`/`features`/`quantum_angles` and Grad-CAM's backward-pass
+    # activation graph are done being used by this point — every value
+    # this function returns has already been pulled out into plain
+    # numpy/float `AnalysisResult` fields above.
+    del batch, features, quantum_angles
+    _release_inference_memory()
+
+    return result
 
 
 def run_mock_analysis(slice_2d: np.ndarray) -> AnalysisResult:
@@ -560,7 +599,7 @@ def run_volumetric_gradcam_live(
         top_k=top_k,
     )
 
-    return VolumetricAnalysisResult(
+    volumetric_result = VolumetricAnalysisResult(
         plane=plane,
         heatmaps={s.slice_index: s.heatmap for s in result.saliencies},
         magnitudes={s.slice_index: s.magnitude for s in result.saliencies},
@@ -568,6 +607,18 @@ def run_volumetric_gradcam_live(
         analyzed_indices=indices,
         backend="live",
     )
+
+    # This is the single heaviest call in the app: up to `max_slices`
+    # (default 40) full ResNet18 forward + Grad-CAM backward passes, each
+    # holding its own `(1, 3, 224, 224)` ingested tensor (`slice_tensors`)
+    # and activation graph. Every value needed downstream has already been
+    # pulled into `volumetric_result`'s plain numpy dict fields above, so
+    # release the rest before returning rather than leaving up to 40
+    # tensors' worth of graph/activations for the next GC cycle to find.
+    del slice_tensors, result
+    _release_inference_memory()
+
+    return volumetric_result
 
 
 def run_volumetric_gradcam_mock(
@@ -617,13 +668,48 @@ def run_volumetric_gradcam(volume: np.ndarray, plane: str) -> VolumetricAnalysis
 # Image loading + display adjustment
 # --------------------------------------------------------------------------- #
 
+@st.cache_data(show_spinner="Decoding uploaded scan...", max_entries=10, ttl=3600)
+def _decode_scan_cached(file_payloads: Tuple[Tuple[str, bytes], ...]) -> np.ndarray:
+    """Pure DICOM-series/.png/.jpg/.npy decode — the actual expensive step
+    `load_scan` wraps. Keyed on `(filename, bytes)` tuples (real file
+    content, hashable/comparable by `st.cache_data`) rather than Streamlit
+    `UploadedFile` objects directly, and deliberately free of any `st.*`
+    calls: Streamlit only replays a cached function's *return value* on a
+    cache hit, not side effects like `st.error` performed inside it, so
+    those must live in the uncached `load_scan` wrapper below instead —
+    same split `qknee.ui.dashboard._decode_volume_cached`/`load_volume`
+    uses for the same reason.
+
+    `max_entries=10, ttl=3600`: bounds how many distinct decoded scans this
+    session holds onto at once, and how long a stale one lingers, so
+    repeated uploads across a long session don't grow this cache
+    unbounded — see this module's 1GB-Streamlit-Cloud-ceiling budget.
+    """
+    import io
+
+    from qknee.data.ingestion import DataIngestion
+
+    if len(file_payloads) > 1:
+        sources = []
+        for name, content in file_payloads:
+            buffer = io.BytesIO(content)
+            buffer.name = name
+            sources.append(buffer)
+        return DataIngestion().load_volume_array(sources)
+
+    name, content = file_payloads[0]
+    buffer = io.BytesIO(content)
+    buffer.name = name
+    return DataIngestion().load_volume_array(buffer)
+
+
 def load_scan(uploaded_files: List) -> Optional[np.ndarray]:
     """Loads one or more drag-and-dropped uploads into a `(D, H, W)`
-    volume, via `qknee.data.ingestion.DataIngestion.load_volume_array` —
-    the same DICOM-series/.npy/single-DICOM loading path
-    `qknee.ui.dashboard` uses, so a multi-file `.dcm` series (one file per
-    slice) stacks into a real tri-planar volume here too, not just a flat
-    single image.
+    volume, via `qknee.data.ingestion.DataIngestion.load_volume_array`
+    (through the cached `_decode_scan_cached` above) — the same
+    DICOM-series/.npy/single-DICOM loading path `qknee.ui.dashboard` uses,
+    so a multi-file `.dcm` series (one file per slice) stacks into a real
+    tri-planar volume here too, not just a flat single image.
 
     Args:
         uploaded_files: One or more Streamlit `UploadedFile`s (`.png`,
@@ -633,17 +719,17 @@ def load_scan(uploaded_files: List) -> Optional[np.ndarray]:
 
     Returns `None` (and shows a Streamlit error) if the upload can't be parsed.
     """
-    from qknee.data.ingestion import DataIngestion, IngestionError
+    from qknee.data.ingestion import IngestionError
 
     files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
     if not files:
         return None
 
-    source = files if len(files) > 1 else files[0]
     display_name = f"{len(files)}-file DICOM series" if len(files) > 1 else files[0].name
+    file_payloads = tuple((f.name, f.getvalue()) for f in files)
 
     try:
-        array = DataIngestion().load_volume_array(source)
+        array = _decode_scan_cached(file_payloads)
     except IngestionError as exc:
         st.error(f"Failed to read '{display_name}': {exc}")
         return None

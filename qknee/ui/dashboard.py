@@ -136,7 +136,36 @@ def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[
     return expvals.detach().cpu().numpy().reshape(-1)
 
 
-@st.cache_resource(show_spinner=False)
+def _release_inference_memory() -> None:
+    """Frees intermediate tensors/buffers left over from a heavy
+    inference or PDF-generation pass — a Streamlit Community Cloud
+    container's free tier caps out around 1GB, and this app is meant to
+    stay comfortably under a ~600MB resident footprint across a
+    long-running session with many uploads/report downloads, not just at
+    cold start.
+
+    `gc.collect()` unconditionally (a ResNet18 forward pass, Grad-CAM's
+    backward pass, and reportlab's PDF canvas can all leave short-lived
+    reference cycles that outlive the call that created them); `torch.cuda
+    .empty_cache()` additionally when CUDA is actually present — this
+    project's pinned `requirements.txt` is CPU-only torch by default (see
+    its own comments), so on the typical deployment this is just the
+    `gc.collect()`, with the CUDA branch as a no-op safety net for anyone
+    running a GPU-enabled build locally.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object], Optional[object]]:
     """Attempts to load the real ResNet18 -> PCA -> VQC pipeline.
 
@@ -324,7 +353,7 @@ def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
     return np.clip(1 - radius / radius.max(), 0, 1).astype(np.float32)
 
 
-@st.cache_data(show_spinner=False, max_entries=128)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     """Seeded, deterministic mock scores + plausible latency numbers, used
     whenever the real pipeline/model backend isn't available.
@@ -333,7 +362,13 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     every widget interaction (e.g. dragging the slice slider back to a
     slice already viewed), so without this cache the same slice's mock
     Grad-CAM heatmap would be regenerated from scratch on every one of
-    those reruns even though the result is already deterministic."""
+    those reruns even though the result is already deterministic.
+
+    `max_entries=10, ttl=3600` (down from an effectively-unbounded 128):
+    each cached `InferenceResult` carries a full-resolution Grad-CAM
+    overlay/heatmap, so capping both the entry count and how long a stale
+    one lingers keeps this cache from being a slow memory leak across a
+    long-running session — see `qknee.ui.dashboard`'s 1GB-ceiling budget."""
     from qknee.xai.gradcam import overlay_heatmap
 
     rng = np.random.default_rng(_seed_from_slice(slice_2d))
@@ -360,7 +395,7 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
     )
 
 
-@st.cache_data(show_spinner=False, max_entries=128)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _meniscus_model) -> InferenceResult:
     """Runs the real DataIngestion -> ResNet18 -> PCA -> VQC pipeline (via
     `PipelineRunner`'s stage methods) on one 2D slice, timing each stage,
@@ -380,6 +415,12 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _m
     rerun — would re-execute on every Streamlit script rerun, including
     ones triggered by a completely unrelated widget, as long as the viewed
     slice hasn't actually changed.
+
+    `max_entries=10, ttl=3600`: capped for the same reason as
+    `run_mock_inference` above — each cached result carries a full-
+    resolution Grad-CAM overlay/heatmap, and this is the expensive-to-
+    recompute path, so a bounded cache still pays for itself while
+    keeping this session's resident memory well under the 1GB ceiling.
     """
     from qknee.xai.gradcam import overlay_heatmap
 
@@ -411,7 +452,7 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _m
     feature_ms = (t1 - t0) * 1000
     quantum_ms = (t2 - t1) * 1000
 
-    return InferenceResult(
+    result = InferenceResult(
         acl_risk=acl_score,
         mcl_risk=mcl_score,
         meniscus_risk=meniscus_score,
@@ -425,12 +466,24 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _m
         pauli_z_expectations=pauli_z_expectations,
     )
 
+    # `batch`/`features`/`quantum_angles` and Grad-CAM's backward-pass
+    # activation graph are all done being used by this point — every
+    # value this function returns has already been pulled out into plain
+    # numpy/float `InferenceResult` fields above. Release them explicitly
+    # rather than waiting on refcounting/the next GC cycle to catch up,
+    # since this is the single most expensive (ResNet18 forward + Grad-CAM
+    # backward) call on the hot path.
+    del batch, features, quantum_angles
+    _release_inference_memory()
+
+    return result
+
 
 # --------------------------------------------------------------------------- #
 # Volume ingestion + tri-planar slicing
 # --------------------------------------------------------------------------- #
 
-@st.cache_data(show_spinner="Decoding uploaded MRI volume...", max_entries=8)
+@st.cache_data(show_spinner="Decoding uploaded MRI volume...", max_entries=10, ttl=3600)
 def _decode_volume_cached(file_payloads: Tuple[Tuple[str, bytes], ...]) -> np.ndarray:
     """Pure DICOM-series/.nii/.nii.gz/.npy volume decode — the actual
     expensive step `load_volume` wraps. Keyed on `(filename, bytes)` tuples
@@ -444,6 +497,11 @@ def _decode_volume_cached(file_payloads: Tuple[Tuple[str, bytes], ...]) -> np.nd
     would be fully re-decoded on every Streamlit script rerun — which
     includes every slice-slider drag and every unrelated widget
     interaction, not just a new upload.
+
+    `max_entries=10, ttl=3600`: a decoded multi-slice volume is one of the
+    larger objects this app ever caches, so both a hard entry cap and an
+    hour-long expiry keep a long session's raw-volume cache bounded rather
+    than growing for as long as the container stays warm.
     """
     import io
 
@@ -708,7 +766,7 @@ def render_latency_metrics(result: InferenceResult) -> None:
 # Demo Mode / Latency Fallback: precomputed "NISQ cache" of sample cases
 # --------------------------------------------------------------------------- #
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_precomputed_cache() -> Optional[Dict]:
     """Cold-start pre-warm hook: eagerly parses
     `qknee/artifacts/precomputed_cache.json` into `@st.cache_resource`
@@ -719,7 +777,10 @@ def load_precomputed_cache() -> Optional[Dict]:
     `cache_resource` (process-scoped, shared read-only across every
     session on this container) rather than `cache_data` (which would
     additionally pickle/copy the payload per session) — same reasoning as
-    `load_backend()`'s model objects above.
+    `load_backend()`'s model objects above. `max_entries=1`: this function
+    takes no arguments, so there is only ever one possible cache entry —
+    capping it explicitly documents that intent rather than relying on
+    the implicit default (unbounded).
 
     Returns `None` (logged) if the cache hasn't been built yet
     (`python scripts/generate_demo_cache.py`) or fails to parse.
@@ -742,7 +803,7 @@ def load_precomputed_cache() -> Optional[Dict]:
     return payload
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def load_demo_cache_index() -> Optional[List[Dict]]:
     """Loads `qknee/artifacts/demo_cache/index.json` (built offline by
     `scripts/build_demo_cache.py`) — a handful of MRNet-style sample cases
@@ -759,12 +820,17 @@ def load_demo_cache_index() -> Optional[List[Dict]]:
     return payload.get("cases", [])
 
 
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def load_cached_case(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
     """Loads one demo-cache case's slice image + raw Grad-CAM heatmap +
     precomputed scores/latency straight from disk — no model, no PennyLane
     QNode, no ResNet forward pass. This is what makes "Use Precomputed NISQ
     Cache" genuinely zero-latency rather than just "fast": nothing in this
-    function does any inference at all."""
+    function does any inference at all.
+
+    Cached (`max_entries=10, ttl=3600`) so re-selecting a case already
+    viewed this session skips the disk read entirely; pure function, no
+    `st.*` side effects, safe to cache directly."""
     import cv2
 
     slice_path = DEMO_CACHE_DIR / case["slice_file"]
@@ -1047,6 +1113,16 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
         logger.warning("PDF report generation failed: %s", exc)
         st.warning("Could not generate the PDF report for this slice.")
         return
+    finally:
+        # reportlab's Canvas, the PIL images it wraps around
+        # `display_slice`/`gradcam_overlay`, and the in-memory PNG/PDF
+        # byte buffers `generate_radiology_report` builds are all done
+        # being used past this point (either `pdf_bytes` was captured
+        # above, or generation failed and nothing downstream needs them)
+        # — release them promptly rather than waiting on the next
+        # collection cycle. `finally` so this runs on the exception path
+        # too, not just the success path.
+        _release_inference_memory()
 
     st.download_button(
         label="📄 Download Radiology PDF Report",

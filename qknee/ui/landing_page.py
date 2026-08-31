@@ -66,12 +66,18 @@ VIEW_BENCHMARK = "benchmark"
 # Data loading — dynamic metric callouts + sample showcase
 # --------------------------------------------------------------------------- #
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def _load_precomputed_cases() -> List[Dict]:
     """Loads `precomputed_cache.json`'s cases list; `[]` (logged) if the
     cache hasn't been built yet (`python scripts/generate_demo_cache.py`)
     or fails to parse, so the showcase can degrade to an explanatory
-    message instead of erroring."""
+    message instead of erroring.
+
+    `max_entries=10, ttl=3600`: this function takes no arguments (only
+    ever one real entry), but capped consistently with every other raw-
+    data-loading cache in this project so a stale read after the on-disk
+    file changes doesn't linger indefinitely — see the 1GB-Streamlit-
+    Cloud-ceiling budget this module is audited against."""
     if not PRECOMPUTED_CACHE_PATH.exists():
         logger.info("No precomputed cache found at %s; Live Sample Showcase disabled.", PRECOMPUTED_CACHE_PATH)
         return []
@@ -83,11 +89,13 @@ def _load_precomputed_cases() -> List[Dict]:
     return payload.get("cases", [])
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def _load_benchmark_results() -> Optional[Dict]:
     """Loads `scripts/run_benchmark.py`'s exported results, if any have
     been generated yet — powers the "Quantum Circuit Latency" hero metric
-    with a real measured figure instead of a fabricated one."""
+    with a real measured figure instead of a fabricated one. Same
+    `max_entries=10, ttl=3600` capping rationale as `_load_precomputed_cases`
+    above."""
     if not BENCHMARK_RESULTS_PATH.exists():
         return None
     try:
@@ -126,11 +134,14 @@ def _quantum_latency_ms() -> Optional[float]:
     return None
 
 
+@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def _decode_case_overlay(case: Dict) -> Optional[np.ndarray]:
     """Decodes one precomputed-cache case's base64-embedded, pre-blended
     Grad-CAM overlay PNG (BGR) — the same zero-inference decode
     `qknee.ui.analysis_app.build_fast_path_result` uses. Returns `None`
-    (logged) if the case has no embedded heatmap or it fails to decode."""
+    (logged) if the case has no embedded heatmap or it fails to decode.
+    Cached (`max_entries=10, ttl=3600`) so repeatedly toggling a preview
+    open/closed doesn't re-decode the same PNG on every rerun."""
     heatmap_b64 = case.get("heatmap_base64")
     if not heatmap_b64:
         return None
