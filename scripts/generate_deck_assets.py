@@ -17,11 +17,12 @@ Figures:
                   the classical linear head, at comparable accuracy.
     2. `circuit_diagram.{png,svg}` — the 4-qubit VQC drawn via
        `pennylane.draw_mpl`: Angle Encoding -> Parameterized Rotations
-       (Rx, Ry, Rz) -> Entangling CNOT mesh -> Pauli-Z measurement.
-    3. `clinical_case_walkthrough.{png,svg}` — a 4-panel clinical case
-       figure: Raw MRI Slice -> Grad-CAM Activation Heatmap -> Pauli-Z
-       Measurement Attribution (per-qubit bar chart) -> Diagnostic Report
-       Summary (auto-generated text, via
+       (Rx, Ry, Rz) -> Entangling CNOT ring -> Pauli-Z measurement.
+    3. `clinical_case_walkthrough.{png,svg}` — a 5-panel clinical case
+       figure: Raw MRI Slice -> Spatial Feature Extraction (ResNet18
+       intermediate activation map) -> Grad-CAM Activation Heatmap ->
+       Quantum Attribution (per-qubit Pauli-Z expectation bar chart) ->
+       Diagnostic Impression (auto-generated text, via
        `qknee.xai.report_generator.generate_radiology_text_snippet`).
 
 No real labeled MRI dataset or trained checkpoint is required — this
@@ -279,7 +280,7 @@ def generate_circuit_diagram_figure(
     fig.text(
         0.5, 0.885,
         "Angle Encoding (Rx, Ry)  →  Parameterized Rotations (Rx, Ry, Rz) × "
-        f"{n_layers} layers  →  Entangling CNOT Mesh  →  Pauli-Z (<Z>) Measurement",
+        f"{n_layers} layers  →  Entangling CNOT Ring  →  Pauli-Z (<Z>) Measurement",
         ha="center", fontsize=11, style="italic",
     )
 
@@ -313,12 +314,45 @@ def _fit_dummy_pca_reducer(seed: int) -> QuantumDimReducer:
     return QuantumDimReducer().fit(corpus)
 
 
+def _extract_spatial_feature_map(
+    extractor: ResNet18FeatureExtractor, target_layer: torch.nn.Module, input_tensor: torch.Tensor
+) -> np.ndarray:
+    """Captures `target_layer`'s raw spatial activation map (the last
+    convolutional feature map ResNet18 produces before global-average-
+    pooling collapses it to the 512-D embedding) via a forward hook, and
+    condenses it into a single-channel spatial map by averaging across the
+    channel dimension. This is deliberately *not* Grad-CAM — no gradient
+    weighting or class-discrimination is applied here — it visualizes the
+    plain "where is the backbone looking" spatial activation prior to
+    pooling, so the deck can show feature extraction and Grad-CAM as two
+    distinct pipeline stages.
+
+    Returns:
+        `(H, W)` float32 array (raw activation magnitudes, un-normalized).
+    """
+    captured: dict = {}
+
+    def _hook(_module, _input, output):
+        captured["activation"] = output.detach()
+
+    handle = target_layer.register_forward_hook(_hook)
+    try:
+        with torch.no_grad():
+            extractor.forward_slice(input_tensor)
+    finally:
+        handle.remove()
+
+    activation = captured["activation"]  # (1, C, H, W)
+    return activation[0].mean(dim=0).numpy()  # (H, W)
+
+
 def generate_clinical_case_figure(
     output_dir: Path, seed: int = _config.evaluation.random_seed
 ) -> List[Path]:
-    """Renders the 4-panel clinical case walkthrough: Raw MRI Slice ->
-    Grad-CAM Activation Heatmap -> Pauli-Z Measurement Attribution ->
-    Diagnostic Report Summary. Every panel is a genuine forward pass
+    """Renders the 5-panel clinical case walkthrough: Raw MRI Slice ->
+    Spatial Feature Extraction (raw ResNet18 activation map) -> Grad-CAM
+    Activation Heatmap -> Quantum Attribution (Pauli-Z measurement bar
+    chart) -> Diagnostic Impression. Every panel is a genuine forward pass
     through the actual model classes (ResNet18, Grad-CAM, PCA projection,
     VQC, `generate_radiology_text_snippet`) on one synthetic sample slice
     — nothing here is a fabricated/mocked figure."""
@@ -332,6 +366,8 @@ def generate_clinical_case_figure(
 
     rgb_slice = cv2.cvtColor(sample_slice, cv2.COLOR_GRAY2RGB)
     input_tensor = torch.from_numpy(rgb_slice).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+
+    spatial_feature_map = _extract_spatial_feature_map(extractor, target_layer, input_tensor)
 
     with GradCAM(extractor, target_layer) as cam:
         heatmap = cam.generate(input_tensor)
@@ -359,30 +395,35 @@ def generate_clinical_case_figure(
         metadata={"patient_id": "DEMO-DECK-001", "plane": "Sagittal"},
     )
 
-    fig, axes = plt.subplots(1, 4, figsize=(27, 6.5), gridspec_kw={"width_ratios": [1, 1, 1, 1.35]})
+    fig, axes = plt.subplots(1, 5, figsize=(33, 6.5), gridspec_kw={"width_ratios": [1, 1, 1, 1, 1.35]})
 
     axes[0].imshow(sample_slice, cmap="gray")
     axes[0].set_title("Raw MRI Slice", fontsize=14, fontweight="bold")
     axes[0].axis("off")
 
-    axes[1].imshow(gradcam_rgb)
-    axes[1].set_title("Grad-CAM Activation\nHeatmap", fontsize=14, fontweight="bold")
+    axes[1].imshow(sample_slice, cmap="gray")
+    axes[1].imshow(spatial_feature_map, cmap="magma", alpha=0.75, extent=axes[1].get_xlim() + axes[1].get_ylim())
+    axes[1].set_title("Spatial Feature\nExtraction", fontsize=14, fontweight="bold")
     axes[1].axis("off")
+
+    axes[2].imshow(gradcam_rgb)
+    axes[2].set_title("Grad-CAM Activation\nHeatmap", fontsize=14, fontweight="bold")
+    axes[2].axis("off")
 
     qubit_labels = [f"Q{i}" for i in range(len(pauli_z_values))]
     bar_colors = ["#E74C3C" if v >= 0 else "#2ECC71" for v in pauli_z_values]
-    axes[2].bar(qubit_labels, pauli_z_values, color=bar_colors, edgecolor="white", linewidth=1.2)
-    axes[2].axhline(0, color="black", linewidth=0.8)
-    axes[2].set_ylim(-1.15, 1.15)
-    axes[2].set_ylabel("<Z> expectation")
-    axes[2].set_title("Pauli-Z Measurement\nAttribution", fontsize=14, fontweight="bold")
+    axes[3].bar(qubit_labels, pauli_z_values, color=bar_colors, edgecolor="white", linewidth=1.2)
+    axes[3].axhline(0, color="black", linewidth=0.8)
+    axes[3].set_ylim(-1.15, 1.15)
+    axes[3].set_ylabel("<Z> expectation")
+    axes[3].set_title("Quantum Attribution\n(Pauli-Z Measurement)", fontsize=14, fontweight="bold")
     for xi, v in enumerate(pauli_z_values):
-        axes[2].text(xi, v + (0.08 if v >= 0 else -0.14), f"{v:.2f}", ha="center", fontsize=10, fontweight="bold")
+        axes[3].text(xi, v + (0.08 if v >= 0 else -0.14), f"{v:.2f}", ha="center", fontsize=10, fontweight="bold")
 
-    axes[3].axis("off")
-    axes[3].set_title("Diagnostic Report Summary", fontsize=14, fontweight="bold", loc="left")
-    axes[3].text(
-        0.0, 0.88, text_snippet, transform=axes[3].transAxes, fontsize=10.5, va="top", family="monospace",
+    axes[4].axis("off")
+    axes[4].set_title("Diagnostic Impression", fontsize=14, fontweight="bold", loc="left")
+    axes[4].text(
+        0.0, 0.88, text_snippet, transform=axes[4].transAxes, fontsize=10.5, va="top", family="monospace",
         bbox=dict(boxstyle="round,pad=0.6", facecolor="#F7F7F7", edgecolor="#CCCCCC"),
     )
 
