@@ -30,6 +30,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+# Set before matplotlib's own import (not after): a container's default
+# config dir is often read-only or lives on slow/non-tmpfs storage, and
+# matplotlib builds its font cache there on first import — on a cold boot
+# that can stall for tens of seconds. Pointing it at a tmpfs-backed `/tmp`
+# subdirectory up front makes that one-time build (and every import after
+# the first) fast. `setdefault` so an operator-supplied override wins.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib
 
 matplotlib.use("Agg")

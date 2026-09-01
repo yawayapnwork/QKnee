@@ -31,6 +31,19 @@ dependency required).
 
 from __future__ import annotations
 
+import os
+
+# Set before any matplotlib import — this module doesn't import matplotlib
+# itself, but it's on `qknee.models.pipeline`'s eager import chain, which
+# every caller (`qknee.api.server`, the Streamlit UI) pulls in early; if
+# anything on that chain (now or later) ends up importing matplotlib, its
+# config dir should already point at fast tmpfs storage rather than a
+# container's often read-only/non-tmpfs default, where a first-import font-
+# cache build can stall for tens of seconds. A plain env-var write costs
+# nothing and imports nothing, so it's safe unconditionally here.
+# `setdefault` so an operator-supplied override wins.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 

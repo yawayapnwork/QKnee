@@ -50,6 +50,18 @@ Two entry points:
 
 from __future__ import annotations
 
+import os
+
+# Set before any matplotlib import — this module renders its charts/tables
+# directly with reportlab, not matplotlib, but is imported lazily by
+# `qknee.api.server`'s /report handler alongside the rest of that
+# request's (matplotlib-free today, but chain-adjacent) import graph; a
+# plain env-var write costs nothing and imports nothing, so setting it
+# unconditionally here is free insurance against a slow cold font-cache
+# build if matplotlib ever ends up imported nearby. `setdefault` so an
+# operator-supplied override wins.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 import io
 from datetime import datetime, timezone
 from hashlib import sha256

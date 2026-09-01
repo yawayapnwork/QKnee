@@ -46,10 +46,23 @@ import asyncio
 import base64
 import gc
 import hashlib
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
+
+# Set before ANY matplotlib import — including a transitive one triggered
+# by `get_backend()`'s lazy torch/pennylane/gradcam import chain, or by
+# `/report`'s lazy reportlab import — rather than only inside the code
+# path that happens to import matplotlib today. A container's default
+# config dir is often read-only or non-tmpfs storage, and matplotlib
+# builds its font cache there on first import; on a cold boot that can
+# stall for tens of seconds. This is a plain env-var write (no import,
+# no filesystem access yet), so it costs nothing at module-import time
+# and is in place well before `get_backend()`'s own `matplotlib.use("Agg")`
+# call ever runs. `setdefault` so an operator-supplied override wins.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import cv2
 import numpy as np
@@ -764,4 +777,11 @@ async def report(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("qknee.api.server:app", host=_config.api.host, port=_config.api.port, reload=True)
+    # Render (and most other PaaS free tiers) assign the listen port at
+    # runtime via `$PORT` and route traffic only to that port — a
+    # hardcoded/config-only port silently fails to bind where the
+    # platform actually expects it. `$PORT`, when set, always wins;
+    # `config.yaml`'s `api.port` (8000 by default) is the local-dev
+    # fallback when `$PORT` is unset.
+    port = int(os.getenv("PORT", _config.api.port))
+    uvicorn.run("qknee.api.server:app", host=_config.api.host, port=port, reload=True)

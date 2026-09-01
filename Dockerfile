@@ -128,12 +128,28 @@ ENV PYTHONUNBUFFERED=1 \
     PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl \
     MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
 
+# MPLCONFIGDIR: matplotlib's default config/font-cache directory can be
+# read-only or non-tmpfs on some hosts, and building that cache on first
+# import can stall for tens of seconds on a cold boot. `/tmp` is always
+# writable and tmpfs-backed in this (and virtually every) container
+# runtime, so point matplotlib there unconditionally rather than relying
+# on every module that might import it to set this individually.
+ENV MPLCONFIGDIR=/tmp/matplotlib
+
 USER qknee
 
 # Both services' ports are declared here since this one image can run
 # either role; docker-compose.yml maps only the relevant port per service.
 EXPOSE 8000 8501
 
-# Default command runs the FastAPI backend; docker-compose.yml overrides
-# this with the Streamlit `command:` for the frontend service.
-CMD ["uvicorn", "qknee.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form (not the usual exec-form JSON array) is required here: only
+# the shell performs `${PORT:-8000}` parameter expansion. Render (and most
+# other PaaS free tiers) assigns the listen port at runtime via `$PORT`
+# and routes traffic only to that port — a hardcoded `--port 8000` would
+# silently bind the wrong port and every request would 502. Falls back to
+# 8000 (this image's own `EXPOSE`d default) when `$PORT` isn't set, e.g. a
+# plain `docker run` or the Compose-orchestrated dev stack.
+#
+# docker-compose.yml overrides this with the Streamlit `command:` for the
+# frontend service.
+CMD uvicorn qknee.api.server:app --host 0.0.0.0 --port ${PORT:-8000}
