@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 from dataclasses import dataclass
@@ -75,6 +76,24 @@ QuantumBackend = Literal["pennylane", "qiskit"]
 class PipelineValidationError(RuntimeError):
     """Raised when the tensor handed between two pipeline stages fails
     shape/dtype/range validation, naming the two stages involved."""
+
+
+def _release_memory() -> None:
+    """`gc.collect()` (unconditionally — loading/discarding ResNet18's
+    convolutional weights, and a ResNet18 forward + Grad-CAM backward
+    pass, both leave short-lived reference cycles that outlive the call
+    that created them) plus `torch.cuda.empty_cache()` when CUDA is
+    actually present (a no-op safety net on this project's default
+    CPU-only deployment). Called after `PipelineRunner.__init__` finishes
+    loading every stage's weights, and after `run()`/`classify()`/
+    `explain()` complete a request, so a long-running single-process
+    server (e.g. `qknee.api.server`, whose free-tier Render container is
+    memory-constrained) doesn't accumulate freed-but-uncollected tensors
+    between requests.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 @dataclass(frozen=True)
@@ -373,6 +392,15 @@ class PipelineRunner:
             self.config.quantum.n_layers,
         )
 
+        # Model initialization is done: loading ImageNet-pretrained ResNet18
+        # weights, any VQC/PCA checkpoint, and (on a checkpoint-loading
+        # retry/fallback path above) a discarded randomly-initialized
+        # module, can all leave short-lived garbage behind. Collect it now
+        # rather than leaving it for whenever the next GC cycle happens to
+        # run, since this constructor is on the critical path of a
+        # memory-constrained server's first request.
+        _release_memory()
+
     # ------------------------------------------------------------------ #
     # Checkpoint loading
     # ------------------------------------------------------------------ #
@@ -629,6 +657,17 @@ class PipelineRunner:
             heatmap = self.explain(single_slice)
 
         logger.info("PipelineRunner.run: risk_score=%.4f, source=%r", risk_score, source)
+
+        # `batch`/`features_512d` and Grad-CAM's backward-pass activation
+        # graph (if `explain()` ran above) are done being used by this
+        # point — every value this method returns has already been pulled
+        # out into plain numpy/float `PipelineResult` fields. Release them
+        # now rather than leaving them for the next GC cycle: this is the
+        # single most expensive call on a memory-constrained server's
+        # request path (qknee.api.server's /predict, /explain).
+        del batch, features_512d
+        _release_memory()
+
         return PipelineResult(risk_score=risk_score, quantum_angles=quantum_angles, gradcam_heatmap=heatmap)
 
 

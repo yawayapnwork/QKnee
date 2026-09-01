@@ -26,17 +26,30 @@ Endpoints:
                                  risk score for context) — for a caller that
                                  only needs the visual explanation, not the
                                  full diagnosis response.
+    POST /report                - same upload contract and auth requirement as
+                                 /predict, but returns a formal one-page
+                                 radiology-style PDF report (reportlab)
+                                 instead of a JSON payload.
+
+Startup memory/latency: torch, torchvision, pennylane, matplotlib, and
+reportlab are all deliberately kept out of this module's top-level
+imports — see `get_backend()`'s docstring and the `TYPE_CHECKING` block
+below. `uvicorn qknee.api.server:app` reaches "Application startup
+complete" without importing any of them; the first `/predict`, `/explain`,
+or `/report` request pays their one-time import + model-load cost instead,
+which is what keeps a cold boot under Render's free-tier 512MB ceiling.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import hashlib
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
 
 import cv2
 import numpy as np
@@ -49,9 +62,30 @@ from qknee.api.auth import router as auth_router
 from qknee.api.auth import user_store
 from qknee.config.loader import load_config, redact_connection_string
 from qknee.config.logging_config import get_logger, setup_logging
-from qknee.data.ingestion import DataIngestion, IngestionError
-from qknee.models.pipeline import PipelineRunner, PipelineValidationError
-from qknee.xai.gradcam import overlay_heatmap
+
+# --------------------------------------------------------------------------- #
+# Deliberately NOT imported at module scope: torch, torchvision, pennylane
+# (all pulled in transitively by `qknee.models.pipeline`/`qknee.data.
+# ingestion`/`qknee.xai.gradcam`), matplotlib, and reportlab. Together these
+# account for the overwhelming majority of this service's *cold* RSS —
+# importing any of them is what turns a <150MB, <1s "the process is up and
+# routing requests" boot into a multi-hundred-MB, multi-second one, which
+# blows Render's free-tier 512MB ceiling well before any real request
+# arrives. Every one of them is deferred to inside the function/method that
+# actually needs it (`get_backend()` below for the ML stack; the `/report`
+# handler for reportlab), so `uvicorn qknee.api.server:app` reaches
+# "Application startup complete" having imported none of them — see
+# `get_backend()`'s docstring for the lazy-singleton that triggers the
+# import on first `/predict`/`/explain` request instead.
+#
+# `TYPE_CHECKING`-only imports below give this module real type hints for
+# the deferred names without importing anything at runtime — a static
+# type checker sees them, `python -c "import qknee.api.server"` never
+# executes this branch.
+# --------------------------------------------------------------------------- #
+if TYPE_CHECKING:
+    from qknee.data.ingestion import DataIngestion, IngestionError
+    from qknee.models.pipeline import PipelineRunner
 
 setup_logging()
 logger = get_logger("qknee.api")
@@ -269,15 +303,33 @@ class ExplanationResponse(BaseModel):
 class QKneeBackend:
     """Thin FastAPI-facing wrapper around `PipelineRunner` — the canonical
     DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM engine. Delegates all
-    actual inference to one `PipelineRunner` instance built at startup, and
-    falls back to a deterministic mock only when that engine fails to
-    initialize (e.g. no fitted PCA artifact yet), so the API stays usable
-    for frontend development without a trained backend."""
+    actual inference to one `PipelineRunner` instance built at construction
+    time, and falls back to a deterministic mock only when that engine
+    fails to initialize (e.g. no fitted PCA artifact yet), so the API stays
+    usable for frontend development without a trained backend.
+
+    Construction (not just this class's definition) is where the heavy
+    torch/torchvision/pennylane import chain actually happens — see
+    `get_backend()` below, which is what defers *building* one of these
+    until the first `/predict`/`/explain` request instead of at module
+    import time."""
 
     def __init__(self, pca_artifact_path: Path = PCA_ARTIFACT_PATH):
+        # Both imported lazily, right here, rather than at module scope:
+        # `qknee.data.ingestion` transitively imports `qknee.data.dataset`,
+        # which imports torch/torchvision/pandas at ITS OWN module level —
+        # so even a "just parse the upload, don't run the model" `/predict`
+        # call would otherwise force that whole chain in. `sys.modules`
+        # caches the actual import after the first call, so every
+        # subsequent `QKneeBackend(...)` construction (or any other local
+        # import of the same names elsewhere in this class) is just a
+        # dict lookup, not a re-import.
+        from qknee.data.ingestion import DataIngestion
+        from qknee.models.pipeline import PipelineRunner, PipelineValidationError
+
         self.backend_ready = False
         self.load_error: Optional[str] = None
-        self.runner: Optional[PipelineRunner] = None
+        self.runner: Optional["PipelineRunner"] = None
         self._ingestion = DataIngestion(train=False)
 
         try:
@@ -290,6 +342,12 @@ class QKneeBackend:
         except Exception as exc:  # noqa: BLE001
             self.load_error = str(exc)
             logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
+        finally:
+            # Loading (or failing to load and discarding) ResNet18 +
+            # VQC/PCA weights is the heaviest allocation this process ever
+            # does outside of serving an actual request — collect promptly
+            # rather than leaving it for whenever the next GC cycle runs.
+            gc.collect()
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -369,6 +427,8 @@ class QKneeBackend:
         if array.ndim == 2:
             return array
 
+        from qknee.data.ingestion import IngestionError
+
         try:
             slices = self._ingestion.load_slices_as_pil(array)
         except IngestionError as exc:
@@ -407,6 +467,8 @@ class QKneeBackend:
         )
 
     def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str]:
+        from qknee.xai.gradcam import overlay_heatmap
+
         try:
             result = self.runner.run(display_slice)  # DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM
             overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
@@ -414,9 +476,20 @@ class QKneeBackend:
             return result.risk_score, heatmap_b64
         except Exception as exc:  # noqa: BLE001 - PipelineValidationError or any unexpected failure
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
+        finally:
+            # `result`'s tensors are already pulled out into `risk_score`/
+            # `heatmap_b64` (plain float/str) by this point — collect the
+            # ResNet18 forward + Grad-CAM backward pass's freed activation
+            # graph now rather than leaving it for the next GC cycle.
+            # `PipelineRunner.run()` already does this internally too; the
+            # extra call here is cheap insurance around the encode step
+            # above, which runs after that internal collection.
+            gc.collect()
 
     def _predict_mock(self, display_slice: np.ndarray) -> Tuple[float, str]:
         import hashlib
+
+        from qknee.xai.gradcam import overlay_heatmap
 
         digest = hashlib.sha256(display_slice.tobytes()).digest()
         seed = int.from_bytes(digest[:4], "big")
@@ -461,7 +534,46 @@ app.add_middleware(
 
 app.include_router(auth_router)
 
-backend = QKneeBackend()
+# Lazy singleton: `backend` starts `None` — no `QKneeBackend()` is built,
+# and therefore no torch/torchvision/pennylane import happens, at module
+# import time. `get_backend()` below builds (and caches) the one
+# process-wide instance on the FIRST call, which only ever happens from
+# inside `/predict`/`/explain`/`/report` — never from `/health`, and never
+# from simply importing this module — so `uvicorn qknee.api.server:app`
+# reaches "Application startup complete" having paid none of that cost.
+backend: Optional[QKneeBackend] = None
+_backend_lock = threading.Lock()
+
+
+def get_backend() -> QKneeBackend:
+    """Returns the process-wide `QKneeBackend`, building it on the first
+    call (thread-safe: `/predict`/`/explain`/`/report` are `async def`s
+    but FastAPI's sync `QKneeBackend.predict`/construction still run
+    behind this lock, so two requests racing to be "first" never build
+    two backends). Every call after the first is just a `None` check.
+
+    `matplotlib.use("Agg")` is selected *before* triggering the
+    torch/pennylane import chain below, in case anything on it — now, or
+    added later — imports matplotlib: the non-interactive Agg backend
+    must be chosen before matplotlib's own first import, or it probes for
+    a GUI toolkit that doesn't exist on a headless container, which can
+    hang and/or trigger an expensive font-cache rebuild. Skipped
+    silently if matplotlib isn't installed at all.
+    """
+    global backend
+    if backend is not None:
+        return backend
+
+    with _backend_lock:
+        if backend is None:
+            try:
+                import matplotlib
+
+                matplotlib.use("Agg")
+            except ImportError:
+                pass
+            backend = QKneeBackend()
+    return backend
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
@@ -470,7 +582,22 @@ def health() -> HealthResponse:
     plus which storage backends are actually active for the user store and
     the cache — useful to confirm a configured `$DATABASE_URL`/`$REDIS_URL`
     actually connected, rather than silently degrading to the local
-    fallback."""
+    fallback.
+
+    Deliberately reads the module-level `backend` singleton directly
+    rather than calling `get_backend()`: this is Render's (and any other
+    host's) readiness/liveness probe, hit immediately and repeatedly after
+    boot, so it must never itself be what triggers the one-time
+    torch/torchvision/pennylane import + ResNet18/VQC load that the first
+    real `/predict`/`/explain`/`/report` request pays for."""
+    if backend is None:
+        return HealthResponse(
+            status="ok",
+            backend_ready=False,
+            detail="Model backend not yet loaded (lazy-initializes on the first /predict, /explain, or /report request).",
+            user_store_backend=type(user_store).__name__,
+            cache_backend=cache_service.backend_name,
+        )
     return HealthResponse(
         status="ok",
         backend_ready=backend.backend_ready,
@@ -483,10 +610,20 @@ def health() -> HealthResponse:
 def _predict_cache_key(raw_bytes: bytes) -> str:
     """Content-addressed cache key for one uploaded slice/volume's
     prediction — identical bytes always hash to the same key, so a
-    repeat upload of the same file (whether via `/predict` or `/explain`,
-    both share this key) is served from `CacheService` instead of re-
-    running the ResNet18 -> PCA -> VQC -> Grad-CAM pipeline."""
+    repeat upload of the same file (whether via `/predict`, `/explain`,
+    or `/report`, all three share this key) is served from `CacheService`
+    instead of re-running the ResNet18 -> PCA -> VQC -> Grad-CAM
+    pipeline."""
     return f"predict:{hashlib.sha256(raw_bytes).hexdigest()}"
+
+
+def _decode_png_base64(png_base64: str) -> np.ndarray:
+    """Inverse of `QKneeBackend._encode_png_base64` — decodes a cached/
+    fresh `PredictionResponse.gradcam_heatmap` back into a `(H, W, 3)` BGR
+    array, for `/report` to hand to `generate_radiology_report` (which
+    wants a raw overlay array, not a base64 PNG string)."""
+    png_bytes = base64.b64decode(png_base64)
+    return cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
@@ -516,7 +653,7 @@ async def predict(
         logger.debug("POST /predict cache hit (key=%s)", cache_key)
         return PredictionResponse(**cached)
 
-    result = backend.predict(raw_bytes, file.filename or "upload")
+    result = get_backend().predict(raw_bytes, file.filename or "upload")
     await cache_service.set(cache_key, result.model_dump(), ttl=_config.storage.cache_ttl_seconds)
     return result
 
@@ -545,13 +682,82 @@ async def explain(
         logger.debug("POST /explain cache hit (key=%s)", cache_key)
         prediction = PredictionResponse(**cached)
     else:
-        prediction = backend.predict(raw_bytes, file.filename or "upload")
+        prediction = get_backend().predict(raw_bytes, file.filename or "upload")
         await cache_service.set(cache_key, prediction.model_dump(), ttl=_config.storage.cache_ttl_seconds)
 
     return ExplanationResponse(
         gradcam_heatmap=prediction.gradcam_heatmap,
         risk_score=prediction.risk_score,
         backend=prediction.backend,
+    )
+
+
+@app.post("/report", tags=["Inference"])
+async def report(
+    file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
+    current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
+):
+    """Runs (or reuses a cached) prediction for one MRI slice/volume and
+    returns a formal one-page radiology-style PDF report — the
+    reportlab-backed counterpart to /predict's JSON payload. Shares
+    /predict's exact upload contract, auth requirement, and `CacheService`
+    entry (same content-hash key — a /predict or /explain call on the same
+    file first means this endpoint never re-runs the pipeline either).
+
+    `reportlab` (via `qknee.xai.report_generator`) is imported lazily,
+    right here, so a server that never receives a /report request never
+    pays its import cost — matching /predict's and /explain's own
+    lazy-loaded torch/torchvision/pennylane."""
+    from fastapi.responses import Response
+
+    from qknee.xai.report_generator import generate_radiology_report
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    logger.info("POST /report by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
+
+    active_backend = get_backend()
+    display_slice = active_backend._normalize_uint8(active_backend.load_slice(raw_bytes, file.filename or "upload"))
+
+    cache_key = _predict_cache_key(raw_bytes)
+    cached = await cache_service.get(cache_key)
+    if cached is not None:
+        logger.debug("POST /report cache hit (key=%s)", cache_key)
+        prediction = PredictionResponse(**cached)
+    else:
+        prediction = active_backend.predict(raw_bytes, file.filename or "upload")
+        await cache_service.set(cache_key, prediction.model_dump(), ttl=_config.storage.cache_ttl_seconds)
+
+    pdf_bytes = generate_radiology_report(
+        output_path=None,
+        mri_slice=display_slice,
+        gradcam_overlay=_decode_png_base64(prediction.gradcam_heatmap),
+        prediction_results={
+            # This API scores one unified risk (no separate ACL/MCL/
+            # meniscus heads — see PredictionResponse); report_generator
+            # renders the fields it isn't given ("mcl_risk", "meniscus_risk",
+            # "pauli_z_expectations", per-stage latencies) as "N/A" rather
+            # than fabricating them.
+            "acl_risk": prediction.risk_score,
+            "backend": prediction.backend,
+        },
+        metadata={
+            "modality": "MRI Knee",
+            "clinical_indication": f"Q-Knee API /report — {prediction.diagnosis}",
+        },
+    )
+    # The PIL images reportlab's Canvas wraps around `display_slice`/
+    # `gradcam_overlay`, and the in-memory PNG/PDF byte buffers
+    # `generate_radiology_report` builds internally, are all done being
+    # used past this point — `pdf_bytes` has already been captured above.
+    gc.collect()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="qknee_diagnostic_report.pdf"'},
     )
 
 

@@ -50,6 +50,7 @@ Route protection:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -174,15 +175,25 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = _config.api.access_token_expire_minutes
-_SECRET_KEY = _config.api.jwt_secret_key
+
+# Checked directly against the environment (not just through
+# `_config.api.jwt_secret_key`'s own `$QKNEE_JWT_SECRET_KEY` override —
+# see `qknee.config.loader._ENV_OVERRIDES`) so both naming conventions
+# work interchangeably: `$QKNEE_JWT_SECRET_KEY` (this project's own name)
+# takes precedence when both are set, `$SECRET_KEY` (the generic name a
+# platform like Render/Railway/Heroku often auto-populates or that an
+# operator reaches for by habit) is accepted as a fallback, and
+# `_config.api.jwt_secret_key` (config.yaml's dev-only default) is the
+# last resort if neither env var is set.
+_SECRET_KEY = os.getenv("QKNEE_JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or _config.api.jwt_secret_key
 _INSECURE_DEFAULT_SECRET_KEY = "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
 
 if _SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:
     logger.warning(
         "qknee.api.auth is signing JWTs with the INSECURE DEFAULT dev secret key. "
-        "Set the $QKNEE_JWT_SECRET_KEY environment variable before deploying anywhere "
-        "reachable outside a local dev machine — tokens signed with the default key are "
-        "forgeable by anyone who has read this source file."
+        "Set the $QKNEE_JWT_SECRET_KEY (or $SECRET_KEY) environment variable before "
+        "deploying anywhere reachable outside a local dev machine — tokens signed with "
+        "the default key are forgeable by anyone who has read this source file."
     )
 
 

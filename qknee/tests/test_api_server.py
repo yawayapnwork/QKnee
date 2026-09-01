@@ -58,10 +58,19 @@ def _authenticated_as_radiologist(client: TestClient, tmp_path: Path, monkeypatc
 def live_client(pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """A TestClient wired to a real `QKneeBackend` (fitted PCA artifact,
     randomly-initialized VQC — no checkpoint needed to exercise the API
-    contract itself), pre-authenticated as a `radiologist` test account."""
+    contract itself), pre-authenticated as a `radiologist` test account.
+
+    Also swaps in a fresh `CacheService` (empty, in-memory-only): the
+    module-level `cache_service` is a process-wide singleton keyed on
+    uploaded-file content hash, and several tests across `live_client`/
+    `mock_client` upload byte-identical `dummy_slice_2d` content — without
+    an isolated cache per test, a `live`-backend result cached by one test
+    would be served straight back (stale `backend: "live"`) to a later
+    `mock`-backend test uploading the same bytes."""
     live_backend = server_module.QKneeBackend(pca_artifact_path=pca_artifact_path)
     assert live_backend.backend_ready, f"expected live backend to load: {live_backend.load_error}"
     monkeypatch.setattr(server_module, "backend", live_backend)
+    monkeypatch.setattr(server_module, "cache_service", server_module.CacheService())
     return _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
 
 
@@ -69,10 +78,12 @@ def live_client(pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.Mon
 def mock_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """A TestClient wired to a `QKneeBackend` that deliberately fails to
     load (nonexistent PCA artifact), forcing the deterministic mock path —
-    pre-authenticated as a `radiologist` test account."""
+    pre-authenticated as a `radiologist` test account. Also swaps in a
+    fresh `CacheService` — see `live_client`'s docstring for why."""
     mock_backend = server_module.QKneeBackend(pca_artifact_path=tmp_path / "no_such_artifact.pkl")
     assert not mock_backend.backend_ready
     monkeypatch.setattr(server_module, "backend", mock_backend)
+    monkeypatch.setattr(server_module, "cache_service", server_module.CacheService())
     return _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
 
 
