@@ -1,0 +1,21 @@
+# Mirror of the root `requirements-vercel.txt` — DO NOT edit independently.
+#
+# This exact copy exists because Vercel's Python builder (@vercel/python)
+# resolves the `requirements.txt` nearest to the entrypoint file declared
+# in `vercel.json` (`qknee/api/server.py`) before falling back to one at
+# the project root. The project root's `requirements.txt` is the full
+# Render/Docker ML stack (torch, torchvision, pennylane, SimpleITK,
+# nibabel, ...) and must stay that way for those targets — so this
+# colocated file is what actually keeps the Vercel function bundle under
+# the 500MB serverless function size limit. See `requirements-vercel.txt`
+# at the repo root for the full rationale; keep the two files identical.
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+PyJWT>=2.8.0
+argon2-cffi>=23.1.0
+requests>=2.31.0
+pyyaml>=6.0.1
+httpx>=0.27.0

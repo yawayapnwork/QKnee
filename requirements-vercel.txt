@@ -1,0 +1,38 @@
+# Lightweight serverless dependency set for the Vercel deployment target.
+#
+# Vercel's Python builder (@vercel/python) bundles every package resolved
+# from a `requirements.txt` directly into the function's deployment
+# artifact — there is no lazy-install step at request time, so a *runtime*
+# `try/except ImportError` around torch/pennylane/etc (see
+# qknee/api/server.py) does nothing to shrink the bundle; only never
+# listing those packages in the file the builder actually installs from
+# does. That is what blew through Vercel's 500MB per-function limit here
+# (torch + torchvision + pennylane + SimpleITK + nibabel alone run into
+# multiple GB once CUDA wheels and their transitive deps are resolved).
+#
+# This file is intentionally NOT named `requirements.txt`: that name is
+# reserved for the full ML stack used by Render/Docker (see the root
+# `requirements.txt` and `Dockerfile`), and must keep meaning "everything
+# `qknee.models`/`qknee.data`/`qknee.xai` need" for that target. Vercel's
+# builder resolves the nearest `requirements.txt` to the entrypoint file
+# declared in `vercel.json` (`qknee/api/server.py`) — so the actual file it
+# installs from is `qknee/api/requirements.txt`, which mirrors this one
+# exactly. Keep both in sync; this root copy exists as the documented,
+# easy-to-find source of truth for what "lightweight" means here.
+#
+# On Vercel, `qknee/api/server.py` runs as a thin router/mock/proxy layer
+# only: `/health` and auth endpoints work locally; `/predict`, `/explain`,
+# and `/report` either proxy to the full Render backend (`$BACKEND_API_URL`)
+# or serve deterministic responses from the precomputed inference cache
+# (`qknee/artifacts/precomputed_cache.json`) when `$USE_MOCK_FALLBACK=true`
+# or no heavy ML backend is reachable — see `get_backend()`.
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+PyJWT>=2.8.0
+argon2-cffi>=23.1.0
+requests>=2.31.0
+pyyaml>=6.0.1
+httpx>=0.27.0

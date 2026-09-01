@@ -64,9 +64,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
 # call ever runs. `setdefault` so an operator-supplied override wins.
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
-import cv2
-import numpy as np
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -91,14 +89,36 @@ from qknee.config.logging_config import get_logger, setup_logging
 # `get_backend()`'s docstring for the lazy-singleton that triggers the
 # import on first `/predict`/`/explain` request instead.
 #
+# `cv2`/`numpy` are ALSO not module-scope imports (unlike before) for the
+# same reason, one level down: Vercel's serverless deployment installs
+# only `requirements-vercel.txt`/`qknee/api/requirements.txt` (see those
+# files), which excludes opencv/numpy entirely — a bare `import cv2` at
+# module scope would make `qknee.api.server` fail to import at all on that
+# target. `_HEAVY_IMAGING_AVAILABLE` below records whether they resolved,
+# so `get_backend()` can pick a pixel-processing-capable backend
+# (`QKneeBackend`) when they did, or a router/proxy/cache backend when
+# they didn't — see `ProxyBackend`/`CachedFallbackBackend`.
+#
 # `TYPE_CHECKING`-only imports below give this module real type hints for
 # the deferred names without importing anything at runtime — a static
 # type checker sees them, `python -c "import qknee.api.server"` never
 # executes this branch.
 # --------------------------------------------------------------------------- #
 if TYPE_CHECKING:
+    import numpy as np
+
     from qknee.data.ingestion import DataIngestion, IngestionError
     from qknee.models.pipeline import PipelineRunner
+
+try:
+    import cv2
+    import numpy as np
+
+    _HEAVY_IMAGING_AVAILABLE = True
+except ImportError:
+    cv2 = None  # type: ignore[assignment]
+    np = None  # type: ignore[assignment]
+    _HEAVY_IMAGING_AVAILABLE = False
 
 setup_logging()
 logger = get_logger("qknee.api")
@@ -106,6 +126,37 @@ logger = get_logger("qknee.api")
 _config = load_config()
 PCA_ARTIFACT_PATH = _config.paths.pca_artifact
 TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
+
+# --------------------------------------------------------------------------- #
+# Serverless routing config — read once at import time (plain env vars,
+# no heavy dependency involved), used by `get_backend()` to decide which
+# backend implementation to build:
+#
+#   USE_MOCK_FALLBACK=true  - force the precomputed-cache backend
+#                              (`CachedFallbackBackend`) even if the full
+#                              ML stack happens to be importable. Useful
+#                              for a low-resource preview deployment that
+#                              has the packages installed but doesn't want
+#                              to pay ResNet18/PennyLane's cold-load cost.
+#   BACKEND_API_URL          - base URL of a full Render/Docker deployment
+#                              of this same API (e.g.
+#                              "https://qknee-api.onrender.com"). When set,
+#                              `/predict`/`/explain`/`/report` proxy the
+#                              upload there instead of running inference
+#                              locally — the intended Vercel configuration,
+#                              since Vercel never carries the ML stack.
+#
+# Precedence in `get_backend()`: BACKEND_API_URL (proxy) > USE_MOCK_FALLBACK
+# or missing heavy imaging deps (precomputed-cache) > full local
+# QKneeBackend. A serverless deployment should set BACKEND_API_URL; a
+# demo/preview deployment with neither set still degrades gracefully to
+# the cache instead of crashing on a missing torch/pennylane import.
+# --------------------------------------------------------------------------- #
+USE_MOCK_FALLBACK = os.getenv("USE_MOCK_FALLBACK", "false").strip().lower() in ("1", "true", "yes")
+BACKEND_API_URL = (os.getenv("BACKEND_API_URL") or "").strip().rstrip("/") or None
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -298,6 +349,13 @@ class HealthResponse(BaseModel):
     status: str
     backend_ready: bool
     detail: Optional[str] = None
+    mode: str = Field(
+        ...,
+        description="Which backend implementation /predict, /explain, and /report route through: "
+                    "'not-loaded' (lazy-inits on first request), 'live-or-mock' (QKneeBackend — full "
+                    "local ML stack, Render/Docker), 'proxy' (ProxyBackend — forwards to BACKEND_API_URL), "
+                    "or 'cache-fallback' (CachedFallbackBackend — precomputed_cache.json, serverless).",
+    )
     user_store_backend: str = Field(..., description="'SQLAlchemyUserRepository' or 'LocalFileUserRepository'.")
     cache_backend: str = Field(..., description="'redis' or 'in-memory' — see qknee.api.server.CacheService.")
 
@@ -328,7 +386,12 @@ class QKneeBackend:
     import time."""
 
     def __init__(self, pca_artifact_path: Path = PCA_ARTIFACT_PATH):
-        # Both imported lazily, right here, rather than at module scope:
+        self.backend_ready = False
+        self.load_error: Optional[str] = None
+        self.runner: Optional["PipelineRunner"] = None
+        self._ingestion: Optional["DataIngestion"] = None
+
+        # Imported lazily, right here, rather than at module scope —
         # `qknee.data.ingestion` transitively imports `qknee.data.dataset`,
         # which imports torch/torchvision/pandas at ITS OWN module level —
         # so even a "just parse the upload, don't run the model" `/predict`
@@ -337,22 +400,28 @@ class QKneeBackend:
         # subsequent `QKneeBackend(...)` construction (or any other local
         # import of the same names elsewhere in this class) is just a
         # dict lookup, not a re-import.
-        from qknee.data.ingestion import DataIngestion
-        from qknee.models.pipeline import PipelineRunner, PipelineValidationError
-
-        self.backend_ready = False
-        self.load_error: Optional[str] = None
-        self.runner: Optional["PipelineRunner"] = None
-        self._ingestion = DataIngestion(train=False)
-
+        #
+        # Deliberately INSIDE this try block (not above it, as this class
+        # briefly had it): `get_backend()` only ever constructs
+        # `QKneeBackend` when the router has already decided the full ML
+        # stack should be importable (see `_HEAVY_IMAGING_AVAILABLE` and
+        # its selection logic), but environments drift — a partial
+        # install, a missing native wheel for the host's platform, etc.
+        # An `ImportError` here must degrade to MOCK mode exactly like a
+        # missing PCA artifact does, not crash `get_backend()` and take
+        # every `/predict`/`/explain`/`/report` request down with it.
         try:
+            from qknee.data.ingestion import DataIngestion
+            from qknee.models.pipeline import PipelineRunner
+
+            self._ingestion = DataIngestion(train=False)
             self.runner = PipelineRunner(config=_config, pca_artifact_path=pca_artifact_path)
             self.backend_ready = True
             logger.info("QKneeBackend loaded live PipelineRunner from %s", pca_artifact_path)
-        except PipelineValidationError as exc:
-            self.load_error = str(exc)
+        except ImportError as exc:
+            self.load_error = f"Heavy ML dependency unavailable: {exc}"
             logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - PipelineValidationError or any unexpected load failure
             self.load_error = str(exc)
             logger.warning("QKneeBackend starting in MOCK mode: %s", self.load_error)
         finally:
@@ -440,6 +509,19 @@ class QKneeBackend:
         if array.ndim == 2:
             return array
 
+        if self._ingestion is None:
+            # `QKneeBackend.__init__` failed to import/construct
+            # `DataIngestion` (see its ImportError handling) — this
+            # instance is running in MOCK mode with no ingestion engine at
+            # all, so a multi-slice upload can't be decomposed. A 2D
+            # upload still works fine (the branch above never reaches
+            # here); only a genuinely volumetric upload hits this.
+            raise HTTPException(
+                status_code=503,
+                detail="Multi-slice volume decomposition is unavailable: the ML backend failed to load "
+                       f"({self.load_error or 'unknown reason'}). Upload a single 2D slice instead.",
+            )
+
         from qknee.data.ingestion import IngestionError
 
         try:
@@ -459,7 +541,12 @@ class QKneeBackend:
             slice_2d = np.zeros_like(slice_2d)
         return (slice_2d * 255).astype(np.uint8)
 
-    def predict(self, raw_bytes: bytes, filename: str) -> PredictionResponse:
+    def predict(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> PredictionResponse:
+        # `auth_header` is part of the common backend surface (see
+        # `ProxyBackend.predict`, which actually needs it to forward the
+        # caller's bearer token upstream) — unused here since this backend
+        # runs inference in-process rather than over HTTP.
+        del auth_header
         slice_2d = self.load_slice(raw_bytes, filename)
         display_slice = self._normalize_uint8(slice_2d)
 
@@ -528,6 +615,148 @@ class QKneeBackend:
 
 
 # --------------------------------------------------------------------------- #
+# Lightweight serverless backends — CachedFallbackBackend and ProxyBackend
+# both implement the same `.predict(raw_bytes, filename) -> PredictionResponse`
+# surface as `QKneeBackend`, so `get_backend()`'s callers (`/predict`,
+# `/explain`) don't need to know which one is active. Neither imports
+# numpy/cv2/torch/pennylane — both work with only `requirements-vercel.txt`
+# installed, which is the entire point: on Vercel, this router/mock/proxy
+# layer must run without the ~5GB CUDA/PyTorch/PennyLane dependency chain
+# that blew through the 500MB serverless function size limit.
+# --------------------------------------------------------------------------- #
+
+class CachedFallbackBackend:
+    """Serves `/predict`/`/explain` from `qknee/artifacts/precomputed_cache.json`
+    — the same offline-generated "Judge Fast-Path" cache
+    `qknee.ui.dashboard`/`qknee.ui.analysis_app` use — instead of running
+    any real inference. Selected by `get_backend()` when `$USE_MOCK_FALLBACK`
+    is set, or when the heavy ML stack (numpy/cv2/torch/pennylane) isn't
+    importable at all and no `$BACKEND_API_URL` is configured to proxy to.
+
+    Deterministic: the same uploaded bytes always select the same cached
+    case (content-hashed, stdlib `hashlib` only), so repeat calls on one
+    file are stable rather than randomly cycling cases. Each case's
+    Grad-CAM overlay is already a base64-encoded PNG string in the cache
+    file, so this never needs to decode/re-encode an image — no cv2 or
+    numpy required anywhere in this class.
+    """
+
+    backend_ready = False  # never "live" — always serving canned data
+
+    def __init__(self, cache_path: Path = PRECOMPUTED_CACHE_PATH) -> None:
+        self._cache_path = cache_path
+        self._cases: list = []
+        self.load_error: Optional[str] = None
+
+        if not cache_path.exists():
+            self.load_error = f"No precomputed cache found at {cache_path}"
+            logger.warning(
+                "CachedFallbackBackend: %s — run `python scripts/generate_demo_cache.py` to build one; "
+                "/predict and /explain will 503 until it exists.", self.load_error,
+            )
+            return
+
+        try:
+            import json
+
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            self._cases = payload.get("cases", [])
+        except (OSError, ValueError) as exc:
+            self.load_error = f"Failed to read precomputed cache at {cache_path}: {exc}"
+            logger.warning("CachedFallbackBackend: %s", self.load_error)
+            return
+
+        if not self._cases:
+            self.load_error = f"Precomputed cache at {cache_path} has no cases recorded"
+            logger.warning("CachedFallbackBackend: %s", self.load_error)
+        else:
+            logger.info("CachedFallbackBackend serving %d precomputed case(s) from %s", len(self._cases), cache_path)
+
+    def predict(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> "PredictionResponse":
+        del auth_header  # part of the common backend surface; unused — see QKneeBackend.predict
+        if not self._cases:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No precomputed cache available for fallback inference ({self.load_error}). "
+                       "Configure BACKEND_API_URL to proxy to a full ML backend instead.",
+            )
+
+        # Deterministic case selection: same content -> same case, so a
+        # repeat upload doesn't appear to "flip" its answer between calls.
+        digest = hashlib.sha256(raw_bytes).digest()
+        index = int.from_bytes(digest[:4], "big") % len(self._cases)
+        case = self._cases[index]
+
+        risk_score = float(case.get("risk_score", 0.5))
+        diagnosis = "Tear Detected" if risk_score >= TEAR_RISK_THRESHOLD else "Normal"
+        heatmap_b64 = case.get("heatmap_base64", "")
+
+        return PredictionResponse(
+            risk_score=risk_score,
+            diagnosis=diagnosis,
+            gradcam_heatmap=heatmap_b64,
+            backend=f"cache-fallback/{case.get('case_id', 'unknown')}",
+        )
+
+
+class ProxyBackend:
+    """Forwards `/predict`/`/explain`/`/report` uploads to a full Render/
+    Docker deployment of this same API (`$BACKEND_API_URL`) over HTTP,
+    instead of running any inference locally — the intended Vercel
+    configuration: this process never imports numpy/cv2/torch/pennylane at
+    all, it's a pure HTTP router.
+
+    `httpx` (already in `requirements-vercel.txt`) does the forwarding —
+    the Authorization header from the *original* inbound request is
+    forwarded byte-for-byte (see `predict()`'s `auth_header` argument),
+    relying on both deployments sharing the same `$JWT_SECRET` so a token
+    issued by one is valid on the other.
+    """
+
+    backend_ready = True  # "ready" in the sense that requests will be served (proxied), not run locally
+    load_error: Optional[str] = None
+
+    def __init__(self, backend_api_url: str, timeout: float = 30.0) -> None:
+        self.backend_api_url = backend_api_url
+        self.timeout = timeout
+        logger.info("ProxyBackend configured — forwarding inference requests to %s", backend_api_url)
+
+    def _forward(self, path: str, raw_bytes: bytes, filename: str, auth_header: Optional[str]) -> "httpx.Response":  # type: ignore[name-defined]
+        import httpx
+
+        headers = {"Authorization": auth_header} if auth_header else {}
+        try:
+            response = httpx.post(
+                f"{self.backend_api_url}{path}",
+                files={"file": (filename, raw_bytes, "application/octet-stream")},
+                headers=headers,
+                timeout=self.timeout,
+            )
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Failed to reach backend API at {self.backend_api_url}: {exc}",
+            ) from exc
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        return response
+
+    def predict(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> "PredictionResponse":
+        response = self._forward("/predict", raw_bytes, filename, auth_header)
+        return PredictionResponse(**response.json())
+
+    def explain(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> "ExplanationResponse":
+        response = self._forward("/explain", raw_bytes, filename, auth_header)
+        return ExplanationResponse(**response.json())
+
+    def report(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> bytes:
+        """Returns the raw PDF bytes from the upstream `/report` response —
+        this process never has reportlab/PIL/numpy to build one itself."""
+        response = self._forward("/report", raw_bytes, filename, auth_header)
+        return response.content
+
+
+# --------------------------------------------------------------------------- #
 # FastAPI app
 # --------------------------------------------------------------------------- #
 
@@ -547,31 +776,50 @@ app.add_middleware(
 
 app.include_router(auth_router)
 
-# Lazy singleton: `backend` starts `None` — no `QKneeBackend()` is built,
-# and therefore no torch/torchvision/pennylane import happens, at module
+# Lazy singleton: `backend` starts `None` — no heavy backend is built, and
+# therefore no torch/torchvision/pennylane import happens, at module
 # import time. `get_backend()` below builds (and caches) the one
 # process-wide instance on the FIRST call, which only ever happens from
 # inside `/predict`/`/explain`/`/report` — never from `/health`, and never
 # from simply importing this module — so `uvicorn qknee.api.server:app`
 # reaches "Application startup complete" having paid none of that cost.
-backend: Optional[QKneeBackend] = None
+BackendType = Any  # QKneeBackend | ProxyBackend | CachedFallbackBackend — see get_backend()
+backend: Optional[BackendType] = None
 _backend_lock = threading.Lock()
 
 
-def get_backend() -> QKneeBackend:
-    """Returns the process-wide `QKneeBackend`, building it on the first
-    call (thread-safe: `/predict`/`/explain`/`/report` are `async def`s
-    but FastAPI's sync `QKneeBackend.predict`/construction still run
-    behind this lock, so two requests racing to be "first" never build
-    two backends). Every call after the first is just a `None` check.
+def get_backend() -> BackendType:
+    """Returns the process-wide backend, building it on the first call
+    (thread-safe: `/predict`/`/explain`/`/report` are `async def`s but the
+    sync construction below still runs behind this lock, so two requests
+    racing to be "first" never build two backends). Every call after the
+    first is just a `None` check.
 
-    `matplotlib.use("Agg")` is selected *before* triggering the
-    torch/pennylane import chain below, in case anything on it — now, or
-    added later — imports matplotlib: the non-interactive Agg backend
-    must be chosen before matplotlib's own first import, or it probes for
-    a GUI toolkit that doesn't exist on a headless container, which can
-    hang and/or trigger an expensive font-cache rebuild. Skipped
-    silently if matplotlib isn't installed at all.
+    Picks one of three implementations, in this precedence order:
+
+        1. `ProxyBackend`     - `$BACKEND_API_URL` is set. Forwards every
+                                 request to a full Render/Docker deployment
+                                 over HTTP; never imports numpy/cv2/torch/
+                                 pennylane. The intended Vercel config.
+        2. `CachedFallbackBackend` - `$USE_MOCK_FALLBACK` is set, OR the
+                                 heavy imaging stack (numpy/cv2) failed to
+                                 import at all (i.e. only
+                                 `requirements-vercel.txt` is installed).
+                                 Serves deterministic canned responses from
+                                 `precomputed_cache.json` — also
+                                 numpy/cv2/torch/pennylane-free.
+        3. `QKneeBackend`      - everything else (Render/Docker, the full
+                                 `requirements.txt` installed): runs real
+                                 inference, with its own internal live/mock
+                                 fallback if the PCA artifact isn't fitted.
+
+    `matplotlib.use("Agg")` is selected *before* triggering `QKneeBackend`'s
+    torch/pennylane import chain, in case anything on it — now, or added
+    later — imports matplotlib: the non-interactive Agg backend must be
+    chosen before matplotlib's own first import, or it probes for a GUI
+    toolkit that doesn't exist on a headless container, which can hang
+    and/or trigger an expensive font-cache rebuild. Skipped silently if
+    matplotlib isn't installed at all (never installed on Vercel).
     """
     global backend
     if backend is not None:
@@ -579,19 +827,44 @@ def get_backend() -> QKneeBackend:
 
     with _backend_lock:
         if backend is None:
-            try:
-                import matplotlib
+            if BACKEND_API_URL:
+                backend = ProxyBackend(BACKEND_API_URL)
+            elif USE_MOCK_FALLBACK or not _HEAVY_IMAGING_AVAILABLE:
+                if USE_MOCK_FALLBACK:
+                    logger.info("USE_MOCK_FALLBACK=true — serving from the precomputed cache.")
+                else:
+                    logger.warning(
+                        "numpy/cv2 not importable (lightweight/serverless install) and no "
+                        "BACKEND_API_URL configured — serving from the precomputed cache."
+                    )
+                backend = CachedFallbackBackend()
+            else:
+                try:
+                    import matplotlib
 
-                matplotlib.use("Agg")
-            except ImportError:
-                pass
-            backend = QKneeBackend()
+                    matplotlib.use("Agg")
+                except ImportError:
+                    pass
+                backend = QKneeBackend()
     return backend
+
+
+def _planned_backend_mode() -> str:
+    """Which backend `get_backend()` *would* build, computed from plain
+    env vars/import-availability flags only — never actually triggers the
+    lazy construction. Used by `/health` so a readiness probe can report
+    the intended routing mode even before the first `/predict` request."""
+    if BACKEND_API_URL:
+        return "proxy"
+    if USE_MOCK_FALLBACK or not _HEAVY_IMAGING_AVAILABLE:
+        return "cache-fallback"
+    return "live-or-mock"
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
 def health() -> HealthResponse:
     """Reports whether the live QKneeModel backend loaded successfully,
+    which of the three backend implementations is (or will be) active,
     plus which storage backends are actually active for the user store and
     the cache — useful to confirm a configured `$DATABASE_URL`/`$REDIS_URL`
     actually connected, rather than silently degrading to the local
@@ -608,6 +881,7 @@ def health() -> HealthResponse:
             status="ok",
             backend_ready=False,
             detail="Model backend not yet loaded (lazy-initializes on the first /predict, /explain, or /report request).",
+            mode=_planned_backend_mode(),
             user_store_backend=type(user_store).__name__,
             cache_backend=cache_service.backend_name,
         )
@@ -615,6 +889,7 @@ def health() -> HealthResponse:
         status="ok",
         backend_ready=backend.backend_ready,
         detail=backend.load_error,
+        mode=_planned_backend_mode(),
         user_store_backend=type(user_store).__name__,
         cache_backend=cache_service.backend_name,
     )
@@ -630,17 +905,28 @@ def _predict_cache_key(raw_bytes: bytes) -> str:
     return f"predict:{hashlib.sha256(raw_bytes).hexdigest()}"
 
 
-def _decode_png_base64(png_base64: str) -> np.ndarray:
+def _decode_png_base64(png_base64: str) -> "np.ndarray":
     """Inverse of `QKneeBackend._encode_png_base64` — decodes a cached/
     fresh `PredictionResponse.gradcam_heatmap` back into a `(H, W, 3)` BGR
     array, for `/report` to hand to `generate_radiology_report` (which
-    wants a raw overlay array, not a base64 PNG string)."""
+    wants a raw overlay array, not a base64 PNG string).
+
+    Only ever called from the `QKneeBackend` branch of `/report` (see
+    below), which itself only runs when `_HEAVY_IMAGING_AVAILABLE` is
+    True — the guard here is defense-in-depth, not the primary gate."""
+    if not _HEAVY_IMAGING_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="PDF report generation requires numpy/opencv, which are not installed in this "
+                   "deployment. Configure BACKEND_API_URL to proxy /report to a full backend instead.",
+        )
     png_bytes = base64.b64decode(png_base64)
     return cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
 async def predict(
+    request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
     current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
 ) -> PredictionResponse:
@@ -654,7 +940,13 @@ async def predict(
     backward pass) is routed through `CacheService`, keyed on the
     uploaded file's content hash — a repeat upload of the same slice
     (including one that arrives via `/explain` instead) is served from
-    cache rather than re-run."""
+    cache rather than re-run.
+
+    On a lightweight/serverless deployment (`get_backend()` returns a
+    `ProxyBackend`), this call is forwarded to `$BACKEND_API_URL` instead
+    of running locally — the inbound `Authorization` header is passed
+    through unchanged so the upstream deployment's own auth gate sees the
+    same bearer token."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -666,13 +958,15 @@ async def predict(
         logger.debug("POST /predict cache hit (key=%s)", cache_key)
         return PredictionResponse(**cached)
 
-    result = get_backend().predict(raw_bytes, file.filename or "upload")
+    auth_header = request.headers.get("authorization")
+    result = get_backend().predict(raw_bytes, file.filename or "upload", auth_header=auth_header)
     await cache_service.set(cache_key, result.model_dump(), ttl=_config.storage.cache_ttl_seconds)
     return result
 
 
 @app.post("/explain", response_model=ExplanationResponse, tags=["Inference"])
 async def explain(
+    request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
     current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
 ) -> ExplanationResponse:
@@ -680,10 +974,11 @@ async def explain(
     Q-Knee pipeline and returns just its Grad-CAM explainability heatmap
     (plus the risk score for context) — the explanation-focused
     counterpart to /predict. Shares /predict's exact upload contract, auth
-    requirement, file parsing, error handling, and `CacheService` entry
-    (same content-hash key — an /predict then /explain round-trip on the
-    same file only ever runs the pipeline once), so a client can point
-    either endpoint at the same file with the same bearer token."""
+    requirement, file parsing, error handling, `CacheService` entry (same
+    content-hash key — an /predict then /explain round-trip on the same
+    file only ever runs the pipeline once), and proxy-forwarding behavior
+    on a lightweight/serverless deployment, so a client can point either
+    endpoint at the same file with the same bearer token."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -695,7 +990,8 @@ async def explain(
         logger.debug("POST /explain cache hit (key=%s)", cache_key)
         prediction = PredictionResponse(**cached)
     else:
-        prediction = get_backend().predict(raw_bytes, file.filename or "upload")
+        auth_header = request.headers.get("authorization")
+        prediction = get_backend().predict(raw_bytes, file.filename or "upload", auth_header=auth_header)
         await cache_service.set(cache_key, prediction.model_dump(), ttl=_config.storage.cache_ttl_seconds)
 
     return ExplanationResponse(
@@ -707,6 +1003,7 @@ async def explain(
 
 @app.post("/report", tags=["Inference"])
 async def report(
+    request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
     current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
 ):
@@ -720,11 +1017,14 @@ async def report(
     `reportlab` (via `qknee.xai.report_generator`) is imported lazily,
     right here, so a server that never receives a /report request never
     pays its import cost — matching /predict's and /explain's own
-    lazy-loaded torch/torchvision/pennylane."""
-    from fastapi.responses import Response
+    lazy-loaded torch/torchvision/pennylane.
 
-    from qknee.xai.report_generator import generate_radiology_report
-
+    Building a PDF needs numpy/PIL/reportlab regardless of backend, so
+    this endpoint has no local fallback on a lightweight/serverless
+    deployment: a `ProxyBackend` forwards the whole request (and its raw
+    PDF response) to `$BACKEND_API_URL` unchanged; a `CachedFallbackBackend`
+    (no proxy configured, heavy imaging unavailable) 503s with a clear
+    explanation instead of crashing on a missing import."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -732,6 +1032,35 @@ async def report(
     logger.info("POST /report by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
 
     active_backend = get_backend()
+
+    if isinstance(active_backend, ProxyBackend):
+        from fastapi.responses import Response
+
+        auth_header = request.headers.get("authorization")
+        pdf_bytes = active_backend.report(raw_bytes, file.filename or "upload", auth_header=auth_header)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="qknee_diagnostic_report.pdf"'},
+        )
+
+    if not isinstance(active_backend, QKneeBackend):
+        # CachedFallbackBackend: precomputed_cache.json has no raw image
+        # array to build a PDF from, and this process may not even have
+        # numpy/PIL/reportlab installed (serverless/lightweight install) —
+        # there's no local fallback for report generation, only proxying
+        # (handled above) or a clear error.
+        raise HTTPException(
+            status_code=503,
+            detail="PDF report generation requires a full ML backend (numpy/opencv/reportlab), "
+                   "which is not active in this deployment (serving from the precomputed cache). "
+                   "Configure BACKEND_API_URL to proxy /report to a full backend instead.",
+        )
+
+    from fastapi.responses import Response
+
+    from qknee.xai.report_generator import generate_radiology_report
+
     display_slice = active_backend._normalize_uint8(active_backend.load_slice(raw_bytes, file.filename or "upload"))
 
     cache_key = _predict_cache_key(raw_bytes)

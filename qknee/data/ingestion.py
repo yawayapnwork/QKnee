@@ -314,7 +314,14 @@ class DataIngestion:
                 recognizable DICOM series, or GDCM/ITK fails to read the
                 series (corrupted headers, unreadable transfer syntax, etc).
         """
-        import SimpleITK as sitk
+        try:
+            import SimpleITK as sitk
+        except ImportError as exc:
+            raise IngestionError(
+                "Reading a DICOM series via backend='sitk' requires the optional 'SimpleITK' "
+                "dependency (pip install SimpleITK) — not installed in a lightweight/serverless "
+                "deployment. Use the default pydicom-based series reader instead."
+            ) from exc
 
         if not directory.is_dir():
             raise IngestionError(f"'{directory}' is not a directory.")
