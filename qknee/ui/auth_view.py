@@ -554,13 +554,19 @@ def render_global_navbar() -> None:
 
     active = _active_nav_item()
 
-    brand_col, nav_col, status_col = st.columns([1.3, 2.1, 2.0])
+    # Unequal column weights, not an equal 3-way split: "Performance
+    # Benchmarks" is roughly twice as many characters as "Workstation" —
+    # forcing all three pills to the same width is what was clipping it.
+    # `status_col` needs enough of its own room for both the status pill
+    # and "Clinician Portal" side by side — too little here is what made
+    # it visually overlap the last nav pill.
+    brand_col, nav_col, status_col = st.columns([1.0, 2.6, 2.1])
 
     with brand_col:
         st.markdown(
             f'<div style="display:flex; align-items:center; height:2.2rem;">'
             f'<span class="qknee-brand-mark">Q</span>'
-            f'<div><div style="font-weight:800; font-size:0.95rem; color:{theme.FOREST_GREEN}; '
+            f'<div><div style="font-weight:800; font-size:0.95rem; color:{theme.STERILE_WHITE}; '
             f'letter-spacing:-0.01em; text-transform:uppercase;">Q-Knee Clinical Workstation</div>'
             f'<div style="font-size:0.66rem; color:{theme.TEXT_MUTED}; letter-spacing:0.04em;">'
             f'Orthopedic MRI Research Division</div>'
@@ -569,24 +575,32 @@ def render_global_navbar() -> None:
         )
 
     with nav_col:
-        pill_cols = st.columns(3)
-        nav_items = [
-            (_NAV_ITEM_WORKSTATION, landing_page.VIEW_DIAGNOSTIC),
-            (_NAV_ITEM_BENCHMARKS, landing_page.VIEW_BENCHMARK),
-            (_NAV_ITEM_AUDIT, None),
-        ]
-        for pill_col, (label, view) in zip(pill_cols, nav_items):
-            with pill_col:
-                button_type = "primary" if label == active else "secondary"
-                if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
-                    if view is not None:
-                        _go_to_workspace_tab(view)
-                    else:
-                        st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
-                        st.rerun()
+        # `key="qknee_navbar"` gives this container a real, stable wrapper
+        # div (Streamlit's `.st-key-qknee_navbar` class) that genuinely
+        # nests everything rendered inside it — unlike separate
+        # `st.markdown` calls, this is how `theme.inject_clinical_theme()`'s
+        # `.st-key-qknee_navbar .stButton > button` rule actually reaches
+        # only these three pills (active-tab slate highlight, min-width
+        # against clipping) without also restyling every other button.
+        with st.container(key="qknee_navbar"):
+            pill_cols = st.columns([1.0, 1.7, 1.2])
+            nav_items = [
+                (_NAV_ITEM_WORKSTATION, landing_page.VIEW_DIAGNOSTIC),
+                (_NAV_ITEM_BENCHMARKS, landing_page.VIEW_BENCHMARK),
+                (_NAV_ITEM_AUDIT, None),
+            ]
+            for pill_col, (label, view) in zip(pill_cols, nav_items):
+                with pill_col:
+                    button_type = "primary" if label == active else "secondary"
+                    if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
+                        if view is not None:
+                            _go_to_workspace_tab(view)
+                        else:
+                            st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
+                            st.rerun()
 
     with status_col:
-        right_cols = st.columns([1.5, 1])
+        right_cols = st.columns([1.3, 1.3])
         with right_cols[0]:
             st.markdown(
                 '<div style="display:flex; align-items:center; height:2.2rem; justify-content:flex-end;">'

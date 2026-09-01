@@ -265,7 +265,7 @@ class TestLandingPageRendering:
     def test_showcase_preview_click_reveals_the_case_risk_metric(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        preview_button = next(b for b in at.button if "View Case Detail" in b.label)
+        preview_button = next(b for b in at.button if "Load Study" in b.label)
 
         preview_button.click().run()
 
@@ -277,5 +277,5 @@ class TestLandingPageRendering:
         at.run()
 
         assert not at.exception
-        preview_buttons = [b for b in at.button if "View Case Detail" in b.label]
+        preview_buttons = [b for b in at.button if "Load Study" in b.label]
         assert len(preview_buttons) == len(landing_page.SHOWCASE_CASE_IDS)

@@ -165,29 +165,29 @@ def _decode_case_overlay(case: Dict) -> Optional[np.ndarray]:
 _HERO_CSS = f"""
 <style>
 .qknee-hero {{
-    padding: 2.2rem 2rem 1.7rem 2rem;
+    padding: 2.4rem 2rem 2rem 2rem;
     border-radius: {theme.RADIUS_SHARP};
-    background: linear-gradient(135deg, {theme.SURFACE_IVORY} 0%, {theme.SAGE_TINT}55 100%);
+    background: radial-gradient(ellipse at top, {theme.DIAGNOSTIC_BLUE}14 0%, {theme.CARD_SURFACE} 55%);
     border: 1px solid {theme.BORDER_GREY};
     box-shadow: {theme.CARD_SHADOW};
-    margin-bottom: 1.2rem;
+    margin-bottom: 0;
     text-align: center;
 }}
 .qknee-hero-eyebrow {{
-    color: {theme.SAGE_GREEN};
-    letter-spacing: 0.12em;
-    font-size: 0.76rem;
+    color: {theme.DIAGNOSTIC_BLUE};
+    letter-spacing: 0.14em;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    margin-bottom: 0.6rem;
+    margin-bottom: 0.7rem;
 }}
 .qknee-hero-title {{
-    font-size: 2.6rem;
+    font-size: 2.7rem;
     font-weight: 800;
     line-height: 1.1;
     letter-spacing: -0.02em;
-    margin: 0 0 0.5rem 0;
-    color: {theme.FOREST_GREEN};
+    margin: 0 0 0.6rem 0;
+    color: {theme.STERILE_WHITE};
 }}
 .qknee-hero-tagline {{
     font-size: 1.05rem;
@@ -209,40 +209,45 @@ _HERO_CSS = f"""
 # --------------------------------------------------------------------------- #
 
 def render_hero() -> None:
-    """Hero title/tagline, three formal capability-summary cards, and the
-    two primary CTA buttons. The institutional masthead/navbar and NISQ
-    disclosure are rendered once, globally, by `dashboard.main()` — this
-    function must not re-render them."""
+    """ONE definitive hero block (eyebrow tag / H1 / subtitle), the NISQ
+    disclosure as a compact banner directly beneath it, three glassmorphic
+    capability cards, and the two primary CTA buttons. The institutional
+    top navbar is rendered once, globally, by `dashboard.main()` — this
+    function must not re-render it."""
     st.markdown(_HERO_CSS, unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="qknee-hero">
-            <div class="qknee-hero-eyebrow">Quantum-Assisted Orthopedic MRI Triage</div>
-            <div class="qknee-hero-title">Q-KNEE Diagnostic Workstation</div>
+            <div class="qknee-hero-eyebrow">Quantum-Assisted Radiological Triage</div>
+            <div class="qknee-hero-title">Q-Knee Diagnostic Platform</div>
             <div class="qknee-hero-tagline">{TAGLINE}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    theme.render_disclosure_banner()
 
     n_qubits = _config.quantum.n_qubits
     n_layers = _config.quantum.n_layers
     feature_dim = _config.resnet.feature_dim
     reduction_pct = _parameter_reduction_pct()
     latency_ms = _quantum_latency_ms()
-    latency_display = f"{latency_ms:.1f} ms" if latency_ms is not None else "Pending Benchmark Run"
+    latency_display = f"{latency_ms:.1f} ms latency" if latency_ms is not None else "Benchmark pending"
 
-    st.markdown('<div class="qknee-eyebrow">Capability Summary</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-eyebrow">Technical Capability Summary</div>', unsafe_allow_html=True)
     card_col1, card_col2, card_col3 = st.columns(3)
     with card_col1:
         st.markdown(
             f"""
-            <div class="qknee-card">
+            <div class="qknee-card-glass">
+                <span class="qknee-card-pill">ResNet-18 Backbone</span>
                 <div class="qknee-card-title">High-Dimensional Feature Extraction</div>
                 <div class="qknee-card-body">
-                    ResNet18 convolutional backbone, ImageNet-pretrained and frozen, projecting each
-                    slice into a {feature_dim}-dimensional embedding — the radiological ingestion
-                    pipeline every downstream stage consumes.
+                    ImageNet-pretrained and frozen, projecting each slice into a dense embedding —
+                    the radiological ingestion pipeline every downstream stage consumes.
+                </div>
+                <div>
+                    <span class="qknee-card-metric">{feature_dim}-dim</span>
                 </div>
             </div>
             """,
@@ -251,12 +256,16 @@ def render_hero() -> None:
     with card_col2:
         st.markdown(
             f"""
-            <div class="qknee-card">
+            <div class="qknee-card-glass">
+                <span class="qknee-card-pill">CV Angle Encoding</span>
                 <div class="qknee-card-title">{n_qubits}-Qubit Variational Quantum Kernel</div>
                 <div class="qknee-card-body">
                     Continuous-variable angle encoding into a {n_layers}-layer entangled circuit —
                     a {reduction_pct:.1f}% trainable-parameter reduction versus an equivalent
-                    classical bottleneck. Measured per-sample latency: {latency_display}.
+                    classical bottleneck.
+                </div>
+                <div>
+                    <span class="qknee-card-metric">{latency_display}</span>
                 </div>
             </div>
             """,
@@ -265,12 +274,15 @@ def render_hero() -> None:
     with card_col3:
         st.markdown(
             """
-            <div class="qknee-card">
+            <div class="qknee-card-glass">
+                <span class="qknee-card-pill">Grad-CAM XAI</span>
                 <div class="qknee-card-title">Spatial Explainability Engine</div>
                 <div class="qknee-card-body">
-                    Gradient-Weighted Class Activation Mapping (Grad-CAM) backpropagated from the
-                    predicted risk score itself, for quantitative lesion localization and
-                    per-qubit attribution breakdown at inference time.
+                    Gradient-Weighted Class Activation Mapping backpropagated from the predicted
+                    risk score itself, for quantitative lesion localization at inference time.
+                </div>
+                <div>
+                    <span class="qknee-card-metric">Pauli-Z Expectation</span>
                 </div>
             </div>
             """,

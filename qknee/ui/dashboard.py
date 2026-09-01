@@ -607,10 +607,15 @@ def normalize_for_display(slice_2d: np.ndarray) -> np.ndarray:
 
 def render_header() -> None:
     """Renders the single top-level frame shared by every page: page
-    config, the clinical design-system CSS, the global pill navbar, and
-    the collapsible NISQ disclosure. Called exactly once from `main()` —
-    subpages (`landing_page`, workspace tabs) must never re-render these,
-    or the masthead/disclosure duplicate on screen."""
+    config, the clinical design-system CSS, and the global tab-bar navbar.
+    Called exactly once from `main()` — subpages (`landing_page`, workspace
+    tabs) must never re-render these, or the navbar duplicates on screen.
+
+    The NISQ disclosure banner is deliberately NOT rendered here: it now
+    sits directly under the landing page's hero block (see
+    `qknee.ui.landing_page.render_hero`), not globally under the navbar —
+    the workstation/benchmark tabs still carry `theme.NOT_A_DEVICE_FOOTNOTE`
+    in their own page-bottom captions."""
     st.set_page_config(
         page_title="Q-Knee Diagnostic Workstation",
         page_icon=theme.CLINICAL_GLYPH,
@@ -619,7 +624,6 @@ def render_header() -> None:
     )
     theme.inject_clinical_theme()
     auth_view.render_global_navbar()
-    theme.render_disclosure_banner()
 
 
 def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]) -> None:
@@ -1362,12 +1366,22 @@ def main() -> None:
     if precomputed_cache is not None:
         st.sidebar.caption(f"Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
+    # `.clinical-container`'s real width-capping/centering effect comes
+    # from `theme.inject_clinical_theme()`'s CSS rule against Streamlit's
+    # own `.block-container` element (see that docstring) — these open/
+    # close markers exist for markup clarity and CSS-class targeting of
+    # anything else scoped under them, not because the tag itself spans
+    # and nests the separately-rendered widgets in between.
+    st.markdown('<div class="clinical-container">', unsafe_allow_html=True)
+
     if current_page in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
         auth_view.render_auth_page(default_tab=current_page)
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     if current_page != auth_view.PAGE_WORKSPACE:
         render_landing_page()
+        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     st.sidebar.markdown("---")
@@ -1392,6 +1406,8 @@ def main() -> None:
 
     with tabs_by_label[benchmark_label]:
         render_benchmark_tab()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
