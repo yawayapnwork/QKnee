@@ -39,7 +39,7 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
-from qknee.ui import auth_view
+from qknee.ui import auth_view, theme
 from qknee.ui.landing_page import (
     VIEW_BENCHMARK,
     VIEW_DIAGNOSTIC,
@@ -600,51 +600,38 @@ def normalize_for_display(slice_2d: np.ndarray) -> np.ndarray:
 
 def render_header() -> None:
     st.set_page_config(
-        page_title="Q-Knee Diagnostic Dashboard",
-        page_icon="🦵",
+        page_title="Q-Knee Diagnostic Workstation",
+        page_icon=theme.CLINICAL_GLYPH,
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    st.markdown(
-        """
-        <style>
-        .qknee-banner {
-            padding: 0.9rem 1.2rem;
-            border-radius: 0.6rem;
-            background: linear-gradient(90deg, #101820 0%, #16222A 100%);
-            border: 1px solid #22303C;
-            margin-bottom: 1rem;
-        }
-        .qknee-disclaimer {
-            font-size: 0.78rem;
-            color: #8B949E;
-            margin-top: -0.4rem;
-        }
-        </style>
-        <div class="qknee-banner">
-            <h2 style="margin-bottom:0;">🦵 Q-Knee Diagnostic Dashboard</h2>
-            <span class="qknee-disclaimer">
-                Research prototype — quantum-assisted ACL / meniscal tear risk triage.
-                Not a certified medical device. Not for clinical use.
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    theme.inject_clinical_theme()
+    theme.render_institutional_masthead(active_module="Diagnostic Dashboard")
+    theme.render_disclosure_banner()
+    st.markdown('<div class="qknee-eyebrow">Diagnostic Workstation</div>', unsafe_allow_html=True)
+    st.caption("Quantum-assisted ACL / medial meniscus tear-risk triage console.")
 
 
 def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]) -> None:
-    st.sidebar.markdown("### Quantum Backend Status")
+    st.sidebar.markdown("### Quantum Kernel Status")
     if mode == "api":
-        st.sidebar.markdown(f"🔵 **HTTP API Mode** — querying `{api_url}/predict`")
+        st.sidebar.markdown(
+            f'<span class="qknee-badge qknee-badge-info">API MODE</span> Querying `{api_url}/predict`',
+            unsafe_allow_html=True,
+        )
         st.sidebar.caption("Inference runs in the API container; per-stage latency is not reported this way.")
     elif backend_ready:
         st.sidebar.markdown(
-            "🟢 **NISQ Simulator Active** — PennyLane `default.qubit`, 4 qubits"
+            '<span class="qknee-badge qknee-badge-low">KERNEL ONLINE</span> '
+            "NISQ Simulator Active — PennyLane `default.qubit`, 4 qubits",
+            unsafe_allow_html=True,
         )
         st.sidebar.caption("Angle-encoded VQC · variational depth = 3 layers")
     else:
-        st.sidebar.markdown("🟡 **Mock Mode** — quantum backend unavailable")
+        st.sidebar.markdown(
+            '<span class="qknee-badge qknee-badge-moderate">SIMULATION MODE</span> Quantum kernel unavailable',
+            unsafe_allow_html=True,
+        )
         backend_error = st.session_state.get("_backend_error")
         if backend_error:
             st.sidebar.caption(f"Reason: {backend_error}")
@@ -657,31 +644,30 @@ def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]
 
 def render_risk_gauge(label: str, value: Optional[float]) -> None:
     if value is None:
-        st.metric(label=f"⚪ {label} Tear Risk", value="N/A", delta="unavailable in API mode")
+        st.metric(label=f"{label} Tear Risk", value="N/A", delta="unavailable in API mode")
+        st.markdown('<span class="qknee-badge qknee-badge-neutral">UNAVAILABLE</span>', unsafe_allow_html=True)
         st.progress(0.0)
         return
 
-    if value >= 0.66:
-        color, tier = "🔴", "HIGH"
-    elif value >= 0.33:
-        color, tier = "🟠", "MODERATE"
-    else:
-        color, tier = "🟢", "LOW"
-
-    st.metric(label=f"{color} {label} Tear Risk", value=f"{value * 100:.1f}%", delta=tier)
+    _, tier = theme.risk_tier(value)
+    st.metric(label=f"{label} Tear Risk", value=f"{value * 100:.1f}%", delta=tier)
+    st.markdown(theme.risk_badge_html(label, value), unsafe_allow_html=True)
+    st.markdown(f'<div class="qknee-ci">{theme.format_confidence_interval(value)}</div>', unsafe_allow_html=True)
     st.progress(min(max(value, 0.0), 1.0))
 
 
 def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> None:
-    """Renders the Grad-CAM panel. When the raw heatmap is available
-    (`result.gradcam_heatmap` — live/mock/cached backends), an opacity
-    slider re-blends it onto `display_slice` live via
-    `qknee.xai.gradcam.overlay_heatmap` on every drag — no re-inference,
-    just a resize + colormap + `cv2.addWeighted`, so it's effectively
-    free. HTTP API mode only ever returns a pre-blended overlay, so the
-    slider is hidden there and the static image is shown instead."""
+    """Renders the Quantitative Lesion Localization (Grad-CAM) panel. When
+    the raw heatmap is available (`result.gradcam_heatmap` — live/mock/
+    cached backends), a discrete opacity slider (0%-100%) and a clinically
+    standard color-scale selector re-blend it onto `display_slice` live via
+    `qknee.xai.gradcam.overlay_heatmap` on every interaction — no
+    re-inference, just a resize + colormap + `cv2.addWeighted`, so it's
+    effectively free. HTTP API mode only ever returns a pre-blended
+    overlay, so the controls are hidden there and the static image is
+    shown instead."""
     is_api = result.backend.startswith("api")
-    st.markdown(f"#### Grad-CAM ({'unified' if is_api else 'ACL'} risk)")
+    st.markdown(f"#### Quantitative Lesion Localization ({'unified' if is_api else 'ACL'} risk)")
 
     caption = (
         "Regions driving the predicted risk score"
@@ -692,31 +678,44 @@ def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> 
     if result.gradcam_heatmap is not None:
         from qknee.xai.gradcam import overlay_heatmap
 
-        # `overlay_heatmap` resizes/colormaps the raw heatmap then blends it
-        # onto `display_slice` via `cv2.addWeighted(color_heatmap, opacity,
-        # slice_bgr, 1 - opacity, 0)` — a resize + colormap + weighted-sum,
-        # effectively free, so this slider re-blends live on every drag
-        # with no re-inference.
-        opacity = st.slider(
-            "Heatmap Overlay Opacity", 0.0, 1.0, 0.45, step=0.05,
-            key=f"gradcam_opacity_{result.backend}",
-            help="Blends the raw Grad-CAM heatmap onto the slice live via cv2.addWeighted — no re-inference needed.",
+        control_col1, control_col2 = st.columns([1, 1])
+        with control_col1:
+            colormap_names = list(theme.CLINICAL_COLORMAPS.keys())
+            colormap_name = st.selectbox(
+                "Attribution Color Scale", colormap_names,
+                index=colormap_names.index(theme.DEFAULT_COLORMAP_NAME),
+                key=f"gradcam_colormap_{result.backend}",
+            )
+        with control_col2:
+            # `overlay_heatmap` resizes/colormaps the raw heatmap then blends
+            # it onto `display_slice` via `cv2.addWeighted(color_heatmap,
+            # opacity, slice_bgr, 1 - opacity, 0)` — a resize + colormap +
+            # weighted-sum, effectively free, so this slider re-blends live
+            # on every drag with no re-inference. Discrete 5% steps, 0%-100%.
+            opacity_pct = st.slider(
+                "Attribution Overlay Opacity", min_value=0, max_value=100, value=45, step=5,
+                format="%d%%",
+                key=f"gradcam_opacity_{result.backend}",
+                help="Blends the attribution overlay onto the slice live — no re-inference needed.",
+            )
+        overlay = overlay_heatmap(
+            result.gradcam_heatmap, display_slice,
+            alpha=opacity_pct / 100.0, colormap=theme.CLINICAL_COLORMAPS[colormap_name],
         )
-        overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=opacity)
         st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
     elif result.gradcam_overlay is not None:
         st.image(result.gradcam_overlay, channels="BGR", use_container_width=True, caption=caption)
-        st.caption("Opacity control unavailable — this backend only returns a pre-rendered overlay.")
+        st.caption("Overlay controls unavailable — this backend only returns a pre-rendered overlay.")
     else:
-        st.info("Grad-CAM overlay unavailable for this slice.")
+        st.info("Attribution overlay unavailable for this slice.")
 
 
 def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray]) -> None:
-    """Quantum Decision Metrics panel's bar chart: the 4-qubit circuit's
-    raw per-qubit Pauli-Z expectation values, each in `[-1.0, 1.0]` — the
-    quantum circuit's own measurement output, shown before the classical
-    readout layer collapses it into one risk probability, so a viewer can
-    see how each qubit individually contributed to the (ACL) prediction.
+    """Quantum State Attribution Metrics panel's bar chart: the 4-qubit
+    circuit's raw per-qubit Pauli-Z expectation values, each in
+    `[-1.0, 1.0]` — the quantum circuit's own measurement output, mapping
+    Hilbert-space rotations directly to feature impact, shown before the
+    classical readout layer collapses it into one risk probability.
 
     Renders an info message instead of a chart if `pauli_z_expectations`
     is `None` (unavailable for this backend — e.g. HTTP API mode).
@@ -730,16 +729,17 @@ def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray])
     fig.patch.set_alpha(0.0)
     ax.set_facecolor("none")
 
-    colors_ = ["#2ECC71" if value >= 0 else "#E74C3C" for value in pauli_z_expectations]
+    colors_ = [theme.SURGICAL_TEAL if value >= 0 else theme.RISK_HIGH for value in pauli_z_expectations]
     qubit_labels = [f"Q{i}" for i in range(n_qubits)]
     ax.bar(qubit_labels, pauli_z_expectations, color=colors_, edgecolor="none")
-    ax.axhline(0.0, color="#8B949E", linewidth=0.8)
+    ax.axhline(0.0, color=theme.TEXT_MUTED, linewidth=0.8)
 
     ax.set_ylim(-1.0, 1.0)
-    ax.set_ylabel("⟨Z⟩", color="#E6EDF3")
-    ax.tick_params(colors="#E6EDF3")
+    ax.set_ylabel("Pauli-Z Expectation ⟨Z⟩", color=theme.STERILE_WHITE)
+    ax.set_title("Hilbert-Space Rotation Attribution", color=theme.STERILE_WHITE, fontsize=10)
+    ax.tick_params(colors=theme.STERILE_WHITE)
     for spine in ax.spines.values():
-        spine.set_color("#8B949E")
+        spine.set_color(theme.TEXT_MUTED)
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
@@ -748,7 +748,7 @@ def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray])
 
 
 def render_latency_metrics(result: InferenceResult) -> None:
-    st.markdown("#### Processing Latency")
+    st.markdown("#### Pipeline Latency Profile")
     if result.backend.startswith("api"):
         st.metric("HTTP Round-Trip", f"{result.total_latency_ms:.1f} ms")
         st.caption(f"Per-stage timing isn't reported over HTTP ({result.backend} backend).")
@@ -859,27 +859,27 @@ def load_cached_case(case: Dict) -> Tuple[np.ndarray, InferenceResult]:
 
 
 def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
-    """Renders the 'Judge Mode' sidebar toggle that bypasses live/mock
-    inference entirely and replays one of `precomputed_cache.json`'s 10
-    pre-scored cases straight from process memory (each case's Grad-CAM
-    overlay is embedded as base64, so serving it costs no filesystem read,
-    no model load, and no QNode execution) — insurance against a live
-    hackathon-judging session timing out on a cold model or a slow-CPU
-    inference. Returns `(use_fast_path, selected_case)`."""
+    """Renders the Clinical Action Bar's 'Toggle NISQ Acceleration Cache'
+    control — bypasses live/mock inference entirely and replays one of
+    `precomputed_cache.json`'s 10 pre-scored cases straight from process
+    memory (each case's Grad-CAM overlay is embedded as base64, so
+    serving it costs no filesystem read, no model load, and no QNode
+    execution) — a low-latency demonstration mode for time-constrained
+    review. Returns `(use_fast_path, selected_case)`."""
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🏎️ Judge Mode")
+    st.sidebar.markdown("### Clinical Action Bar")
+    st.sidebar.caption("NISQ Acceleration Cache")
 
     cache = load_precomputed_cache()
     cases: List[Dict] = (cache or {}).get("cases", [])
 
     use_fast_path = st.sidebar.toggle(
-        "Enable NISQ Simulation Fast-Path (0-latency Cache)",
+        "Toggle NISQ Acceleration Cache",
         value=False,
         disabled=not cases,
         help=f"Instantly replays one of {len(cases)} precomputed case(s) from "
              f"`{PRECOMPUTED_CACHE_PATH}` — zero model load, zero QNode "
-             "execution — for judge-facing demos where live inference "
-             "latency risks a UI timeout.",
+             "execution — a low-latency demonstration mode for time-constrained review.",
     )
 
     if not cases:
@@ -889,13 +889,13 @@ def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
         )
         return False, None
     if not use_fast_path:
-        st.sidebar.caption(f"{len(cases)} fast-path case(s) available.")
+        st.sidebar.caption(f"{len(cases)} accelerated case(s) available.")
         return False, None
 
     case_labels = [f"{case['case_id']} ({case.get('plane', '?')})" for case in cases]
-    selected_label = st.sidebar.selectbox("Fast-Path Case", case_labels)
+    selected_label = st.sidebar.selectbox("Accelerated Case", case_labels)
     selected_case = cases[case_labels.index(selected_label)]
-    st.sidebar.success(f"⚡ Serving '{selected_case['case_id']}' from cache — 0 ms inference.")
+    st.sidebar.success(f"Serving '{selected_case['case_id']}' from the acceleration cache — 0 ms inference.")
     return True, selected_case
 
 
@@ -950,7 +950,7 @@ def render_demo_cache_sidebar() -> Tuple[bool, Optional[Dict]]:
     `selected_case` is `None` unless `use_cache` is True and at least one
     case is available."""
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### ⚡ Demo Mode")
+    st.sidebar.markdown("### Cached Case Replay")
 
     cache_index = load_demo_cache_index()
     cache_available = bool(cache_index)
@@ -990,7 +990,7 @@ def render_benchmark_tab() -> None:
     — ROC-AUC comparison and inference-latency-per-sample side by side, plus
     a full metrics table (F1/Precision/Recall/Confusion Matrix are in the
     underlying JSON; the table below surfaces the headline numbers)."""
-    st.markdown("### Quantum vs. Classical Benchmark")
+    st.markdown("### Quantitative Benchmark Analysis — Quantum vs. Classical Architectures")
     st.caption(
         "Offline comparison of three architectures on the same MRNet-style validation "
         "subset (see `scripts/run_benchmark.py`) — not re-run live. Re-run that script to refresh."
@@ -1049,7 +1049,7 @@ def render_benchmark_tab() -> None:
 
     circuit_diagram_path = DECK_FIGURES_DIR / "circuit_diagram.png"
     if circuit_diagram_path.exists():
-        with st.expander("🧬 Quantum Circuit Diagram (reference)"):
+        with st.expander("Quantum Circuit Diagram (Reference)"):
             st.image(str(circuit_diagram_path), use_container_width=True)
 
     st.markdown("#### Full Metrics")
@@ -1069,11 +1069,11 @@ def render_benchmark_tab() -> None:
 
 
 def render_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
-    """Renders a 'Download Radiology PDF Report' button, in the summary
-    (Tear Risk Assessment) panel, compiling the current slice, Grad-CAM
-    overlay, and ACL/meniscus risk scores into a one-page radiology-style
-    PDF via `qknee.xai.report_generator`. A failed generation degrades to
-    a warning rather than crashing the dashboard."""
+    """Clinical Action Bar item: "Generate Formal Diagnostic Report (PDF)"
+    — compiling the current slice, Grad-CAM overlay, and ACL/meniscus
+    risk scores into a one-page radiology-style PDF via
+    `qknee.xai.report_generator`. A failed generation degrades to a
+    warning rather than crashing the dashboard."""
     from qknee.xai.gradcam import overlay_heatmap
     from qknee.xai.report_generator import generate_radiology_report
 
@@ -1084,7 +1084,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
     if gradcam_overlay is None and result.gradcam_heatmap is not None:
         gradcam_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
 
-    st.markdown("#### Report")
+    st.markdown("#### Clinical Action Bar")
     try:
         pdf_bytes = generate_radiology_report(
             output_path=None,
@@ -1105,13 +1105,13 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
             },
             metadata={
                 "modality": "MRI Knee",
-                "clinical_indication": "Q-Knee dashboard session",
+                "clinical_indication": "Q-Knee diagnostic workstation session",
                 "scan_date": datetime.now().strftime("%Y-%m-%d"),
             },
         )
     except Exception as exc:  # noqa: BLE001 - a failed report shouldn't crash the dashboard
         logger.warning("PDF report generation failed: %s", exc)
-        st.warning("Could not generate the PDF report for this slice.")
+        st.warning("Unable to generate the formal diagnostic report for this study.")
         return
     finally:
         # reportlab's Canvas, the PIL images it wraps around
@@ -1125,11 +1125,12 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
         _release_inference_memory()
 
     st.download_button(
-        label="📄 Download Radiology PDF Report",
+        label="Generate Formal Diagnostic Report (PDF)",
         data=pdf_bytes,
-        file_name=f"qknee_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+        file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
         use_container_width=True,
+        type="primary",
     )
 
 
@@ -1147,21 +1148,21 @@ def render_diagnostic_tab() -> None:
     # where there's no HTTP boundary to enforce it at.
     if not auth_view.is_authenticated():
         st.info(
-            "🔒 Sign in to access the live diagnostic workspace — upload a scan and run real "
+            "Sign in to access the live diagnostic workstation — upload a study and execute real "
             "ResNet18 + quantum-circuit inference.",
         )
-        if st.button("🔐 Sign In", key="diagnostic_tab_signin", type="primary"):
+        if st.button("Sign In", key="diagnostic_tab_signin", type="primary"):
             st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LOGIN
             st.rerun()
         return
 
     if not auth_view.can_run_inference():
         st.warning(
-            "👀 Your **Student Evaluator** account has read-only access. Live diagnostic inference "
-            "requires a **Radiologist** or **Clinical Researcher** account. Try the free sample cases "
-            "on the home page instead, or sign in with a clinical-role account.",
+            "Your **Student Evaluator** account has read-only access. Live diagnostic inference "
+            "requires a **Radiologist** or **Clinical Researcher** account. Review the reference "
+            "sample cases on the institutional landing page instead, or sign in with a clinical-role account.",
         )
-        if st.button("🏠 Back to Home", key="diagnostic_tab_readonly_home"):
+        if st.button("Return to Institutional Landing", key="diagnostic_tab_readonly_home"):
             st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
             st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
             st.rerun()
@@ -1192,7 +1193,7 @@ def render_diagnostic_tab() -> None:
         display_slice, result = load_cached_case(cached_case)
     else:
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### Upload MRI Volume")
+        st.sidebar.markdown("### Radiological Ingestion Pipeline")
         uploaded_files = st.sidebar.file_uploader(
             "DICOM series (.dcm, select all files — drag & drop supported), single DICOM, "
             "NumPy volume (.npy), or NIfTI (.nii/.nii.gz)",
@@ -1217,7 +1218,7 @@ def render_diagnostic_tab() -> None:
             st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
 
         st.sidebar.markdown("---")
-        st.sidebar.markdown("### View Controls")
+        st.sidebar.markdown("### Viewport Controls")
         view = st.sidebar.radio(
             "Primary Plane (quantum analysis target)", ["Axial", "Coronal", "Sagittal"], horizontal=False,
             help="Which plane's slice is fed into the ResNet18 → PCA → VQC pipeline and Grad-CAM. "
@@ -1229,7 +1230,7 @@ def render_diagnostic_tab() -> None:
         # range, so ONE slider keeps Sagittal/Coronal/Axial synchronized
         # even though each has a different depth along its own axis.
         slice_fraction = st.sidebar.slider(
-            "Slice Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
+            "Slice Depth Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
             help="Scrubs the Sagittal, Coronal, and Axial views together — each plane maps this "
                  "shared fractional position onto its own slice count.",
         )
@@ -1262,32 +1263,33 @@ def render_diagnostic_tab() -> None:
     # cases carry a single precomputed image, not a volume).
     # ------------------------------------------------------------------ #
     if volume is not None and plane_index_for is not None:
-        st.markdown("#### 🧭 Synchronized Tri-Planar View")
+        st.markdown("#### Synchronized Orthogonal Viewport")
         plane_cols = st.columns(3)
         for col, plane_name in zip(plane_cols, ["Sagittal", "Coronal", "Axial"]):
             p_index, p_max = plane_index_for(plane_name)
             p_display = normalize_for_display(get_slice(volume, plane_name, p_index))
+            p_display = theme.draw_clinical_crosshair(p_display)
             with col:
                 is_primary = plane_name == view
-                caption = f"{plane_name}" + (" ⭐ primary" if is_primary else "") + f" — {p_index + 1}/{p_max + 1}"
-                st.image(p_display, use_container_width=True, clamp=True, caption=caption)
+                caption = theme.slice_depth_caption(plane_name, p_index, p_max, primary=is_primary)
+                st.image(p_display, channels="BGR", use_container_width=True, clamp=True, caption=caption)
         st.markdown("---")
 
     gradcam_col, results_col, attribution_col = st.columns([1, 1, 1])
 
     with gradcam_col:
         if use_fast_path and fast_path_case is not None:
-            st.markdown(f"##### ⚡ Fast-Path Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
+            st.markdown(f"##### Accelerated Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
             st.caption("Served from `precomputed_cache.json` — 0 ms inference.")
         elif use_demo_cache and cached_case is not None:
             st.markdown(f"##### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
         render_gradcam_panel(display_slice, result)
 
     with results_col:
-        st.markdown("#### Tear Risk Assessment")
+        st.markdown("#### Quantitative Clinical Triage Panel")
         render_risk_gauge("ACL", result.acl_risk)
         render_risk_gauge("MCL", result.mcl_risk)
-        render_risk_gauge("Meniscus", result.meniscus_risk)
+        render_risk_gauge("Medial Meniscus", result.meniscus_risk)
         st.markdown("---")
         render_latency_metrics(result)
         st.markdown("---")
@@ -1295,15 +1297,15 @@ def render_diagnostic_tab() -> None:
             render_report_download(display_slice, result)
 
     with attribution_col:
-        st.markdown("#### ⚛️ Quantum Decision Metrics")
+        st.markdown("#### Quantum State Attribution Metrics")
         render_quantum_attribution_panel(result.pauli_z_expectations)
 
     st.markdown("---")
     st.caption(
-        "Pipeline: DICOM/NPY ingestion → torchvision preprocessing → frozen ResNet18 "
-        "(512-D) → StandardScaler + PCA(4) → [0, 2π] angle scaling → 4-qubit PennyLane "
+        "Radiological Ingestion Pipeline: DICOM/NPY ingestion → torchvision preprocessing → frozen "
+        "ResNet18 (512-D) → StandardScaler + PCA(4) → [0, 2π] angle scaling → 4-qubit PennyLane "
         "VQC → classical readout. Grad-CAM is backpropagated from the ACL risk score "
-        "itself (not embedding energy), so the heatmap explains that prediction."
+        "itself (not embedding energy), so the overlay explains that prediction. " + theme.NOT_A_DEVICE_FOOTNOTE
     )
 
 
@@ -1319,7 +1321,7 @@ def main() -> None:
     render_header()
     auth_view.render_top_nav()
     if precomputed_cache is not None:
-        st.sidebar.caption(f"⚡ Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
+        st.sidebar.caption(f"Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
     # `qknee.ui.landing_page`'s CTAs / this module's own workspace-tab
     # buttons write `VIEW_STATE_KEY` ("landing"/"diagnostic"/"benchmark")
@@ -1327,7 +1329,7 @@ def main() -> None:
     # module knows nothing about auth. `auth_view`'s `CURRENT_PAGE_KEY` is
     # the authoritative top-level page router. Reconciling the two here
     # (rather than in landing_page.py or auth_view.py) is what sends an
-    # unauthenticated visitor who clicks "Launch Live Diagnostic Console"
+    # unauthenticated visitor who clicks "Launch Diagnostic Workstation"
     # to the login page instead of the workspace, then lands them on their
     # originally-requested tab once they do sign in (VIEW_STATE_KEY is
     # left untouched across that detour, so it's still "diagnostic" by the
@@ -1354,7 +1356,7 @@ def main() -> None:
         return
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("🏠 Back to Home", use_container_width=True):
+    if st.sidebar.button("Return to Institutional Landing", use_container_width=True):
         st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
         st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
         st.rerun()
@@ -1363,7 +1365,7 @@ def main() -> None:
     # way to force a different one active — so a landing-page CTA that
     # wants to land on a specific tab gets there by putting that tab's
     # label first, rather than always defaulting to Diagnostic View.
-    diagnostic_label, benchmark_label = "🔬 Diagnostic View", "📊 Quantum vs Classical Benchmark"
+    diagnostic_label, benchmark_label = "Diagnostic Workstation", "Quantitative Benchmark Analysis"
     tab_labels = (
         [benchmark_label, diagnostic_label] if requested_view == VIEW_BENCHMARK
         else [diagnostic_label, benchmark_label]

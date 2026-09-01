@@ -28,6 +28,7 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.ui import theme
 
 _config = load_config()
 logger = get_logger(__name__)
@@ -156,48 +157,48 @@ def _decode_case_overlay(case: Dict) -> Optional[np.ndarray]:
 
 
 # --------------------------------------------------------------------------- #
-# Styling
+# Styling — extends `qknee.ui.theme`'s shared clinical design system with
+# a handful of hero-section-only rules (the rest of the page reuses
+# `.qknee-card`/`.qknee-badge`/etc. directly).
 # --------------------------------------------------------------------------- #
 
-_HERO_CSS = """
+_HERO_CSS = f"""
 <style>
-.qknee-hero {
-    padding: 2.4rem 2rem 1.8rem 2rem;
-    border-radius: 0.9rem;
-    background: linear-gradient(135deg, #0B1420 0%, #16222A 55%, #10202B 100%);
-    border: 1px solid #22303C;
-    margin-bottom: 1.4rem;
+.qknee-hero {{
+    padding: 2.2rem 2rem 1.7rem 2rem;
+    border-radius: 0.7rem;
+    background: linear-gradient(135deg, #0B1420 0%, #111C33 55%, #0D1B2A 100%);
+    border: 1px solid {theme.BORDER_GREY}30;
+    margin-bottom: 1.2rem;
     text-align: center;
-}
-.qknee-hero-eyebrow {
-    color: #4FD1C5;
+}}
+.qknee-hero-eyebrow {{
+    color: {theme.SURGICAL_TEAL};
     letter-spacing: 0.12em;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     font-weight: 700;
+    text-transform: uppercase;
     margin-bottom: 0.6rem;
-}
-.qknee-hero-title {
-    font-size: 3rem;
+}}
+.qknee-hero-title {{
+    font-size: 2.6rem;
+    font-weight: 800;
     line-height: 1.1;
+    letter-spacing: -0.02em;
     margin: 0 0 0.5rem 0;
-    color: #F0F4F8;
-}
-.qknee-hero-tagline {
-    font-size: 1.15rem;
-    color: #C5D1DB;
+    color: {theme.STERILE_WHITE};
+}}
+.qknee-hero-tagline {{
+    font-size: 1.05rem;
+    color: {theme.TEXT_MUTED};
     max-width: 46rem;
     margin: 0 auto;
-}
-.qknee-hero-disclaimer {
-    font-size: 0.75rem;
-    color: #8B949E;
-    margin-top: 1rem;
-}
-.qknee-step-figure-caption {
-    font-size: 0.82rem;
-    color: #8B949E;
+}}
+.qknee-step-figure-caption {{
+    font-size: 0.8rem;
+    color: {theme.TEXT_MUTED};
     text-align: center;
-}
+}}
 </style>
 """
 
@@ -207,18 +208,21 @@ _HERO_CSS = """
 # --------------------------------------------------------------------------- #
 
 def render_hero() -> None:
-    """Title, tagline, three dynamic quick-metric callout cards, and the
-    two primary CTA buttons."""
+    """Institutional header (laboratory branding + system status), the
+    NISQ Clinical Research Disclosure banner, the hero title/tagline,
+    three formal capability-summary cards, and the two primary CTA
+    buttons."""
+    theme.inject_clinical_theme()
+    theme.render_institutional_masthead(active_module="Institutional Overview")
+    theme.render_disclosure_banner()
+
     st.markdown(_HERO_CSS, unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="qknee-hero">
-            <div class="qknee-hero-eyebrow">QUANTUM-ASSISTED ORTHOPEDIC MRI TRIAGE</div>
-            <div class="qknee-hero-title">🦵 Q-Knee</div>
+            <div class="qknee-hero-eyebrow">Quantum-Assisted Orthopedic MRI Triage</div>
+            <div class="qknee-hero-title">Q-KNEE Diagnostic Workstation</div>
             <div class="qknee-hero-tagline">{TAGLINE}</div>
-            <div class="qknee-hero-disclaimer">
-                Research prototype — not a certified medical device. Not for clinical use.
-            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -226,54 +230,64 @@ def render_hero() -> None:
 
     n_qubits = _config.quantum.n_qubits
     n_layers = _config.quantum.n_layers
+    feature_dim = _config.resnet.feature_dim
     reduction_pct = _parameter_reduction_pct()
     latency_ms = _quantum_latency_ms()
+    latency_display = f"{latency_ms:.1f} ms" if latency_ms is not None else "Pending Benchmark Run"
 
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
-    with metric_col1:
-        with st.container(border=True):
-            st.metric(
-                "Parameter Reduction",
-                f"{reduction_pct:.1f}%",
-                help=(
-                    f"The {n_qubits}-qubit VQC head's trainable parameters vs. an equivalent classical "
-                    f"linear bottleneck head of the same input/output width, computed live from the "
-                    f"current config (qknee.config.config.yaml)."
-                ),
-            )
-    with metric_col2:
-        with st.container(border=True):
-            if latency_ms is not None:
-                st.metric(
-                    "Quantum Circuit Latency",
-                    f"{latency_ms:.1f} ms",
-                    help="Measured per-sample VQC inference latency from the most recent "
-                         "`python scripts/run_benchmark.py` run.",
-                )
-            else:
-                st.metric(
-                    "Quantum Circuit Latency",
-                    "NISQ Sim",
-                    help="Run `python scripts/run_benchmark.py` to measure and display a live "
-                         "per-sample latency figure here.",
-                )
-    with metric_col3:
-        with st.container(border=True):
-            st.metric(
-                "Variational Circuit",
-                f"{n_qubits}-Qubit PQC",
-                help=f"{n_layers}-layer parameterized quantum circuit — angle-encoded, ring-entangled, "
-                     "Pauli-Z read out.",
-            )
+    st.markdown('<div class="qknee-eyebrow">Capability Summary</div>', unsafe_allow_html=True)
+    card_col1, card_col2, card_col3 = st.columns(3)
+    with card_col1:
+        st.markdown(
+            f"""
+            <div class="qknee-card">
+                <div class="qknee-card-title">High-Dimensional Feature Extraction</div>
+                <div class="qknee-card-body">
+                    ResNet18 convolutional backbone, ImageNet-pretrained and frozen, projecting each
+                    slice into a {feature_dim}-dimensional embedding — the radiological ingestion
+                    pipeline every downstream stage consumes.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with card_col2:
+        st.markdown(
+            f"""
+            <div class="qknee-card">
+                <div class="qknee-card-title">{n_qubits}-Qubit Variational Quantum Kernel</div>
+                <div class="qknee-card-body">
+                    Continuous-variable angle encoding into a {n_layers}-layer entangled circuit —
+                    a {reduction_pct:.1f}% trainable-parameter reduction versus an equivalent
+                    classical bottleneck. Measured per-sample latency: {latency_display}.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with card_col3:
+        st.markdown(
+            """
+            <div class="qknee-card">
+                <div class="qknee-card-title">Spatial Explainability Engine</div>
+                <div class="qknee-card-body">
+                    Gradient-Weighted Class Activation Mapping (Grad-CAM) backpropagated from the
+                    predicted risk score itself, for quantitative lesion localization and
+                    per-qubit attribution breakdown at inference time.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.write("")
     cta_col1, cta_col2 = st.columns(2)
     with cta_col1:
-        if st.button("🚀 Launch Live Diagnostic Console", type="primary", use_container_width=True):
+        if st.button("Launch Diagnostic Workstation", type="primary", use_container_width=True):
             st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
             st.rerun()
     with cta_col2:
-        if st.button("📊 Explore Clinical Benchmarks", use_container_width=True):
+        if st.button("Review Quantitative Benchmark Data", use_container_width=True):
             st.session_state[VIEW_STATE_KEY] = VIEW_BENCHMARK
             st.rerun()
 
@@ -283,14 +297,16 @@ def render_hero() -> None:
 # --------------------------------------------------------------------------- #
 
 def render_pipeline_explainer() -> None:
-    """Three-tab interactive walkthrough of the ResNet18 -> quantum circuit
-    -> Grad-CAM/report pipeline, with the offline-rendered circuit diagram
-    and clinical-case-walkthrough figures (`scripts/generate_deck_assets.py`)
+    """Three-stage formal walkthrough of the Radiological Ingestion
+    Pipeline -> Variational Quantum Kernel -> Attribution Breakdown &
+    Report chain, with the offline-rendered circuit diagram and
+    clinical-case-walkthrough figures (`scripts/generate_deck_assets.py`)
     embedded inline."""
-    st.markdown("## 🧭 How Q-Knee Works")
+    st.markdown("## System Architecture")
     st.caption(
         "Three stages, one forward pass: a classical vision backbone compresses each MRI slice, a "
-        "4-qubit variational circuit scores tear risk, and Grad-CAM plus an auto-generated PDF explain why."
+        f"{_config.quantum.n_qubits}-qubit variational circuit scores tear risk, and a "
+        "Grad-CAM/Pauli-Z attribution breakdown plus an auto-generated PDF report explain the result."
     )
 
     n_qubits = _config.quantum.n_qubits
@@ -298,9 +314,9 @@ def render_pipeline_explainer() -> None:
     feature_dim = _config.resnet.feature_dim
 
     step1_tab, step2_tab, step3_tab = st.tabs([
-        "① Spatial Vision Backbone",
-        "② Quantum Circuit Execution",
-        "③ Explainability & Report",
+        "Stage 01 — Radiological Ingestion Pipeline",
+        "Stage 02 — Variational Quantum Kernel",
+        "Stage 03 — Attribution Breakdown & Report",
     ])
 
     with step1_tab:
@@ -311,7 +327,7 @@ def render_pipeline_explainer() -> None:
 **ResNet18 feature extraction.** Each MRI slice (or an aggregated
 multi-slice volume) is passed through a frozen, ImageNet-pretrained
 ResNet18 backbone, producing a dense **{feature_dim}-dimensional** feature
-vector — the same spatial-vision embedding every downstream stage
+vector — the same radiological embedding every downstream stage
 consumes (`qknee.models.resnet_extractor.ResNet18FeatureExtractor`).
 
 - Frozen convolutional backbone — no retraining required
@@ -320,7 +336,7 @@ consumes (`qknee.models.resnet_extractor.ResNet18FeatureExtractor`).
                 """
             )
         with fig_col:
-            st.info(f"**Slice → ResNet18 → {feature_dim}-D embedding**", icon="🩻")
+            st.info(f"Slice → ResNet18 → {feature_dim}-D Embedding")
             st.caption("The classical stage every quantum stage below builds on.")
 
     with step2_tab:
@@ -344,20 +360,18 @@ entangling gates), then every qubit is measured in the Pauli-Z basis.
             if CIRCUIT_DIAGRAM_PATH.exists():
                 st.image(str(CIRCUIT_DIAGRAM_PATH), caption="4-Qubit Variational Circuit — Q-Knee", use_container_width=True)
             else:
-                st.warning(
-                    "Circuit diagram not yet generated. Run `python scripts/generate_deck_assets.py`.",
-                    icon="⚠️",
-                )
+                st.warning("Circuit diagram not yet generated. Run `python scripts/generate_deck_assets.py`.")
 
     with step3_tab:
         st.markdown(
             """
-**Explainable Grad-CAM + automated radiology report.** Grad-CAM highlights
-which spatial regions of the slice drove the ResNet18 embedding, the VQC's
-per-qubit Pauli-Z measurements show the quantum circuit's own attribution,
-and `qknee.xai.report_generator.ReportGenerator` compiles the slice, the
-Grad-CAM overlay, and the full quantum/clinical attribution breakdown into
-a structured, downloadable PDF report.
+**Quantitative lesion localization + automated radiology report.** Grad-CAM
+performs quantitative lesion localization, highlighting which spatial
+regions of the slice drove the ResNet18 embedding; the VQC's per-qubit
+Pauli-Z measurements supply a formal attribution breakdown of the quantum
+circuit's own contribution; and `qknee.xai.report_generator` compiles the
+slice, the Grad-CAM overlay, and the full quantum/clinical attribution
+breakdown into a structured, downloadable diagnostic PDF report.
             """
         )
         if CLINICAL_CASE_WALKTHROUGH_PATH.exists():
@@ -368,8 +382,7 @@ a structured, downloadable PDF report.
             )
         else:
             st.warning(
-                "Clinical case walkthrough figure not yet generated. Run `python scripts/generate_deck_assets.py`.",
-                icon="⚠️",
+                "Clinical case walkthrough figure not yet generated. Run `python scripts/generate_deck_assets.py`."
             )
 
 
@@ -377,14 +390,60 @@ a structured, downloadable PDF report.
 # 3. Interactive live sample showcase — 1-click preview, no login required
 # --------------------------------------------------------------------------- #
 
+_PLANE_ABBREVIATIONS = {"axial": "AX", "coronal": "COR", "sagittal": "SAG"}
+
+_INDICATION_BY_CATEGORY = {
+    "normal": "Routine Surveillance MRI — No Acute Findings",
+    "acl tear": "Suspected ACL Tear",
+    "meniscal tear": "Suspected Meniscal Tear",
+    "mcl sprain": "Suspected MCL Sprain",
+}
+
+
+def _study_uid(case: Dict) -> str:
+    """Formal DICOM-style study identifier, e.g. `MRNet-SAG-0428`,
+    derived deterministically from the case's plane and numeric suffix of
+    `case_id` so it stays stable across reruns."""
+    plane_abbrev = _PLANE_ABBREVIATIONS.get(str(case.get("plane", "")).lower(), "UNK")
+    digits = "".join(ch for ch in str(case.get("case_id", "0")) if ch.isdigit()) or "0000"
+    return f"MRNet-{plane_abbrev}-{digits[-4:].zfill(4)}"
+
+
+def _clinical_indication(case: Dict) -> str:
+    category = str(case.get("ground_truth_category", "")).strip().lower()
+    return _INDICATION_BY_CATEGORY.get(category, f"Suspected {case.get('ground_truth_category', 'Finding')}")
+
+
+def render_case_study_table(cases: List[Dict]) -> None:
+    """Structured, formal case-study table (Study UID / Acquisition Plane
+    / Clinical Indication / Reference Classification) — the "Interactive
+    Diagnostic Preview" summary a radiology-facing visitor expects before
+    drilling into any one case's overlay below."""
+    import pandas as pd
+
+    rows = [
+        {
+            "Study UID": _study_uid(case),
+            "Acquisition Plane": str(case.get("plane", "?")).capitalize(),
+            "Clinical Indication": _clinical_indication(case),
+            "Reference Classification": case.get("ground_truth_category", "Unknown"),
+            "Model Risk Tier": case.get("risk_tier", "N/A"),
+        }
+        for case in cases
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_live_sample_showcase() -> None:
-    """Lets a visitor preview 3 pre-scored knee MRI cases (one Normal, one
-    ACL Tear, one Meniscal Tear) with a single click, straight from
-    `precomputed_cache.json` — no login, no upload, no live inference."""
-    st.markdown("## 🔎 Try It Now — Live Sample Cases")
+    """Interactive Diagnostic Preview: a structured case-study table
+    followed by 3 pre-scored knee MRI reference cases (one normal
+    surveillance study, one ACL tear, one meniscal tear), previewable
+    on demand straight from `precomputed_cache.json` — no login, no
+    upload, no live inference."""
+    st.markdown("## Interactive Diagnostic Preview")
     st.caption(
-        "Preview 3 pre-scored knee MRI cases straight from the precomputed inference cache — "
-        "zero login, zero upload, zero wait."
+        "Reference case studies drawn from the precomputed inference cache — zero login, zero "
+        "upload, zero inference latency."
     )
 
     all_cases = _load_precomputed_cases()
@@ -394,21 +453,23 @@ def render_live_sample_showcase() -> None:
     if not showcase_cases:
         st.info(
             "No precomputed sample cases found yet. Run `python scripts/generate_demo_cache.py` "
-            "to build the showcase cache.",
-            icon="ℹ️",
+            "to build the showcase cache."
         )
         return
+
+    render_case_study_table(showcase_cases)
+    st.write("")
 
     columns = st.columns(len(showcase_cases))
     for column, case in zip(columns, showcase_cases):
         with column:
             with st.container(border=True):
-                st.markdown(f"**{case.get('ground_truth_category', 'Unknown')}**")
-                st.caption(f"{case.get('plane', '?').capitalize()} plane · {case['case_id']}")
+                st.markdown(f"**{_study_uid(case)}**")
+                st.caption(_clinical_indication(case))
 
                 preview_key = f"_qknee_showcase_preview_{case['case_id']}"
                 if st.button(
-                    "▶️ Preview this case", key=f"qknee_showcase_btn_{case['case_id']}", use_container_width=True,
+                    "View Case Detail", key=f"qknee_showcase_btn_{case['case_id']}", use_container_width=True,
                 ):
                     st.session_state[preview_key] = True
 
@@ -417,15 +478,15 @@ def render_live_sample_showcase() -> None:
                     if overlay_bgr is not None:
                         st.image(
                             overlay_bgr[:, :, ::-1],  # BGR -> RGB for st.image
-                            caption="Grad-CAM risk overlay",
+                            caption="Quantitative Lesion Localization (Grad-CAM Overlay)",
                             use_container_width=True,
                         )
                     else:
-                        st.warning("Heatmap unavailable for this case.", icon="⚠️")
+                        st.warning("Attribution overlay unavailable for this case.")
 
                     risk_score = float(case.get("risk_score", 0.0))
                     st.metric(
-                        "Tear Risk",
+                        "Composite Tear Risk",
                         f"{risk_score * 100:.1f}%",
                         delta=case.get("risk_tier", "N/A"),
                         delta_color="inverse" if case.get("risk_tier") == "LOW" else "off",
@@ -433,7 +494,7 @@ def render_live_sample_showcase() -> None:
                     st.caption(case.get("classification_label", ""))
 
     st.caption(
-        f"Every scan above was produced by the real Q-Knee pipeline "
+        f"Every study above was produced by the real Q-Knee pipeline "
         f"(`scripts/generate_demo_cache.py`), then cached to "
         f"`{PRECOMPUTED_CACHE_PATH.relative_to(_REPO_ROOT)}` for instant, zero-latency replay here."
     )
