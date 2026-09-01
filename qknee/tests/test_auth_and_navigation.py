@@ -367,7 +367,7 @@ class TestNavigationStateRouting:
         login view, never straight into the workspace."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        launch_button = next(b for b in at.button if "Launch Live Diagnostic" in b.label)
+        launch_button = next(b for b in at.button if "Launch Diagnostic Workstation" in b.label)
 
         launch_button.click().run()
 
@@ -389,7 +389,7 @@ class TestNavigationStateRouting:
         assert not at.exception
         assert at.session_state["authenticated"] is True
         assert at.session_state["current_page"] == "workspace"
-        assert at.tabs[0].label == "🔬 Diagnostic View"
+        assert at.tabs[0].label == "Diagnostic Workstation"
 
     def test_logging_out_of_an_authenticated_session_returns_to_landing(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)

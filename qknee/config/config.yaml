@@ -86,6 +86,17 @@ api:
   jwt_secret_key: "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
   access_token_expire_minutes: 60
 
+# Optional distributed-storage backends. Both default to "" (unset), which
+# is the correct setting for a single-node free-tier deployment (Render,
+# Streamlit Cloud, Vercel) with no managed Postgres/Redis attached — every
+# field here degrades gracefully to a local fallback rather than erroring,
+# see qknee.api.auth.UserRepository / qknee.api.server.CacheService.
+storage:
+  database_url: ""  # env: DATABASE_URL — e.g. postgresql+asyncpg://user:pass@host:5432/qknee or sqlite:///./users.db
+  redis_url: ""      # env: REDIS_URL — e.g. redis://default:pass@host:6379; "" -> in-process TTL cache
+  local_users_path: "qknee/artifacts/users.json"  # LocalFileUserRepository store, used when database_url == ""
+  cache_ttl_seconds: 3600  # default TTL (seconds) for CacheService entries (Redis or in-memory)
+
 device: null  # null -> auto-detect ("cuda" if available, else "cpu")
 
 logging:

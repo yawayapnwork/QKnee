@@ -51,6 +51,16 @@ services:
       - OMP_NUM_THREADS=4
       - MKL_NUM_THREADS=4
       - TORCH_NUM_THREADS=4
+      # Optional PostgreSQL/Redis backends for qknee.api.auth's user
+      # repository / qknee.api.server's CacheService — left unset (the
+      # commented-out lines below) by default, which is fully supported:
+      # both modules degrade to a local JSON user store and an in-process
+      # TTL cache with no error. Uncomment (and add a `postgres`/`redis`
+      # service to this file) to opt into a shared, multi-replica-safe
+      # store instead; put real credentials in a git-ignored `.env` file
+      # referenced via `env_file:`, never inlined here.
+      # - DATABASE_URL=postgresql+asyncpg://qknee:password@postgres:5432/qknee
+      # - REDIS_URL=redis://redis:6379/0
     volumes:
       # Model checkpoint storage: the fitted PCA/scaler artifact and any
       # trained QKneeModel checkpoint live on the host (outside the image)

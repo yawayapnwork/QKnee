@@ -71,6 +71,25 @@ python-multipart==0.0.32
 argon2-cffi==25.1.0
 PyJWT==2.13.0
 
+# Optional PostgreSQL/Redis storage backends (qknee/api/auth.py's
+# SQLAlchemyUserRepository, qknee/api/server.py's CacheService) — both
+# packages below are small/pure-Python-ish and safe to install
+# unconditionally, but neither actually *requires* a Postgres/Redis
+# server: with $DATABASE_URL/$REDIS_URL unset (the default on a
+# single-node free-tier deployment), SQLAlchemy is only ever used against
+# the stdlib `sqlite3` driver and redis-py's client is never connected —
+# both modules degrade to a local JSON store / in-process cache instead.
+#   - A Postgres DBAPI driver (`psycopg2-binary` or `psycopg[binary]`) is
+#     deliberately NOT pinned here: it's only imported (lazily, inside
+#     SQLAlchemyUserRepository) if `$DATABASE_URL` actually names a
+#     `postgresql://` URL. Install one yourself alongside this file if
+#     you're pointing at a real Postgres instance; if it's missing,
+#     SQLAlchemyUserRepository's construction fails loudly and
+#     `_build_user_repository()` catches that and falls back to
+#     LocalFileUserRepository rather than crashing the API.
+SQLAlchemy==2.0.52
+redis==6.4.0
+
 # ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) —
 # unused unless a caller explicitly opts into the ONNX backend; also kept
 # for the shared Docker image.

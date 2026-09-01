@@ -172,16 +172,21 @@ class TestLandingPageRendering:
 
         assert not at.exception
         button_labels = [b.label for b in at.button]
-        assert "🚀 Launch Live Diagnostic Console" in button_labels
-        assert "📊 Explore Clinical Benchmarks" in button_labels
+        assert "Launch Diagnostic Workstation" in button_labels
+        assert "Review Quantitative Benchmark Data" in button_labels
 
-    def test_hero_renders_three_dynamic_metric_cards(self):
+    def test_hero_renders_three_capability_summary_cards(self):
+        """The hero's three quick-metric `st.metric` cards were replaced by
+        formal HTML capability-summary cards (`.qknee-card`) — check their
+        titles show up in the rendered markdown instead."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
 
         assert not at.exception
-        metric_labels = {m.label for m in at.metric}
-        assert {"Parameter Reduction", "Quantum Circuit Latency", "Variational Circuit"} <= metric_labels
+        markdown_text = "\n".join(m.value for m in at.markdown)
+        assert "High-Dimensional Feature Extraction" in markdown_text
+        assert "Variational Quantum Kernel" in markdown_text
+        assert "Spatial Explainability Engine" in markdown_text
 
     def test_pipeline_explainer_renders_three_tabs(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
@@ -190,9 +195,9 @@ class TestLandingPageRendering:
         assert not at.exception
         tab_labels = [t.label for t in at.tabs]
         assert tab_labels == [
-            "① Spatial Vision Backbone",
-            "② Quantum Circuit Execution",
-            "③ Explainability & Report",
+            "Stage 01 — Radiological Ingestion Pipeline",
+            "Stage 02 — Variational Quantum Kernel",
+            "Stage 03 — Attribution Breakdown & Report",
         ]
 
     def test_launch_diagnostic_cta_routes_to_login_when_unauthenticated(self):
@@ -203,7 +208,7 @@ class TestLandingPageRendering:
         sign in; see `test_demo_login_after_launch_cta_lands_on_diagnostic_tab`)."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        launch_button = next(b for b in at.button if "Launch Live Diagnostic" in b.label)
+        launch_button = next(b for b in at.button if "Launch Diagnostic Workstation" in b.label)
 
         launch_button.click().run()
 
@@ -218,7 +223,7 @@ class TestLandingPageRendering:
         the login detour."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Launch Live Diagnostic" in b.label).click().run()
+        next(b for b in at.button if "Launch Diagnostic Workstation" in b.label).click().run()
         demo_button = next(b for b in at.button if "Demo Account" in b.label)
 
         demo_button.click().run()
@@ -226,18 +231,18 @@ class TestLandingPageRendering:
         assert not at.exception
         assert at.session_state["authenticated"] is True
         assert at.session_state["current_page"] == "workspace"
-        assert at.tabs[0].label == "🔬 Diagnostic View"
+        assert at.tabs[0].label == "Diagnostic Workstation"
 
     def test_explore_benchmarks_cta_switches_to_benchmark_tab_first(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        benchmarks_button = next(b for b in at.button if "Explore Clinical Benchmarks" in b.label)
+        benchmarks_button = next(b for b in at.button if "Review Quantitative Benchmark Data" in b.label)
 
         benchmarks_button.click().run()
 
         assert not at.exception
         assert at.session_state["qknee_active_view"] == "benchmark"
-        assert at.tabs[0].label == "📊 Quantum vs Classical Benchmark"
+        assert at.tabs[0].label == "Quantitative Benchmark Analysis"
 
     def test_back_to_home_returns_to_the_landing_view(self):
         """The sidebar 'Back to Home' button only renders once inside the
@@ -246,31 +251,31 @@ class TestLandingPageRendering:
         exercising it."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Launch Live Diagnostic" in b.label).click().run()
+        next(b for b in at.button if "Launch Diagnostic Workstation" in b.label).click().run()
         next(b for b in at.button if "Demo Account" in b.label).click().run()
-        home_button = next(b for b in at.sidebar.button if "Back to Home" in b.label)
+        home_button = next(b for b in at.sidebar.button if "Return to Institutional Landing" in b.label)
 
         home_button.click().run()
 
         assert not at.exception
         assert at.session_state["qknee_active_view"] == "landing"
         assert at.session_state["current_page"] == "landing"
-        assert any("Launch Live Diagnostic" in b.label for b in at.button)
+        assert any("Launch Diagnostic Workstation" in b.label for b in at.button)
 
     def test_showcase_preview_click_reveals_the_case_risk_metric(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        preview_button = next(b for b in at.button if "Preview this case" in b.label)
+        preview_button = next(b for b in at.button if "View Case Detail" in b.label)
 
         preview_button.click().run()
 
         assert not at.exception
-        assert any(m.label == "Tear Risk" for m in at.metric)
+        assert any(m.label == "Composite Tear Risk" for m in at.metric)
 
     def test_showcase_shows_one_preview_button_per_case(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
 
         assert not at.exception
-        preview_buttons = [b for b in at.button if "Preview this case" in b.label]
+        preview_buttons = [b for b in at.button if "View Case Detail" in b.label]
         assert len(preview_buttons) == len(landing_page.SHOWCASE_CASE_IDS)

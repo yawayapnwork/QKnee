@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -48,6 +49,16 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "paths.acl_checkpoint": "ACL_CHECKPOINT_PATH",
     "paths.meniscus_checkpoint": "MENISCUS_CHECKPOINT_PATH",
     "api.jwt_secret_key": "QKNEE_JWT_SECRET_KEY",
+    # Optional PostgreSQL/Redis connection strings for `qknee.api.auth`'s
+    # user repository and `qknee.api.server`'s CacheService, respectively.
+    # Both are read with `os.environ.get` (see `_apply_env_overrides`
+    # below), so an explicitly-empty `DATABASE_URL=`/`REDIS_URL=` (as set
+    # by a single-node cloud runtime with no managed Postgres/Redis
+    # attached — Render, Streamlit Cloud, Vercel) still overrides the
+    # YAML value to `""`, which both modules treat as "use the local
+    # fallback," never as an error.
+    "storage.database_url": "DATABASE_URL",
+    "storage.redis_url": "REDIS_URL",
 }
 
 
@@ -162,6 +173,24 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class StorageConfig:
+    """Optional distributed-storage backends for `qknee.api.auth` (user
+    repository) and `qknee.api.server` (`CacheService`) — both default to
+    a fully local, single-node fallback (JSON-file user store, in-process
+    TTL cache) so the API boots and runs identically on a free-tier
+    single-node runtime (Render, Streamlit Cloud, Vercel) with neither
+    variable set, and transparently upgrades to Postgres/Redis when one
+    is attached (e.g. a Docker Compose stack, or a managed Postgres/Redis
+    add-on on a paid host).
+    """
+
+    database_url: str = ""  # env: DATABASE_URL — e.g. postgresql+asyncpg://... or sqlite:///./users.db; "" = local JSON store
+    redis_url: str = ""     # env: REDIS_URL — e.g. redis://default:...@host:6379; "" = in-process TTL cache
+    local_users_path: Path = Path("qknee/artifacts/users.json")  # LocalFileUserRepository fallback store
+    cache_ttl_seconds: int = 3600  # default TTL for CacheService entries (Redis or in-memory)
+
+
+@dataclass(frozen=True)
 class QKneeConfig:
     paths: PathsConfig
     data: DataConfig
@@ -173,6 +202,7 @@ class QKneeConfig:
     evaluation: EvaluationConfig
     api: APIConfig
     logging: LoggingConfig
+    storage: StorageConfig = field(default_factory=StorageConfig)
     device: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
@@ -261,6 +291,19 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         evaluation = EvaluationConfig(**raw["evaluation"])
         api = APIConfig(**raw["api"])
         logging_cfg = LoggingConfig(**raw["logging"])
+
+        # Optional section: absent entirely from a config.yaml predating
+        # this field (or from a caller-supplied override dict that only
+        # touches other sections) still builds a fully-defaulted
+        # StorageConfig rather than raising — every one of its fields
+        # already defaults to "use the local single-node fallback".
+        storage_raw = raw.get("storage") or {}
+        storage = StorageConfig(
+            database_url=str(storage_raw.get("database_url") or ""),
+            redis_url=str(storage_raw.get("redis_url") or ""),
+            local_users_path=Path(storage_raw.get("local_users_path", "qknee/artifacts/users.json")),
+            cache_ttl_seconds=int(storage_raw.get("cache_ttl_seconds", 3600)),
+        )
     except (KeyError, TypeError) as exc:
         raise ConfigError(f"Malformed config.yaml section: {exc}") from exc
 
@@ -296,9 +339,33 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         evaluation=evaluation,
         api=api,
         logging=logging_cfg,
+        storage=storage,
         device=raw.get("device"),
         raw=raw,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Connection-string redaction — shared by qknee.api.auth (DATABASE_URL) and
+# qknee.api.server (REDIS_URL) so neither ever logs a plaintext credential.
+# --------------------------------------------------------------------------- #
+
+def redact_connection_string(url: str) -> str:
+    """Returns `url` with any embedded password replaced by `***`, safe to
+    write to logs. Returns `"<unset>"` for an empty/falsy `url`, and
+    `"<unparseable>"` (rather than raising) for a string that isn't a
+    parseable URL at all.
+    """
+    if not url:
+        return "<unset>"
+    try:
+        parsed = urlsplit(url)
+        if not parsed.password:
+            return url
+        redacted_netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@")
+        return urlunsplit(parsed._replace(netloc=redacted_netloc))
+    except ValueError:
+        return "<unparseable>"
 
 
 @lru_cache(maxsize=None)

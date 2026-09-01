@@ -30,9 +30,13 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
+import threading
+import time
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -42,7 +46,8 @@ from pydantic import BaseModel, Field
 
 from qknee.api.auth import INFERENCE_ROLES, UserResponse, require_role
 from qknee.api.auth import router as auth_router
-from qknee.config.loader import load_config
+from qknee.api.auth import user_store
+from qknee.config.loader import load_config, redact_connection_string
 from qknee.config.logging_config import get_logger, setup_logging
 from qknee.data.ingestion import DataIngestion, IngestionError
 from qknee.models.pipeline import PipelineRunner, PipelineValidationError
@@ -54,6 +59,181 @@ logger = get_logger("qknee.api")
 _config = load_config()
 PCA_ARTIFACT_PATH = _config.paths.pca_artifact
 TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
+
+
+# --------------------------------------------------------------------------- #
+# CacheService — unified Redis-or-in-memory cache facade
+# --------------------------------------------------------------------------- #
+
+class CacheService:
+    """Unified async cache facade in front of two backends:
+
+        - Redis (`redis.asyncio`), when `$REDIS_URL` is set — connection is
+          attempted lazily (on first cache access, not at import time) with
+          exponential backoff across `max_retries` attempts; a failure at
+          any point (missing `redis` package, connection refused, timeout)
+          logs a warning and permanently degrades this instance to the
+          in-memory backend for the rest of the process's lifetime, rather
+          than retrying on every subsequent call or raising into the
+          request path.
+        - An in-process `dict` with per-key TTL, when `$REDIS_URL` is unset
+          (the default, correct configuration for a single-node free-tier
+          deployment — Render, Streamlit Cloud, Vercel) or once Redis has
+          been given up on as above.
+
+    Values are pickled before being written to Redis (so a numpy Grad-CAM
+    array round-trips exactly) — this cache only ever stores payloads this
+    process itself computed and wrote, never externally-supplied data, so
+    `pickle`'s arbitrary-code-execution-on-load risk does not apply to the
+    values it reads back.
+    """
+
+    _MAX_MEMORY_ENTRIES = 256
+
+    def __init__(self, redis_url: str = "", default_ttl_seconds: int = 3600, namespace: str = "qknee", max_retries: int = 3) -> None:
+        self._redis_url = redis_url
+        self._default_ttl = default_ttl_seconds
+        self._namespace = namespace
+        self._max_retries = max_retries
+
+        self._redis_client: Optional[Any] = None
+        self._redis_unavailable = not bool(redis_url)
+        self._connect_lock = asyncio.Lock()
+
+        self._memory: Dict[str, Tuple[Optional[float], Any]] = {}
+        self._memory_lock = threading.Lock()
+
+        if self._redis_unavailable:
+            logger.info("CacheService: REDIS_URL not set — using in-process TTL cache.")
+
+    @property
+    def backend_name(self) -> str:
+        """`"redis"` once a live connection has been established, else
+        `"in-memory"` — read by `/health` so an operator can confirm which
+        backend is actually active (e.g. after a Redis outage silently
+        degraded a running process)."""
+        return "redis" if self._redis_client is not None else "in-memory"
+
+    async def _ensure_redis(self) -> Optional[Any]:
+        if self._redis_unavailable:
+            return None
+        if self._redis_client is not None:
+            return self._redis_client
+
+        async with self._connect_lock:
+            # Re-check inside the lock: another coroutine may have already
+            # connected (or given up) while this one was waiting.
+            if self._redis_client is not None or self._redis_unavailable:
+                return self._redis_client
+
+            try:
+                import redis.asyncio as aioredis
+            except ImportError:
+                logger.warning(
+                    "REDIS_URL is set but the 'redis' package is not installed; "
+                    "degrading to in-process TTL caching."
+                )
+                self._redis_unavailable = True
+                return None
+
+            redacted = redact_connection_string(self._redis_url)
+            backoff = 0.25
+            for attempt in range(1, self._max_retries + 1):
+                try:
+                    client = aioredis.from_url(
+                        self._redis_url, socket_connect_timeout=2.0, socket_timeout=2.0,
+                    )
+                    await client.ping()
+                    self._redis_client = client
+                    logger.info("CacheService connected to Redis at %s (attempt %d/%d).", redacted, attempt, self._max_retries)
+                    return client
+                except Exception as exc:  # noqa: BLE001 - any connectivity failure retries/degrades, never raises
+                    logger.warning(
+                        "Redis connection attempt %d/%d to %s failed: %s",
+                        attempt, self._max_retries, redacted, exc,
+                    )
+                    if attempt < self._max_retries:
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+
+            logger.warning(
+                "Could not connect to Redis at %s after %d attempts; degrading to in-process "
+                "TTL caching for the rest of this process's lifetime.", redacted, self._max_retries,
+            )
+            self._redis_unavailable = True
+            return None
+
+    async def get(self, key: str) -> Optional[Any]:
+        full_key = f"{self._namespace}:{key}"
+        client = await self._ensure_redis()
+        if client is not None:
+            try:
+                import pickle
+
+                raw = await client.get(full_key)
+                if raw is not None:
+                    return pickle.loads(raw)
+                return None
+            except Exception as exc:  # noqa: BLE001 - a live-but-flaky Redis falls back per-call, not permanently
+                logger.warning("Redis GET failed (%s); serving this lookup from the in-memory cache instead.", exc)
+        return self._memory_get(full_key)
+
+    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
+        ttl = self._default_ttl if ttl is None else ttl
+        full_key = f"{self._namespace}:{key}"
+        client = await self._ensure_redis()
+        if client is not None:
+            try:
+                import pickle
+
+                await client.set(full_key, pickle.dumps(value), ex=ttl)
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Redis SET failed (%s); writing this entry to the in-memory cache instead.", exc)
+        self._memory_set(full_key, value, ttl)
+
+    async def get_or_set(self, key: str, compute_fn, ttl: Optional[int] = None) -> Any:
+        """Returns the cached value for `key` if present, else calls the
+        zero-argument `compute_fn` (synchronous — the caller wraps any
+        blocking pipeline/Grad-CAM work), caches its result, and returns
+        it. The single call site every expensive lookup in this module
+        (Grad-CAM inference, precomputed-cache reads) should go through."""
+        cached = await self.get(key)
+        if cached is not None:
+            return cached
+        value = compute_fn()
+        await self.set(key, value, ttl=ttl)
+        return value
+
+    # -- in-memory TTL dict: both the pure fallback and Redis's own
+    # per-call degrade path share this implementation. --
+    def _memory_get(self, full_key: str) -> Optional[Any]:
+        with self._memory_lock:
+            entry = self._memory.get(full_key)
+            if entry is None:
+                return None
+            expires_at, value = entry
+            if expires_at is not None and time.monotonic() > expires_at:
+                del self._memory[full_key]
+                return None
+            return value
+
+    def _memory_set(self, full_key: str, value: Any, ttl: Optional[int]) -> None:
+        expires_at = (time.monotonic() + ttl) if ttl else None
+        with self._memory_lock:
+            self._memory[full_key] = (expires_at, value)
+            if len(self._memory) > self._MAX_MEMORY_ENTRIES:
+                # Evict the oldest entry (insertion-ordered dict) — a
+                # simple bound so a long-running single-node process never
+                # grows this dict unboundedly, not a true LRU.
+                oldest_key = next(iter(self._memory))
+                del self._memory[oldest_key]
+
+
+cache_service = CacheService(
+    redis_url=_config.storage.redis_url,
+    default_ttl_seconds=_config.storage.cache_ttl_seconds,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +251,8 @@ class HealthResponse(BaseModel):
     status: str
     backend_ready: bool
     detail: Optional[str] = None
+    user_store_backend: str = Field(..., description="'SQLAlchemyUserRepository' or 'LocalFileUserRepository'.")
+    cache_backend: str = Field(..., description="'redis' or 'in-memory' — see qknee.api.server.CacheService.")
 
 
 class ExplanationResponse(BaseModel):
@@ -284,12 +466,27 @@ backend = QKneeBackend()
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
 def health() -> HealthResponse:
-    """Reports whether the live QKneeModel backend loaded successfully."""
+    """Reports whether the live QKneeModel backend loaded successfully,
+    plus which storage backends are actually active for the user store and
+    the cache — useful to confirm a configured `$DATABASE_URL`/`$REDIS_URL`
+    actually connected, rather than silently degrading to the local
+    fallback."""
     return HealthResponse(
         status="ok",
         backend_ready=backend.backend_ready,
         detail=backend.load_error,
+        user_store_backend=type(user_store).__name__,
+        cache_backend=cache_service.backend_name,
     )
+
+
+def _predict_cache_key(raw_bytes: bytes) -> str:
+    """Content-addressed cache key for one uploaded slice/volume's
+    prediction — identical bytes always hash to the same key, so a
+    repeat upload of the same file (whether via `/predict` or `/explain`,
+    both share this key) is served from `CacheService` instead of re-
+    running the ResNet18 -> PCA -> VQC -> Grad-CAM pipeline."""
+    return f"predict:{hashlib.sha256(raw_bytes).hexdigest()}"
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
@@ -301,13 +498,27 @@ async def predict(
     Q-Knee pipeline and returns the tear-risk score, diagnosis label, and a
     base64-encoded Grad-CAM overlay for visual explainability. Requires a
     bearer token for a `radiologist`/`triage_nurse` account — 401 with no
-    token, 403 for a `guest_demo` token."""
+    token, 403 for a `guest_demo` token.
+
+    The expensive part of this call (ResNet18 forward pass + Grad-CAM
+    backward pass) is routed through `CacheService`, keyed on the
+    uploaded file's content hash — a repeat upload of the same slice
+    (including one that arrives via `/explain` instead) is served from
+    cache rather than re-run."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     logger.info("POST /predict by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
-    return backend.predict(raw_bytes, file.filename or "upload")
+    cache_key = _predict_cache_key(raw_bytes)
+    cached = await cache_service.get(cache_key)
+    if cached is not None:
+        logger.debug("POST /predict cache hit (key=%s)", cache_key)
+        return PredictionResponse(**cached)
+
+    result = backend.predict(raw_bytes, file.filename or "upload")
+    await cache_service.set(cache_key, result.model_dump(), ttl=_config.storage.cache_ttl_seconds)
+    return result
 
 
 @app.post("/explain", response_model=ExplanationResponse, tags=["Inference"])
@@ -319,15 +530,24 @@ async def explain(
     Q-Knee pipeline and returns just its Grad-CAM explainability heatmap
     (plus the risk score for context) — the explanation-focused
     counterpart to /predict. Shares /predict's exact upload contract, auth
-    requirement, file parsing, and error handling (delegates to the same
-    `QKneeBackend.predict` call), so a client can point either endpoint at
-    the same file with the same bearer token."""
+    requirement, file parsing, error handling, and `CacheService` entry
+    (same content-hash key — an /predict then /explain round-trip on the
+    same file only ever runs the pipeline once), so a client can point
+    either endpoint at the same file with the same bearer token."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     logger.info("POST /explain by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
-    prediction = backend.predict(raw_bytes, file.filename or "upload")
+    cache_key = _predict_cache_key(raw_bytes)
+    cached = await cache_service.get(cache_key)
+    if cached is not None:
+        logger.debug("POST /explain cache hit (key=%s)", cache_key)
+        prediction = PredictionResponse(**cached)
+    else:
+        prediction = backend.predict(raw_bytes, file.filename or "upload")
+        await cache_service.set(cache_key, prediction.model_dump(), ttl=_config.storage.cache_ttl_seconds)
+
     return ExplanationResponse(
         gradcam_heatmap=prediction.gradcam_heatmap,
         risk_score=prediction.risk_score,

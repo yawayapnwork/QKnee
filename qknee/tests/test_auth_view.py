@@ -355,7 +355,7 @@ class TestDemoAccountFlow:
         next(b for b in at.button if "Demo Account" in b.label).click().run()
 
         assert not at.exception
-        assert at.tabs[0].label == "🔬 Diagnostic View"
+        assert at.tabs[0].label == "Diagnostic Workstation"
 
 
 class TestSignupFlow:

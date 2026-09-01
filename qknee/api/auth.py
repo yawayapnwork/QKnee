@@ -11,13 +11,25 @@ Cryptography & token pipeline:
       fixed `ACCESS_TOKEN_EXPIRE_MINUTES = 60` lifetime.
 
 User store:
-    A JSON-file-backed store (`qknee/api/users.json`, created on first use)
-    keyed by lowercased username. Every account carries one of three roles
-    (`ROLES` below) — `radiologist` and `triage_nurse` are the clinical
-    roles permitted to run diagnostic inference (`/predict`, `/explain`);
-    `guest_demo` is a read-only demo/judge account. No accounts ship
-    pre-seeded: the store starts empty and is populated only via
-    `POST /api/v1/auth/signup`.
+    Storage-backend-agnostic via the `UserRepository` interface below, with
+    two implementations selected automatically from `$DATABASE_URL` (see
+    `qknee.config.loader.StorageConfig`):
+        - `SQLAlchemyUserRepository` — used when `$DATABASE_URL` names a
+          reachable database (PostgreSQL in production; any other
+          SQLAlchemy-supported URL, including a local `sqlite:///...`
+          file, also works).
+        - `LocalFileUserRepository` — a JSON-file-backed store
+          (`qknee/artifacts/users.json` by default, created on first use),
+          used whenever `$DATABASE_URL` is unset/empty, OR as an automatic
+          fallback if a configured `$DATABASE_URL` fails to connect at
+          startup. This is the correct (and default) backend for a
+          single-node free-tier deployment (Render, Streamlit Cloud,
+          Vercel) with no managed Postgres attached.
+    Every account carries one of three roles (`ROLES` below) —
+    `radiologist` and `triage_nurse` are the clinical roles permitted to
+    run diagnostic inference (`/predict`, `/explain`); `guest_demo` is a
+    read-only demo/judge account. No accounts ship pre-seeded: the store
+    starts empty and is populated only via `POST /api/v1/auth/signup`.
 
     PRODUCTION CAVEAT: `/signup` currently lets a caller self-assign any
     role, including the clinical ones — acceptable for this research-
@@ -40,6 +52,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,7 +65,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from qknee.config.loader import load_config
+from qknee.config.loader import load_config, redact_connection_string
 from qknee.config.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -209,14 +222,19 @@ def decode_access_token(token: str) -> TokenData:
 
 
 # --------------------------------------------------------------------------- #
-# User store (JSON-file-backed)
+# User store: abstract repository + two backends
+# (LocalFileUserRepository / SQLAlchemyUserRepository), selected by
+# `_build_user_repository()` from `$DATABASE_URL` at the bottom of this
+# section.
 # --------------------------------------------------------------------------- #
 
-USERS_STORE_PATH = Path(__file__).resolve().parent / "users.json"
+USERS_STORE_PATH = _config.storage.local_users_path
+DEFAULT_LOCAL_USERS_PATH = USERS_STORE_PATH  # explicit alias matching this section's new naming
 
 
 class UserAlreadyExistsError(Exception):
-    """Raised by `UserStore.create_user` when the username is already taken."""
+    """Raised by a `UserRepository.create_user` implementation when the
+    username is already taken."""
 
 
 @dataclass
@@ -231,15 +249,59 @@ class StoredUser:
         return UserResponse(id=self.id, username=self.username, role=self.role, created_at=self.created_at)
 
 
-class UserStore:
-    """Minimal JSON-file user store, guarded by a `threading.Lock` for
-    read-modify-write safety under FastAPI's threadpool-executed sync
-    endpoints. Not a substitute for a real RDBMS under concurrent
-    multi-process deployment — see the module docstring's SQLite
-    alternative — but sufficient for a single-process demo/API server.
+class UserRepository(ABC):
+    """Storage-backend-agnostic user repository — `qknee.api.auth`'s
+    `/signup`/`/login`/`/me` routes and FastAPI dependencies talk to this
+    interface exclusively (via the module-level `user_store` instance
+    below), never to a concrete backend directly, so password hashing
+    (Argon2id), JWT issuance, and role validation are identical regardless
+    of which implementation is active.
     """
 
-    def __init__(self, path: Path = USERS_STORE_PATH) -> None:
+    @abstractmethod
+    def get_by_username(self, username: str) -> Optional[StoredUser]:
+        """Case-insensitive username lookup. Returns `None` if no such
+        account exists."""
+
+    @abstractmethod
+    def create_user(self, user_create: UserCreate) -> StoredUser:
+        """Hashes the password and persists a new account. Raises
+        `UserAlreadyExistsError` if the (case-insensitive) username is
+        already taken, or `ValueError` if `user_create.role` isn't one of
+        `ROLES`."""
+
+    def authenticate(self, username: str, password: str) -> Optional[StoredUser]:
+        """Returns the `StoredUser` if `username`/`password` are valid,
+        else `None`. Backend-agnostic: implemented once here in terms of
+        `get_by_username` + `verify_password`, so every backend gets
+        identical authentication semantics for free."""
+        user = self.get_by_username(username)
+        if user is None:
+            # Returns immediately rather than hashing a dummy password to
+            # equalize timing against the "wrong password" branch below —
+            # username-enumeration-via-timing isn't this demo API's threat
+            # model priority; noted explicitly rather than silently
+            # accepted.
+            return None
+        if not verify_password(password, user.hashed_password):
+            return None
+        return user
+
+
+class LocalFileUserRepository(UserRepository):
+    """JSON-file-backed user repository, guarded by a `threading.Lock` for
+    read-modify-write safety under FastAPI's threadpool-executed sync
+    endpoints. The default backend whenever `$DATABASE_URL` is unset/empty
+    — the correct (and zero-config) choice for a single-node free-tier
+    deployment (Render, Streamlit Cloud, Vercel) with no managed Postgres
+    attached — and also the automatic fallback if a configured
+    `$DATABASE_URL` fails to connect at startup (see
+    `_build_user_repository`). Not a substitute for a real RDBMS under
+    concurrent multi-process deployment — see `SQLAlchemyUserRepository`
+    below for that case.
+    """
+
+    def __init__(self, path: Path = DEFAULT_LOCAL_USERS_PATH) -> None:
         self._path = Path(path)
         self._lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,23 +346,150 @@ class UserStore:
             self._write(data)
         return stored
 
-    def authenticate(self, username: str, password: str) -> Optional[StoredUser]:
-        """Returns the `StoredUser` if `username`/`password` are valid,
-        else `None`."""
-        user = self.get_by_username(username)
-        if user is None:
-            # Returns immediately rather than hashing a dummy password to
-            # equalize timing against the "wrong password" branch below —
-            # username-enumeration-via-timing isn't this demo API's threat
-            # model priority; noted explicitly rather than silently
-            # accepted.
-            return None
-        if not verify_password(password, user.hashed_password):
-            return None
-        return user
+
+# Backward-compatible alias: `UserStore` was this class's name before the
+# `UserRepository` interface was introduced. Existing call sites/tests
+# (`UserStore(path)`, `isinstance(x, UserStore)`) keep working unchanged —
+# this is the exact same class, not a wrapper.
+UserStore = LocalFileUserRepository
 
 
-user_store = UserStore()
+def _to_sync_sqlalchemy_url(database_url: str) -> str:
+    """Strips a `+<async_driver>` DBAPI qualifier (e.g. `postgresql+asyncpg://`
+    -> `postgresql://`) from `database_url`'s dialect. `qknee.api.auth`'s
+    routes are defined as sync `def`s (Starlette already runs them in a
+    threadpool), so `SQLAlchemyUserRepository` always uses a synchronous
+    `Engine` — an async-only driver name like `asyncpg` in an example
+    `$DATABASE_URL` is accepted as input but never actually asked to open
+    an async connection; SQLAlchemy falls back to whatever *synchronous*
+    driver is installed for the same base dialect (`psycopg`/`psycopg2`
+    for `postgresql://`, the stdlib `sqlite3` module for `sqlite://`,
+    no extra install needed).
+    """
+    scheme, sep, rest = database_url.partition("://")
+    if not sep:
+        return database_url
+    dialect = scheme.split("+", 1)[0]
+    return f"{dialect}://{rest}"
+
+
+class SQLAlchemyUserRepository(UserRepository):
+    """SQLAlchemy-backed user repository — used whenever `$DATABASE_URL`
+    names a reachable database. Works against PostgreSQL in production,
+    or any other SQLAlchemy-supported synchronous dialect, including a
+    local `sqlite:///./users.db` file for a single-node deployment that
+    still wants a real SQL store instead of the JSON fallback.
+
+    Construction fails loudly (raises) on any connectivity/driver problem
+    — a missing DBAPI driver, an unreachable host, bad credentials — so
+    `_build_user_repository()` can catch that here, at startup, and
+    degrade to `LocalFileUserRepository` instead of a configured-but-
+    broken `$DATABASE_URL` surfacing as a 500 on the first `/signup` or
+    `/login` request.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        from sqlalchemy import Column, MetaData, String, Table, create_engine, select
+        from sqlalchemy.exc import IntegrityError
+
+        self._select = select
+        self._IntegrityError = IntegrityError
+
+        sync_url = _to_sync_sqlalchemy_url(database_url)
+        self._engine = create_engine(sync_url, pool_pre_ping=True, future=True)
+
+        self._metadata = MetaData()
+        self._users = Table(
+            "qknee_users",
+            self._metadata,
+            Column("id", String(64), primary_key=True),
+            Column("username", String(64), nullable=False),
+            Column("username_lower", String(64), nullable=False, unique=True, index=True),
+            Column("hashed_password", String(256), nullable=False),
+            Column("role", String(32), nullable=False),
+            Column("created_at", String(64), nullable=False),
+        )
+        # Connects and creates the table (if missing) right away, so a
+        # bad URL/unreachable host fails here — inside this constructor —
+        # rather than lazily on the first real request.
+        self._metadata.create_all(self._engine)
+
+    @staticmethod
+    def _row_to_user(row: Any) -> StoredUser:
+        return StoredUser(
+            id=row.id,
+            username=row.username,
+            hashed_password=row.hashed_password,
+            role=row.role,
+            created_at=row.created_at,
+        )
+
+    def get_by_username(self, username: str) -> Optional[StoredUser]:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                self._select(self._users).where(self._users.c.username_lower == username.lower())
+            ).first()
+        return self._row_to_user(row) if row is not None else None
+
+    def create_user(self, user_create: UserCreate) -> StoredUser:
+        role = user_create.role or DEFAULT_ROLE
+        if role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}, got {role!r}")
+
+        stored = StoredUser(
+            id=uuid.uuid4().hex,
+            username=user_create.username,
+            hashed_password=hash_password(user_create.password),
+            role=role,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    self._users.insert().values(
+                        id=stored.id,
+                        username=stored.username,
+                        username_lower=stored.username.lower(),
+                        hashed_password=stored.hashed_password,
+                        role=stored.role,
+                        created_at=stored.created_at,
+                    )
+                )
+        except self._IntegrityError as exc:
+            raise UserAlreadyExistsError(f"Username '{user_create.username}' is already taken") from exc
+        return stored
+
+
+def _build_user_repository() -> UserRepository:
+    """Selects the user-repository backend from `$DATABASE_URL`
+    (`qknee.config.loader.StorageConfig.database_url`):
+        - unset/empty -> `LocalFileUserRepository` (no error, no warning —
+          this is the expected, fully-supported configuration for a
+          single-node free-tier deployment).
+        - set but unreachable/misconfigured -> logs a warning and falls
+          back to `LocalFileUserRepository` rather than crashing the API
+          at import time.
+        - set and reachable -> `SQLAlchemyUserRepository`.
+    """
+    database_url = _config.storage.database_url.strip()
+    if database_url:
+        redacted = redact_connection_string(database_url)
+        try:
+            repository: UserRepository = SQLAlchemyUserRepository(database_url)
+            logger.info("User store backend: SQLAlchemyUserRepository (%s)", redacted)
+            return repository
+        except Exception as exc:  # noqa: BLE001 - any driver/connectivity failure degrades, never crashes
+            logger.warning(
+                "Failed to initialize SQLAlchemyUserRepository for DATABASE_URL=%s (%s); "
+                "falling back to LocalFileUserRepository.", redacted, exc,
+            )
+
+    repository = LocalFileUserRepository(DEFAULT_LOCAL_USERS_PATH)
+    logger.info("User store backend: LocalFileUserRepository (%s)", DEFAULT_LOCAL_USERS_PATH)
+    return repository
+
+
+user_store: UserRepository = _build_user_repository()
 
 
 # --------------------------------------------------------------------------- #
