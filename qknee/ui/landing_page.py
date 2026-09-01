@@ -166,14 +166,15 @@ _HERO_CSS = f"""
 <style>
 .qknee-hero {{
     padding: 2.2rem 2rem 1.7rem 2rem;
-    border-radius: 0.7rem;
-    background: linear-gradient(135deg, #0B1420 0%, #111C33 55%, #0D1B2A 100%);
-    border: 1px solid {theme.BORDER_GREY}30;
+    border-radius: {theme.RADIUS_SHARP};
+    background: linear-gradient(135deg, {theme.SURFACE_IVORY} 0%, {theme.SAGE_TINT}55 100%);
+    border: 1px solid {theme.BORDER_GREY};
+    box-shadow: {theme.CARD_SHADOW};
     margin-bottom: 1.2rem;
     text-align: center;
 }}
 .qknee-hero-eyebrow {{
-    color: {theme.SURGICAL_TEAL};
+    color: {theme.SAGE_GREEN};
     letter-spacing: 0.12em;
     font-size: 0.76rem;
     font-weight: 700;
@@ -186,7 +187,7 @@ _HERO_CSS = f"""
     line-height: 1.1;
     letter-spacing: -0.02em;
     margin: 0 0 0.5rem 0;
-    color: {theme.STERILE_WHITE};
+    color: {theme.FOREST_GREEN};
 }}
 .qknee-hero-tagline {{
     font-size: 1.05rem;
@@ -208,14 +209,10 @@ _HERO_CSS = f"""
 # --------------------------------------------------------------------------- #
 
 def render_hero() -> None:
-    """Institutional header (laboratory branding + system status), the
-    NISQ Clinical Research Disclosure banner, the hero title/tagline,
-    three formal capability-summary cards, and the two primary CTA
-    buttons."""
-    theme.inject_clinical_theme()
-    theme.render_institutional_masthead(active_module="Institutional Overview")
-    theme.render_disclosure_banner()
-
+    """Hero title/tagline, three formal capability-summary cards, and the
+    two primary CTA buttons. The institutional masthead/navbar and NISQ
+    disclosure are rendered once, globally, by `dashboard.main()` — this
+    function must not re-render them."""
     st.markdown(_HERO_CSS, unsafe_allow_html=True)
     st.markdown(
         f"""
@@ -469,7 +466,7 @@ def render_live_sample_showcase() -> None:
 
                 preview_key = f"_qknee_showcase_preview_{case['case_id']}"
                 if st.button(
-                    "View Case Detail", key=f"qknee_showcase_btn_{case['case_id']}", use_container_width=True,
+                    "Load Study", key=f"qknee_showcase_btn_{case['case_id']}", use_container_width=True,
                 ):
                     st.session_state[preview_key] = True
 

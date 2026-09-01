@@ -606,6 +606,11 @@ def normalize_for_display(slice_2d: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 def render_header() -> None:
+    """Renders the single top-level frame shared by every page: page
+    config, the clinical design-system CSS, the global pill navbar, and
+    the collapsible NISQ disclosure. Called exactly once from `main()` —
+    subpages (`landing_page`, workspace tabs) must never re-render these,
+    or the masthead/disclosure duplicate on screen."""
     st.set_page_config(
         page_title="Q-Knee Diagnostic Workstation",
         page_icon=theme.CLINICAL_GLYPH,
@@ -613,10 +618,8 @@ def render_header() -> None:
         initial_sidebar_state="expanded",
     )
     theme.inject_clinical_theme()
-    theme.render_institutional_masthead(active_module="Diagnostic Dashboard")
+    auth_view.render_global_navbar()
     theme.render_disclosure_banner()
-    st.markdown('<div class="qknee-eyebrow">Diagnostic Workstation</div>', unsafe_allow_html=True)
-    st.caption("Quantum-assisted ACL / medial meniscus tear-risk triage console.")
 
 
 def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]) -> None:
@@ -733,20 +736,22 @@ def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray])
 
     n_qubits = len(pauli_z_expectations)
     fig, ax = plt.subplots(figsize=(4, 2.6))
-    fig.patch.set_alpha(0.0)
-    ax.set_facecolor("none")
+    fig.patch.set_facecolor(theme.CARD_SURFACE)
+    ax.set_facecolor(theme.CARD_SURFACE)
 
-    colors_ = [theme.SURGICAL_TEAL if value >= 0 else theme.RISK_HIGH for value in pauli_z_expectations]
+    colors_ = [theme.FOREST_GREEN if value >= 0 else theme.RISK_HIGH for value in pauli_z_expectations]
     qubit_labels = [f"Q{i}" for i in range(n_qubits)]
     ax.bar(qubit_labels, pauli_z_expectations, color=colors_, edgecolor="none")
     ax.axhline(0.0, color=theme.TEXT_MUTED, linewidth=0.8)
+    ax.grid(axis="y", color="#CBD5E1", linewidth=0.6, alpha=0.7)
+    ax.set_axisbelow(True)
 
     ax.set_ylim(-1.0, 1.0)
     ax.set_ylabel("Pauli-Z Expectation ⟨Z⟩", color=theme.STERILE_WHITE)
-    ax.set_title("Hilbert-Space Rotation Attribution", color=theme.STERILE_WHITE, fontsize=10)
-    ax.tick_params(colors=theme.STERILE_WHITE)
+    ax.set_title("Hilbert-Space Rotation Attribution", color=theme.FOREST_GREEN, fontsize=10)
+    ax.tick_params(colors=theme.TEXT_MUTED)
     for spine in ax.spines.values():
-        spine.set_color(theme.TEXT_MUTED)
+        spine.set_color(theme.BORDER_GREY)
 
     fig.tight_layout()
     st.pyplot(fig, use_container_width=True)
@@ -1042,7 +1047,7 @@ def render_benchmark_tab() -> None:
                 "Model": [m["name"] for m in models],
                 "ROC-AUC": [m["roc_auc"] for m in models],
             }).set_index("Model")
-            st.bar_chart(roc_df)
+            st.bar_chart(roc_df, color=theme.FOREST_GREEN)
             st.caption(f"Pre-rendered ROC curve not found at `{BENCHMARK_ROC_PATH}`; showing a bar chart instead.")
 
     with latency_col:
@@ -1051,7 +1056,7 @@ def render_benchmark_tab() -> None:
             "Model": [m["name"] for m in models],
             "Latency (ms)": [m.get("latency_ms_per_sample") or 0.0 for m in models],
         }).set_index("Model")
-        st.bar_chart(latency_df)
+        st.bar_chart(latency_df, color=theme.SAGE_GREEN)
         st.caption("Single-sample (batch-size-1) wall-clock latency — reflects real one-slice-at-a-time inference.")
 
     circuit_diagram_path = DECK_FIGURES_DIR / "circuit_diagram.png"
@@ -1325,11 +1330,6 @@ def main() -> None:
     # call is what actually does the pre-warming.
     precomputed_cache = load_precomputed_cache()
 
-    render_header()
-    auth_view.render_top_nav()
-    if precomputed_cache is not None:
-        st.sidebar.caption(f"Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
-
     # `qknee.ui.landing_page`'s CTAs / this module's own workspace-tab
     # buttons write `VIEW_STATE_KEY` ("landing"/"diagnostic"/"benchmark")
     # as a *destination hint*, independently of authentication — that
@@ -1341,6 +1341,10 @@ def main() -> None:
     # originally-requested tab once they do sign in (VIEW_STATE_KEY is
     # left untouched across that detour, so it's still "diagnostic" by the
     # time `_navigate_after_auth` reads it back).
+    #
+    # This reconciliation MUST happen before `render_header()` — the top
+    # frame's navbar reads `CURRENT_PAGE_KEY` to highlight the active pill,
+    # and would otherwise flash the pre-redirect destination for one rerun.
     requested_view = st.session_state.get(VIEW_STATE_KEY, VIEW_LANDING)
     current_page = st.session_state.get(auth_view.CURRENT_PAGE_KEY, auth_view.PAGE_LANDING)
 
@@ -1353,6 +1357,10 @@ def main() -> None:
             # only reaches here once `is_authenticated()` is True.
             current_page = auth_view.PAGE_WORKSPACE
         st.session_state[auth_view.CURRENT_PAGE_KEY] = current_page
+
+    render_header()
+    if precomputed_cache is not None:
+        st.sidebar.caption(f"Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
 
     if current_page in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
         auth_view.render_auth_page(default_tab=current_page)

@@ -841,10 +841,12 @@ def render_risk_gauge(risk_score: float) -> plt.Figure:
     """Renders a semicircular risk-score gauge (green/amber/red zones) with
     a needle pointing at the current score, via matplotlib."""
     fig, ax = plt.subplots(figsize=(4, 2.4), subplot_kw={"projection": "polar"})
-    fig.patch.set_alpha(0.0)
-    ax.set_facecolor("none")
+    fig.patch.set_facecolor(theme.CARD_SURFACE)
+    ax.set_facecolor(theme.CARD_SURFACE)
 
-    zones = [(0.0, 0.33, "#2ECC71"), (0.33, 0.66, "#F5A623"), (0.66, 1.0, "#E74C3C")]
+    # Sage-to-forest-green severity zones (not a rainbow scale) — low risk
+    # is pale sage, high risk is muted terracotta, matching the badge palette.
+    zones = [(0.0, 0.33, theme.SAGE_GREEN), (0.33, 0.66, theme.RISK_MODERATE), (0.66, 1.0, theme.RISK_HIGH)]
     for start, end, color in zones:
         ax.barh(
             1,
@@ -856,8 +858,8 @@ def render_risk_gauge(risk_score: float) -> plt.Figure:
         )
 
     needle_angle = risk_score * np.pi
-    ax.plot([needle_angle, needle_angle], [0, 1.15], color="white", linewidth=3, solid_capstyle="round")
-    ax.scatter([needle_angle], [0], color="white", s=60, zorder=5)
+    ax.plot([needle_angle, needle_angle], [0, 1.15], color=theme.FOREST_GREEN, linewidth=3, solid_capstyle="round")
+    ax.scatter([needle_angle], [0], color=theme.FOREST_GREEN, s=60, zorder=5)
 
     ax.set_theta_zero_location("W")
     ax.set_theta_direction(-1)
@@ -876,7 +878,7 @@ def render_risk_gauge(risk_score: float) -> plt.Figure:
     # to the figure instead of the polar axes.
     fig.text(
         0.5, 0.08, f"{risk_score * 100:.1f}%",
-        ha="center", va="center", fontsize=22, fontweight="bold", color="white",
+        ha="center", va="center", fontsize=22, fontweight="bold", color=theme.FOREST_GREEN,
     )
     return fig
 
@@ -941,20 +943,22 @@ def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray])
 
     n_qubits = len(pauli_z_expectations)
     fig, ax = plt.subplots(figsize=(4, 2.6))
-    fig.patch.set_alpha(0.0)
-    ax.set_facecolor("none")
+    fig.patch.set_facecolor(theme.CARD_SURFACE)
+    ax.set_facecolor(theme.CARD_SURFACE)
 
-    colors = [theme.SURGICAL_TEAL if value >= 0 else theme.RISK_HIGH for value in pauli_z_expectations]
+    colors = [theme.FOREST_GREEN if value >= 0 else theme.RISK_HIGH for value in pauli_z_expectations]
     qubit_labels = [f"Q{i}" for i in range(n_qubits)]
     ax.bar(qubit_labels, pauli_z_expectations, color=colors, edgecolor="none")
     ax.axhline(0.0, color=theme.TEXT_MUTED, linewidth=0.8)
+    ax.grid(axis="y", color="#CBD5E1", linewidth=0.6, alpha=0.7)
+    ax.set_axisbelow(True)
 
     ax.set_ylim(-1.0, 1.0)
     ax.set_ylabel("Pauli-Z Expectation ⟨Z⟩", color=theme.STERILE_WHITE)
-    ax.set_title("Hilbert-Space Rotation Attribution", color=theme.STERILE_WHITE, fontsize=10)
-    ax.tick_params(colors=theme.STERILE_WHITE)
+    ax.set_title("Hilbert-Space Rotation Attribution", color=theme.FOREST_GREEN, fontsize=10)
+    ax.tick_params(colors=theme.TEXT_MUTED)
     for spine in ax.spines.values():
-        spine.set_color(theme.TEXT_MUTED)
+        spine.set_color(theme.BORDER_GREY)
 
     fig.tight_layout()
     return fig

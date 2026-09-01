@@ -43,6 +43,7 @@ from typing import Dict, Optional
 import streamlit as st
 
 from qknee.config.logging_config import get_logger
+from qknee.ui import theme
 
 logger = get_logger(__name__)
 
@@ -87,8 +88,6 @@ UI_ROLE_TO_BACKEND_ROLE: Dict[str, str] = {
     "Clinical Researcher": "triage_nurse",
     "Student Evaluator": "guest_demo",
 }
-_BACKEND_ROLE_TO_UI_LABEL: Dict[str, str] = {backend: ui for ui, backend in UI_ROLE_TO_BACKEND_ROLE.items()}
-
 # Mirrors `qknee.api.auth.INFERENCE_ROLES` (the two roles the API's
 # `require_role` guard permits onto `/predict`/`/explain`) — duplicated as
 # a plain literal tuple rather than imported, since `qknee.api.auth` has
@@ -393,7 +392,7 @@ def render_login_tab() -> None:
 
     st.divider()
     st.caption("Just exploring? Skip the form entirely:")
-    if st.button("⚡ Sign in with Demo Account", key="qknee_demo_login", use_container_width=True, disabled=locked):
+    if st.button("Sign in with Demo Account", key="qknee_demo_login", use_container_width=True, disabled=locked):
         _attempt_demo_login()
 
 
@@ -496,7 +495,7 @@ def render_auth_page(default_tab: str = PAGE_LOGIN) -> None:
     st.markdown("## Welcome to Q-Knee")
     st.caption("Sign in to access the live diagnostic workspace, or create a free account.")
 
-    login_label, signup_label = "🔐 Sign In", "📝 Create Account"
+    login_label, signup_label = "Sign In", "Create Account"
     tab_labels = [signup_label, login_label] if default_tab == PAGE_SIGNUP else [login_label, signup_label]
     tabs_by_label = dict(zip(tab_labels, st.tabs(tab_labels)))
 
@@ -514,40 +513,13 @@ def render_auth_page(default_tab: str = PAGE_LOGIN) -> None:
 # Persistent top navigation toolbar
 # --------------------------------------------------------------------------- #
 
-_NAV_CSS = """
-<style>
-.qknee-nav-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    height: 2.4rem;
-}
-.qknee-avatar {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #4FD1C5 0%, #2B6CB0 100%);
-    color: #0B1420;
-    font-weight: 700;
-    font-size: 0.82rem;
-}
-.qknee-user-name {
-    font-weight: 600;
-    color: #E6EDF3;
-}
-.qknee-role-tag {
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: #4FD1C5;
-    border: 1px solid #2E4A52;
-    border-radius: 0.4rem;
-    padding: 0.1rem 0.45rem;
-}
-</style>
-"""
+# Center pill-nav destinations. "Clinical Audit" has no dedicated feature
+# yet, so it routes to the authenticated workspace gate (sign-in / account)
+# rather than inventing a page — the closest real destination for an
+# audit-trail-style view in this product today.
+_NAV_ITEM_WORKSTATION = "Workstation"
+_NAV_ITEM_BENCHMARKS = "Performance Benchmarks"
+_NAV_ITEM_AUDIT = "Clinical Audit"
 
 
 def _initials(name: str) -> str:
@@ -559,71 +531,88 @@ def _initials(name: str) -> str:
     return (parts[0][0] + parts[-1][0]).upper()
 
 
-def _render_logged_out_nav() -> None:
+def _active_nav_item() -> Optional[str]:
     from qknee.ui import landing_page
 
-    cols = st.columns([1.6, 0.9, 1.3, 1, 0.9, 1.1])
-    with cols[0]:
-        st.markdown("**🦵 Q-Knee**")
-    with cols[1]:
-        if st.button("Home", key="qknee_nav_home", use_container_width=True):
-            _go_to_landing()
-    with cols[2]:
-        if st.button("Product Features", key="qknee_nav_features", use_container_width=True):
-            _go_to_landing()
-    with cols[3]:
-        if st.button("Benchmarks", key="qknee_nav_benchmarks", use_container_width=True):
-            _go_to_workspace_tab(landing_page.VIEW_BENCHMARK)
-    with cols[4]:
-        if st.button("Sign In", key="qknee_nav_signin", use_container_width=True):
-            st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
-            st.rerun()
-    with cols[5]:
-        if st.button("Get Started", key="qknee_nav_get_started", type="primary", use_container_width=True):
-            st.session_state[CURRENT_PAGE_KEY] = PAGE_SIGNUP
-            st.rerun()
+    current_page = st.session_state.get(CURRENT_PAGE_KEY, PAGE_LANDING)
+    if current_page in (PAGE_LOGIN, PAGE_SIGNUP):
+        return _NAV_ITEM_AUDIT
+    if current_page != PAGE_WORKSPACE:
+        return None
+    requested_view = st.session_state.get(landing_page.VIEW_STATE_KEY, landing_page.VIEW_DIAGNOSTIC)
+    return _NAV_ITEM_BENCHMARKS if requested_view == landing_page.VIEW_BENCHMARK else _NAV_ITEM_WORKSTATION
 
 
-def _render_logged_in_nav() -> None:
+def render_global_navbar() -> None:
+    """Single, centralized top navigation bar — brand mark on the left, a
+    pill-style segmented control (Workstation / Performance Benchmarks /
+    Clinical Audit) centered, and a system-status badge plus a Clinician
+    Portal / Sign In (or account) control on the right. Call this exactly
+    once, near the top of `dashboard.main()`, before any page body
+    renders — it does not re-render on tab switches within a page."""
     from qknee.ui import landing_page
 
-    user_info = st.session_state.get(USER_INFO_KEY) or {}
-    display_name = user_info.get("full_name") or user_info.get("username", "User")
-    backend_role = user_info.get("role", DEMO_ROLE)
-    role_label = _BACKEND_ROLE_TO_UI_LABEL.get(backend_role, backend_role)
+    active = _active_nav_item()
 
-    st.markdown(_NAV_CSS, unsafe_allow_html=True)
-    cols = st.columns([1.4, 2.6, 2.1, 0.9])
-    with cols[0]:
-        st.markdown("**🦵 Q-Knee**")
-    with cols[1]:
+    brand_col, nav_col, status_col = st.columns([1.3, 2.1, 2.0])
+
+    with brand_col:
         st.markdown(
-            f'<div class="qknee-nav-badge">'
-            f'<span class="qknee-avatar">{_initials(display_name)}</span>'
-            f'<span class="qknee-user-name">{display_name}</span>'
-            f'<span class="qknee-role-tag">[{role_label}]</span>'
-            f"</div>",
+            f'<div style="display:flex; align-items:center; height:2.2rem;">'
+            f'<span class="qknee-brand-mark">Q</span>'
+            f'<div><div style="font-weight:800; font-size:0.95rem; color:{theme.FOREST_GREEN}; '
+            f'letter-spacing:-0.01em; text-transform:uppercase;">Q-Knee Clinical Workstation</div>'
+            f'<div style="font-size:0.66rem; color:{theme.TEXT_MUTED}; letter-spacing:0.04em;">'
+            f'Orthopedic MRI Research Division</div>'
+            f"</div></div>",
             unsafe_allow_html=True,
         )
-    with cols[2]:
-        if st.button("🔬 Switch to Diagnostic Workspace", key="qknee_nav_workspace", use_container_width=True):
-            _go_to_workspace_tab(landing_page.VIEW_DIAGNOSTIC)
-    with cols[3]:
-        if st.button("Log Out", key="qknee_nav_logout", use_container_width=True):
-            _log_out()
+
+    with nav_col:
+        pill_cols = st.columns(3)
+        nav_items = [
+            (_NAV_ITEM_WORKSTATION, landing_page.VIEW_DIAGNOSTIC),
+            (_NAV_ITEM_BENCHMARKS, landing_page.VIEW_BENCHMARK),
+            (_NAV_ITEM_AUDIT, None),
+        ]
+        for pill_col, (label, view) in zip(pill_cols, nav_items):
+            with pill_col:
+                button_type = "primary" if label == active else "secondary"
+                if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
+                    if view is not None:
+                        _go_to_workspace_tab(view)
+                    else:
+                        st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
+                        st.rerun()
+
+    with status_col:
+        right_cols = st.columns([1.5, 1])
+        with right_cols[0]:
+            st.markdown(
+                '<div style="display:flex; align-items:center; height:2.2rem; justify-content:flex-end;">'
+                '<span class="qknee-status-pill"><span class="qknee-status-dot"></span>System Operational</span>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        with right_cols[1]:
+            if st.session_state.get(AUTHENTICATED_KEY, False):
+                user_info = st.session_state.get(USER_INFO_KEY) or {}
+                display_name = user_info.get("full_name") or user_info.get("username", "User")
+                if st.button(_initials(display_name), key="qknee_nav_account", use_container_width=True,
+                             help=f"{display_name} — Log Out"):
+                    _log_out()
+            else:
+                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", use_container_width=True):
+                    st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
+                    st.rerun()
+
+    st.markdown("<hr style='margin: 0.4rem 0 1rem 0;'>", unsafe_allow_html=True)
 
 
 def render_top_nav() -> None:
-    """Persistent top navigation toolbar — call once, near the top of
-    `dashboard.main()`, before any page content. Renders the logged-out
-    (Home / Product Features / Benchmarks / Sign In / Get Started) or
-    logged-in (avatar badge, role tag, Switch to Diagnostic Workspace,
-    Log Out) variant based on `st.session_state[AUTHENTICATED_KEY]`."""
-    if st.session_state.get(AUTHENTICATED_KEY, False):
-        _render_logged_in_nav()
-    else:
-        _render_logged_out_nav()
-    st.markdown("<hr style='margin: 0.4rem 0 1rem 0;'>", unsafe_allow_html=True)
+    """Backwards-compatible alias for `render_global_navbar` — the single
+    top-level frame component `dashboard.main()` calls once."""
+    render_global_navbar()
 
 
 def is_authenticated() -> bool:

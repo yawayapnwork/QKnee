@@ -7,11 +7,15 @@ helpers that `qknee.ui.landing_page`, `qknee.ui.analysis_app`, and
 PACS-style diagnostic workstation, and the clinical dashboard read as one
 coherent product rather than three independently themed pages.
 
-Palette: deep clinical slate (`#0F172A`), sterile off-white (`#F8FAFC`),
-surgical teal (`#0D9488`), diagnostic blue (`#2563EB`), and cool-grey
-borders (`#CBD5E1`). Typography is Inter (falling back to SF Pro
-Display / system sans), no decorative emoji or cartoonish iconography —
-status and risk indicators are conveyed through formal badges instead.
+Palette: sterile ivory/white surfaces (`#FBFDFE`, `#F8FAFC`, `#FFFFFF`),
+deep medical forest/pine green (`#064E3B`) for institutional branding and
+primary headings, muted sage/eucalyptus (`#059669` / `#10B981` /
+`#D1FAE5`) for clinical badges and status chips, and charcoal-slate text
+(`#0F172A` primary, `#475569` metadata, `#94A3B8` secondary — never pure
+black). Typography is Inter (falling back to SF Pro Display / system
+sans) for copy and JetBrains Mono for tabular metrics, no decorative
+emoji or cartoonish iconography — status and risk indicators are
+conveyed through formal badges instead.
 
 RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 """
@@ -25,19 +29,32 @@ import numpy as np
 import streamlit as st
 
 # --------------------------------------------------------------------------- #
-# Design tokens
+# Design tokens — light clinical theme
 # --------------------------------------------------------------------------- #
 
-CLINICAL_SLATE = "#0F172A"
-STERILE_WHITE = "#F8FAFC"
-SURGICAL_TEAL = "#0D9488"
-DIAGNOSTIC_BLUE = "#2563EB"
-BORDER_GREY = "#CBD5E1"
-TEXT_MUTED = "#94A3B8"
+APP_BACKGROUND = "#F8FAFC"       # soft clinical white — page background
+CARD_SURFACE = "#FFFFFF"         # crisp white — cards, masthead, sidebar panels
+SURFACE_IVORY = "#FBFDFE"        # sterile ivory — hero/section backgrounds
+STERILE_WHITE = "#0F172A"        # primary copy color (charcoal slate; kept name for call-site compat)
+FOREST_GREEN = "#064E3B"         # deep medical forest/pine — branding, primary headings, active state
+SAGE_GREEN = "#059669"           # muted sage/eucalyptus — clinical badges, confidence tags, fills
+SAGE_TINT = "#D1FAE5"            # pale sage — chip backgrounds
+DIAGNOSTIC_BLUE = "#064E3B"      # legacy alias — now maps to forest green (blue accent retired)
+BORDER_GREY = "#E2E8F0"          # 1px card/divider borders
+TEXT_MUTED = "#475569"           # metadata / secondary copy
+TEXT_FAINT = "#94A3B8"           # tertiary/secondary labels
 
-RISK_LOW = "#15803D"
+# Kept for backward-compat with call sites still referencing the old dark
+# token names; both now resolve into the light palette above.
+CLINICAL_SLATE = APP_BACKGROUND
+SURGICAL_TEAL = SAGE_GREEN
+
+RADIUS_SHARP = "8px"
+CARD_SHADOW = "0 1px 3px rgba(15, 23, 42, 0.06)"
+
+RISK_LOW = "#059669"
 RISK_MODERATE = "#B45309"
-RISK_HIGH = "#B91C1C"
+RISK_HIGH = "#C2410C"       # muted terracotta — not neon red
 
 # Recognized medical/clinical symbol (Unicode "Staff of Aesculapius"),
 # not a decorative emoji — used as the sole browser-tab glyph across all
@@ -46,7 +63,7 @@ RISK_HIGH = "#B91C1C"
 CLINICAL_GLYPH = "⚕"
 
 MODEL_VERSION = "v1.0.4-NISQ"
-SYSTEM_STATUS_LABEL = f"System Online • Model {MODEL_VERSION}"
+SYSTEM_STATUS_LABEL = f"System Online • Release {MODEL_VERSION}"
 
 INSTITUTION_NAME = "Q-Knee Diagnostic Imaging Laboratory"
 INSTITUTION_DIVISION = "Quantum-Assisted Musculoskeletal Radiology Research Division"
@@ -69,68 +86,104 @@ NOT_A_DEVICE_FOOTNOTE = (
 
 def inject_clinical_theme() -> None:
     """Injects the shared clinical design system once per script rerun —
-    palette, Inter/SF-Pro-Display typography, and the formal section-card/
+    palette, Inter/JetBrains-Mono typography, and the formal section-card/
     badge/masthead primitives every `render_*` function in `qknee.ui`
     builds on. Idempotent (plain CSS, safe to call on every rerun)."""
     st.markdown(
         f"""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
         html, body, [class*="css"], .stApp, .stMarkdown, .stButton, .stMetric {{
             font-family: 'Inter', -apple-system, 'SF Pro Display', 'Segoe UI', sans-serif !important;
         }}
         .stApp {{
-            background-color: {CLINICAL_SLATE};
+            background-color: {APP_BACKGROUND};
+        }}
+        [data-testid="stSidebar"] {{
+            background-color: {CARD_SURFACE};
+            border-right: 1px solid {BORDER_GREY};
         }}
         h1, h2, h3, h4, h5, h6 {{
             font-weight: 700 !important;
             line-height: 1.2 !important;
             letter-spacing: -0.02em !important;
-            color: {STERILE_WHITE} !important;
+            color: {FOREST_GREEN} !important;
         }}
         p, span, label, div {{
             line-height: 1.45;
+            color: {STERILE_WHITE};
+        }}
+        .stCaption, [data-testid="stCaptionContainer"] {{
+            color: {TEXT_MUTED} !important;
         }}
 
-        /* Institutional masthead */
+        /* Tabular monospace for all metric/numeric readouts */
+        [data-testid="stMetricValue"], [data-testid="stMetricDelta"], .qknee-mono {{
+            font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace !important;
+            font-variant-numeric: tabular-nums;
+            color: {FOREST_GREEN} !important;
+        }}
+        [data-testid="stMetricLabel"] {{
+            color: {TEXT_MUTED} !important;
+            text-transform: uppercase;
+            font-size: 0.72rem !important;
+            letter-spacing: 0.04em;
+        }}
+
+        /* Institutional masthead / global navbar */
         .qknee-masthead {{
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
             gap: 0.6rem;
-            padding: 0.95rem 1.3rem;
-            background: #111C33;
-            border: 1px solid {BORDER_GREY}30;
-            border-radius: 0.5rem;
+            padding: 0.85rem 1.2rem;
+            background: {CARD_SURFACE};
+            border: 1px solid {BORDER_GREY};
+            border-radius: {RADIUS_SHARP};
+            box-shadow: {CARD_SHADOW};
             margin-bottom: 0.7rem;
         }}
         .qknee-masthead-brand {{
-            font-size: 1.05rem;
+            font-size: 1.0rem;
             font-weight: 800;
-            color: {STERILE_WHITE};
+            color: {FOREST_GREEN};
             letter-spacing: -0.01em;
+            text-transform: uppercase;
         }}
         .qknee-masthead-division {{
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             color: {TEXT_MUTED};
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.06em;
             margin-top: 0.1rem;
         }}
+        .qknee-brand-mark {{
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.55rem;
+            height: 1.55rem;
+            border-radius: {RADIUS_SHARP};
+            background: {FOREST_GREEN};
+            color: {CARD_SURFACE};
+            font-weight: 800;
+            font-size: 0.78rem;
+            margin-right: 0.4rem;
+        }}
         .qknee-status-pill {{
             display: inline-flex;
             align-items: center;
             gap: 0.45rem;
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             font-weight: 700;
-            color: {SURGICAL_TEAL};
-            background: {SURGICAL_TEAL}1A;
-            border: 1px solid {SURGICAL_TEAL}55;
+            color: #065F46;
+            background: #ECFDF5;
+            border: 1px solid #A7F3D0;
             border-radius: 999px;
-            padding: 0.32rem 0.8rem;
+            padding: 0.3rem 0.7rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             white-space: nowrap;
@@ -139,35 +192,31 @@ def inject_clinical_theme() -> None:
             width: 0.4rem;
             height: 0.4rem;
             border-radius: 50%;
-            background: {SURGICAL_TEAL};
-            box-shadow: 0 0 0 3px {SURGICAL_TEAL}22;
+            background: {SAGE_GREEN};
+            box-shadow: 0 0 0 3px {SAGE_GREEN}22;
         }}
 
-        /* Disclosure banner */
-        .qknee-disclosure {{
-            font-size: 0.76rem;
+        /* Disclosure banner — subtle, collapsible */
+        .qknee-disclosure-text {{
+            font-size: 0.68rem;
+            line-height: 1.5;
             color: {TEXT_MUTED};
-            background: #0B1220;
-            border: 1px solid {BORDER_GREY}28;
-            border-left: 3px solid {DIAGNOSTIC_BLUE};
-            border-radius: 0.35rem;
-            padding: 0.6rem 0.95rem;
-            margin-bottom: 1.1rem;
         }}
-        .qknee-disclosure b {{ color: {STERILE_WHITE}; }}
+        .qknee-disclosure-text b {{ color: {FOREST_GREEN}; }}
 
         /* Section cards */
         .qknee-card {{
-            background: #111C33;
-            border: 1px solid {BORDER_GREY}2E;
-            border-radius: 0.55rem;
+            background: {CARD_SURFACE};
+            border: 1px solid {BORDER_GREY};
+            border-radius: {RADIUS_SHARP};
+            box-shadow: {CARD_SHADOW};
             padding: 1.05rem 1.15rem;
             height: 100%;
         }}
         .qknee-card-title {{
             font-size: 0.9rem;
             font-weight: 700;
-            color: {STERILE_WHITE};
+            color: {FOREST_GREEN};
             margin-bottom: 0.3rem;
             letter-spacing: -0.005em;
         }}
@@ -180,41 +229,82 @@ def inject_clinical_theme() -> None:
             font-weight: 700;
             letter-spacing: 0.09em;
             text-transform: uppercase;
-            color: {DIAGNOSTIC_BLUE};
+            color: {SAGE_GREEN};
             margin-bottom: 0.35rem;
         }}
 
-        /* Risk / status badges (replace emoji indicators) */
+        /* Risk / status badges (formal, no emoji) */
         .qknee-badge {{
             display: inline-block;
+            font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
             font-size: 0.7rem;
             font-weight: 700;
             letter-spacing: 0.03em;
             text-transform: uppercase;
-            border-radius: 0.3rem;
+            border-radius: 999px;
             padding: 0.24rem 0.6rem;
         }}
-        .qknee-badge-low {{ color: {RISK_LOW}; background: {RISK_LOW}1F; border: 1px solid {RISK_LOW}55; }}
-        .qknee-badge-moderate {{ color: {RISK_MODERATE}; background: {RISK_MODERATE}1F; border: 1px solid {RISK_MODERATE}55; }}
-        .qknee-badge-high {{ color: {RISK_HIGH}; background: {RISK_HIGH}1F; border: 1px solid {RISK_HIGH}55; }}
-        .qknee-badge-info {{ color: {DIAGNOSTIC_BLUE}; background: {DIAGNOSTIC_BLUE}1A; border: 1px solid {DIAGNOSTIC_BLUE}55; }}
-        .qknee-badge-neutral {{ color: {TEXT_MUTED}; background: {TEXT_MUTED}1A; border: 1px solid {TEXT_MUTED}44; }}
+        .qknee-badge-low {{ color: #065F46; background: {SAGE_TINT}; border: 1px solid #A7F3D0; }}
+        .qknee-badge-moderate {{ color: {RISK_MODERATE}; background: #FFFBEB; border: 1px solid #FDE68A; }}
+        .qknee-badge-high {{ color: {RISK_HIGH}; background: #FFF7ED; border: 1px solid #FED7AA; }}
+        .qknee-badge-info {{ color: {FOREST_GREEN}; background: #ECFDF5; border: 1px solid #A7F3D0; }}
+        .qknee-badge-neutral {{ color: {TEXT_MUTED}; background: #F1F5F9; border: 1px solid {BORDER_GREY}; }}
 
         .qknee-ci {{
+            font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
             font-size: 0.72rem;
             color: {TEXT_MUTED};
             margin-top: 0.15rem;
         }}
 
-        /* Buttons: squared-off, formal */
+        /* Buttons: crisp, formal, light-theme */
         .stButton > button, .stDownloadButton > button {{
-            border-radius: 0.35rem;
+            border-radius: {RADIUS_SHARP};
             font-weight: 600;
             font-size: 0.85rem;
-            border: 1px solid {BORDER_GREY}44;
+            border: 1px solid {BORDER_GREY};
+            background-color: {CARD_SURFACE};
+            color: {STERILE_WHITE};
+            white-space: nowrap;
+        }}
+        .stButton > button:hover, .stDownloadButton > button:hover {{
+            border-color: {FOREST_GREEN};
+            color: {FOREST_GREEN};
+            background-color: #F1F5F9;
+        }}
+        .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {{
+            background-color: {FOREST_GREEN};
+            border-color: {FOREST_GREEN};
+            color: {CARD_SURFACE};
+        }}
+        .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {{
+            background-color: #053a2b;
+            color: {CARD_SURFACE};
         }}
 
-        hr {{ border-color: {BORDER_GREY}22; }}
+        /* Form widgets: selects, uploaders, text inputs, dataframes */
+        [data-testid="stFileUploaderDropzone"], .stSelectbox > div > div, .stTextInput > div > div,
+        .stNumberInput > div > div, [data-baseweb="select"] > div {{
+            background-color: {CARD_SURFACE} !important;
+            border-color: {BORDER_GREY} !important;
+            color: {STERILE_WHITE} !important;
+        }}
+        [data-testid="stDataFrame"], [data-testid="stTable"] {{
+            border: 1px solid {BORDER_GREY};
+            border-radius: {RADIUS_SHARP};
+        }}
+        .stProgress > div > div > div > div {{
+            background-color: {SAGE_GREEN};
+        }}
+        .stTabs [data-baseweb="tab-list"] {{
+            border-bottom: 1px solid {BORDER_GREY};
+        }}
+        .stTabs [aria-selected="true"] {{
+            color: {FOREST_GREEN} !important;
+            border-bottom-color: {FOREST_GREEN} !important;
+        }}
+
+        hr {{ border-color: {BORDER_GREY}; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -232,9 +322,12 @@ def render_institutional_masthead(active_module: str) -> None:
     st.markdown(
         f"""
         <div class="qknee-masthead">
-            <div>
-                <div class="qknee-masthead-brand">{INSTITUTION_NAME}</div>
-                <div class="qknee-masthead-division">{INSTITUTION_DIVISION} &middot; {active_module}</div>
+            <div style="display:flex; align-items:center;">
+                <span class="qknee-brand-mark">Q</span>
+                <div>
+                    <div class="qknee-masthead-brand">{INSTITUTION_NAME}</div>
+                    <div class="qknee-masthead-division">{INSTITUTION_DIVISION} &middot; {active_module}</div>
+                </div>
             </div>
             <div class="qknee-status-pill"><span class="qknee-status-dot"></span>{SYSTEM_STATUS_LABEL}</div>
         </div>
@@ -244,7 +337,11 @@ def render_institutional_masthead(active_module: str) -> None:
 
 
 def render_disclosure_banner() -> None:
-    st.markdown(f'<div class="qknee-disclosure">{DISCLOSURE_BANNER_TEXT}</div>', unsafe_allow_html=True)
+    """Formal NISQ regulatory disclosure — a single, subtle, collapsible
+    strip (11px muted slate typography) rather than a heavy full-width
+    block, per the clinical design system's disclosure requirements."""
+    with st.expander("NISQ Clinical Research Disclosure", expanded=False):
+        st.markdown(f'<div class="qknee-disclosure-text">{DISCLOSURE_BANNER_TEXT}</div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
