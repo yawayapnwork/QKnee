@@ -517,9 +517,9 @@ def render_auth_page(default_tab: str = PAGE_LOGIN) -> None:
 # yet, so it routes to the authenticated workspace gate (sign-in / account)
 # rather than inventing a page — the closest real destination for an
 # audit-trail-style view in this product today.
-_NAV_ITEM_WORKSTATION = "Workstation"
-_NAV_ITEM_BENCHMARKS = "Performance Benchmarks"
-_NAV_ITEM_AUDIT = "Clinical Audit"
+_NAV_ITEM_WORKSTATION = "Diagnostic Viewer"
+_NAV_ITEM_BENCHMARKS = "Cohort Analytics & ROC"
+_NAV_ITEM_AUDIT = "Clinical Audit Trail"
 
 
 def _initials(name: str) -> str:
@@ -560,16 +560,16 @@ def render_global_navbar() -> None:
     # `status_col` needs enough of its own room for both the status pill
     # and "Clinician Portal" side by side — too little here is what made
     # it visually overlap the last nav pill.
-    brand_col, nav_col, status_col = st.columns([1.0, 2.6, 2.1])
+    brand_col, nav_col, status_col = st.columns([1.4, 2.4, 2.4])
 
     with brand_col:
         st.markdown(
             f'<div style="display:flex; align-items:center; height:2.2rem;">'
             f'<span class="qknee-brand-mark">Q</span>'
-            f'<div><div style="font-weight:800; font-size:0.95rem; color:{theme.STERILE_WHITE}; '
-            f'letter-spacing:-0.01em; text-transform:uppercase;">Q-Knee Clinical Workstation</div>'
-            f'<div style="font-size:0.66rem; color:{theme.TEXT_MUTED}; letter-spacing:0.04em;">'
-            f'Orthopedic MRI Research Division</div>'
+            f'<div><div style="font-weight:800; font-size:0.9rem; color:{theme.STERILE_WHITE}; '
+            f'letter-spacing:-0.005em; text-transform:uppercase;">{theme.INSTITUTION_NAME}</div>'
+            f'<div style="font-size:0.62rem; color:{theme.TEXT_MUTED}; letter-spacing:0.03em;">'
+            f'{theme.INSTITUTION_DIVISION}</div>'
             f"</div></div>",
             unsafe_allow_html=True,
         )
@@ -600,12 +600,12 @@ def render_global_navbar() -> None:
                             st.rerun()
 
     with status_col:
-        right_cols = st.columns([1.3, 1.3])
+        right_cols = st.columns([3.0, 1.1])
         with right_cols[0]:
             st.markdown(
-                '<div style="display:flex; align-items:center; height:2.2rem; justify-content:flex-end;">'
-                '<span class="qknee-status-pill"><span class="qknee-status-dot"></span>System Operational</span>'
-                "</div>",
+                f'<div style="display:flex; align-items:center; height:2.2rem; justify-content:flex-end;">'
+                f'{theme.render_telemetry_pills()}'
+                f"</div>",
                 unsafe_allow_html=True,
             )
         with right_cols[1]:

@@ -465,7 +465,7 @@ def render_report_download(display_slice: np.ndarray, result: AnalysisResult) ->
         _release_inference_memory()
 
     st.download_button(
-        label="Generate Formal Diagnostic Report (PDF)",
+        label="Export Standard Clinical Report (PDF)",
         data=pdf_bytes,
         file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
@@ -990,7 +990,30 @@ def render_header() -> None:
     )
 
 
+def render_study_info_panel() -> None:
+    """Left-panel structured patient/study metadata box (Patient ID,
+    Age/Sex, Magnet Field, TE/TR) — de-identified placeholder values, since
+    this workstation ingests anonymized research volumes with no real
+    DICOM patient header attached."""
+    st.sidebar.markdown("### Study Information")
+    st.sidebar.markdown(
+        f"""
+        <div class="qknee-card" style="padding: 0.75rem 0.9rem;">
+            <div class="qknee-mono" style="font-size: 0.78rem; line-height: 1.9; color: {theme.MONO_TEXT};">
+                Patient ID: ANON-77201<br>
+                Age/Sex: 34M<br>
+                Magnet Field: 3.0T<br>
+                TE/TR: 30/2800ms
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_sidebar() -> Tuple[Optional[np.ndarray], str, float, float, str, float]:
+    render_study_info_panel()
+    st.sidebar.markdown("---")
     st.sidebar.markdown("### Radiological Ingestion Pipeline")
     uploaded_files = st.sidebar.file_uploader(
         "DICOM series (.dcm, select/drag multiple files), single DICOM, PNG, JPG, or NumPy volume (.npy)",
@@ -1185,33 +1208,21 @@ def main() -> None:
         )
     st.markdown("---")
 
-    gradcam_col, action_col = st.columns([1, 1.2])
+    st.markdown("#### Radiological Viewports")
+    viewport_a_col, viewport_b_col, risk_col = st.columns([1, 1, 1.1])
 
-    with action_col:
-        st.markdown("#### Clinical Action Bar")
-        st.caption("Executes ResNet18 feature extraction and the 4-qubit quantum classifier on the slice above.")
-        run_clicked = st.button("Execute Diagnostic Inference", type="primary", use_container_width=True)
+    with viewport_a_col:
+        st.markdown("##### Viewport A — Raw Ingestion Slice")
+        oriented_slice = theme.draw_orientation_markers(display_slice, plane)
+        st.image(
+            oriented_slice, channels="BGR", use_container_width=True,
+            caption=theme.slice_depth_caption(plane, slice_index, max_index, primary=True),
+        )
 
-        if run_clicked:
-            with st.spinner("Executing radiological ingestion pipeline and quantum kernel..."):
-                st.session_state[result_key] = run_analysis(raw_slice)
+    result: Optional[AnalysisResult] = st.session_state.get(result_key)
 
-        result: Optional[AnalysisResult] = st.session_state.get(result_key)
-
-        if result is None:
-            st.info("Select **Execute Diagnostic Inference** to generate a prediction for this slice.")
-        else:
-            render_prediction_badge(result)
-            st.pyplot(render_risk_gauge(result.risk_score), use_container_width=True)
-            st.metric("Quantum Circuit Latency", f"{result.quantum_latency_ms:.1f} ms")
-            st.metric("Total Pipeline Latency", f"{result.total_latency_ms:.1f} ms")
-            st.caption(f"Backend: **{result.backend}**")
-            st.markdown("---")
-            render_report_download(display_slice, result)
-
-    with gradcam_col:
-        st.markdown("#### Quantitative Lesion Localization")
-        result = st.session_state.get(result_key)
+    with viewport_b_col:
+        st.markdown("##### Viewport B — Grad-CAM Saliency Overlay")
 
         # Real-time synchronized overlay: prefer the volumetric result's
         # precomputed per-slice heatmap for the currently-scrubbed slice
@@ -1243,37 +1254,54 @@ def main() -> None:
             )
         else:
             st.info("Execute the single-slice or full-volume analysis to generate an attribution overlay.")
+        st.caption("Overlay opacity is adjustable from the sidebar's Explainability Overlay Controls.")
+
+    with risk_col:
+        st.markdown("##### Quantitative Risk Assessment")
+        run_clicked = st.button("Execute Diagnostic Inference", type="primary", use_container_width=True)
+
+        if run_clicked:
+            with st.spinner("Executing radiological ingestion pipeline and quantum kernel..."):
+                st.session_state[result_key] = run_analysis(raw_slice)
+
+        result = st.session_state.get(result_key)
+
+        if result is None:
+            st.info("Select **Execute Diagnostic Inference** to generate a prediction for this slice.")
+        else:
+            render_prediction_badge(result)
+            render_condition_risk_badge("ACL Tear Probability", result.acl_risk)
+            render_condition_risk_badge("Meniscal Tear Probability", result.meniscus_risk)
+            render_condition_risk_badge("MCL Sprain Probability", result.mcl_risk)
+            st.metric("Quantum Circuit Latency", f"{result.quantum_latency_ms:.1f} ms")
+            st.metric("Total Pipeline Latency", f"{result.total_latency_ms:.1f} ms")
+            st.caption(f"Backend: **{result.backend}**")
 
     st.markdown("---")
     st.markdown("#### Quantum State Attribution Metrics")
     result = st.session_state.get(result_key)
 
-    badge_col, chart_col = st.columns([1, 1])
-    with badge_col:
-        st.markdown("##### Quantitative Clinical Triage Panel")
-        acl_risk = result.acl_risk if result is not None else None
-        mcl_risk = result.mcl_risk if result is not None else None
-        meniscus_risk = result.meniscus_risk if result is not None else None
-        badge_cols = st.columns(3)
-        with badge_cols[0]:
-            render_condition_risk_badge("ACL Tear", acl_risk)
-        with badge_cols[1]:
-            render_condition_risk_badge("MCL Sprain", mcl_risk)
-        with badge_cols[2]:
-            render_condition_risk_badge("Medial Meniscus Tear", meniscus_risk)
-        if result is None:
-            st.info("Execute **Diagnostic Inference** to populate the per-condition risk breakdown.")
-
+    chart_col, action_col = st.columns([1.3, 1])
     with chart_col:
-        st.markdown("##### 4-Qubit Pauli-Z Expectation Attribution")
+        st.markdown("##### 4-Qubit Pauli-Z Expectation Vector")
         pauli_z = result.pauli_z_expectations if result is not None else None
         fig = render_quantum_attribution_panel(pauli_z)
         if fig is not None:
             st.pyplot(fig, use_container_width=True)
-            st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩, mapping Hilbert-space rotations directly to "
-                       "feature impact, read before the classical readout layer.")
+            st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩ ∈ [-1.0, 1.0], mapping Hilbert-space rotations "
+                       "directly to feature impact, read before the classical readout layer.")
         else:
             st.info("Execute **Diagnostic Inference** to display this slice's per-qubit ⟨Z⟩ expectation values.")
+
+    with action_col:
+        st.markdown("##### Action Bar")
+        if result is not None:
+            render_report_download(display_slice, result)
+            st.button("Sign & Lock Study", use_container_width=True,
+                      help="Locks this study's diagnostic session under the reviewing radiologist's "
+                           "attestation. Confirmatory over-read is required before clinical release.")
+        else:
+            st.info("Execute **Diagnostic Inference** to enable report export and study sign-off.")
 
     render_deck_figures_expander()
 

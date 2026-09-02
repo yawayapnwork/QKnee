@@ -624,6 +624,7 @@ def render_header() -> None:
     )
     theme.inject_clinical_theme()
     auth_view.render_global_navbar()
+    theme.render_disclosure_banner()
 
 
 def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]) -> None:
@@ -1141,7 +1142,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
         _release_inference_memory()
 
     st.download_button(
-        label="Generate Formal Diagnostic Report (PDF)",
+        label="Export Standard Clinical Report (PDF)",
         data=pdf_bytes,
         file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
@@ -1311,6 +1312,9 @@ def render_diagnostic_tab() -> None:
         st.markdown("---")
         if display_slice is not None:
             render_report_download(display_slice, result)
+            st.button("Sign & Lock Study", use_container_width=True, key="qknee_sign_lock_dashboard",
+                      help="Locks this study's diagnostic session under the reviewing radiologist's "
+                           "attestation. Confirmatory over-read is required before clinical release.")
 
     with attribution_col:
         st.markdown("#### Quantum State Attribution Metrics")

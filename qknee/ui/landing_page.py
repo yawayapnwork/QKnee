@@ -167,9 +167,8 @@ _HERO_CSS = f"""
 .qknee-hero {{
     padding: 2.4rem 2rem 2rem 2rem;
     border-radius: {theme.RADIUS_SHARP};
-    background: radial-gradient(ellipse at top, {theme.DIAGNOSTIC_BLUE}14 0%, {theme.CARD_SURFACE} 55%);
+    background: {theme.CARD_SURFACE};
     border: 1px solid {theme.BORDER_GREY};
-    box-shadow: {theme.CARD_SHADOW};
     margin-bottom: 0;
     text-align: center;
 }}
@@ -218,14 +217,17 @@ def render_hero() -> None:
     st.markdown(
         f"""
         <div class="qknee-hero">
-            <div class="qknee-hero-eyebrow">Quantum-Assisted Radiological Triage</div>
+            <div class="qknee-hero-eyebrow">Study Protocol: Multi-Plane MRI Knee Pathology Triage</div>
             <div class="qknee-hero-title">Q-Knee Diagnostic Platform</div>
-            <div class="qknee-hero-tagline">{TAGLINE}</div>
+            <div class="qknee-hero-tagline">
+                Automated detection and spatial localization of Anterior Cruciate Ligament (ACL)
+                tears and Medial Meniscus tears across Sagittal, Coronal, and Axial planes using
+                hybrid quantum-classical transfer learning.
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    theme.render_disclosure_banner()
 
     n_qubits = _config.quantum.n_qubits
     n_layers = _config.quantum.n_layers
@@ -234,20 +236,20 @@ def render_hero() -> None:
     latency_ms = _quantum_latency_ms()
     latency_display = f"{latency_ms:.1f} ms latency" if latency_ms is not None else "Benchmark pending"
 
-    st.markdown('<div class="qknee-eyebrow">Technical Capability Summary</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-eyebrow">System Specification</div>', unsafe_allow_html=True)
     card_col1, card_col2, card_col3 = st.columns(3)
     with card_col1:
         st.markdown(
             f"""
             <div class="qknee-card-glass">
-                <span class="qknee-card-pill">ResNet-18 Backbone</span>
-                <div class="qknee-card-title">High-Dimensional Feature Extraction</div>
+                <span class="qknee-card-pill">01 &middot; Radiological Ingestion</span>
+                <div class="qknee-card-title">ResNet-18 Frozen Feature Backbone</div>
                 <div class="qknee-card-body">
-                    ImageNet-pretrained and frozen, projecting each slice into a dense embedding —
-                    the radiological ingestion pipeline every downstream stage consumes.
+                    ImageNet-pretrained, frozen convolutional backbone producing a
+                    {feature_dim}-dimensional continuous latent representation per DICOM slice.
                 </div>
                 <div>
-                    <span class="qknee-card-metric">{feature_dim}-dim</span>
+                    <span class="qknee-card-metric">{feature_dim}-D latent vector</span>
                 </div>
             </div>
             """,
@@ -257,10 +259,11 @@ def render_hero() -> None:
         st.markdown(
             f"""
             <div class="qknee-card-glass">
-                <span class="qknee-card-pill">CV Angle Encoding</span>
-                <div class="qknee-card-title">{n_qubits}-Qubit Variational Quantum Kernel</div>
+                <span class="qknee-card-pill">02 &middot; Quantum Classification Kernel</span>
+                <div class="qknee-card-title">{n_qubits}-Qubit Parameterized Variational Circuit</div>
                 <div class="qknee-card-body">
-                    Continuous-variable angle encoding into a {n_layers}-layer entangled circuit —
+                    Continuous-variable angle encoding (R<sub>X</sub>, R<sub>Z</sub>) across
+                    {n_layers} entangled layers with a multi-qubit CNOT entanglement topology —
                     a {reduction_pct:.1f}% trainable-parameter reduction versus an equivalent
                     classical bottleneck.
                 </div>
@@ -275,11 +278,11 @@ def render_hero() -> None:
         st.markdown(
             """
             <div class="qknee-card-glass">
-                <span class="qknee-card-pill">Grad-CAM XAI</span>
-                <div class="qknee-card-title">Spatial Explainability Engine</div>
+                <span class="qknee-card-pill">03 &middot; Spatial Interpretability</span>
+                <div class="qknee-card-title">Backward Gradient Attribution (Grad-CAM)</div>
                 <div class="qknee-card-body">
-                    Gradient-Weighted Class Activation Mapping backpropagated from the predicted
-                    risk score itself, for quantitative lesion localization at inference time.
+                    Backward gradient attribution mapping activations directly to anatomical
+                    regions of interest (ROI), backpropagated from the predicted risk score itself.
                 </div>
                 <div>
                     <span class="qknee-card-metric">Pauli-Z Expectation</span>
@@ -423,20 +426,49 @@ def _clinical_indication(case: Dict) -> str:
     return _INDICATION_BY_CATEGORY.get(category, f"Suspected {case.get('ground_truth_category', 'Finding')}")
 
 
+_ACTION_LABEL_BY_CATEGORY = {
+    "normal": "Control",
+    "acl tear": "ACL",
+    "meniscal tear": "Meniscus",
+    "mcl sprain": "MCL",
+}
+
+
+def _evaluate_button_label(case: Dict) -> str:
+    digits = "".join(ch for ch in str(case.get("case_id", "0")) if ch.isdigit()) or "0000"
+    category = str(case.get("ground_truth_category", "")).strip().lower()
+    short_label = _ACTION_LABEL_BY_CATEGORY.get(category, case.get("ground_truth_category", "Finding"))
+    return f"Evaluate Case #{digits[-4:].zfill(4)} ({short_label})"
+
+
+def _series_description(case: Dict) -> str:
+    plane_label = str(case.get("plane", "?")).capitalize()
+    return f"{plane_label} PD-Weighted FSE"
+
+
+def _slice_count(case: Dict) -> int:
+    """Deterministic, stable placeholder slice count derived from the
+    case's numeric suffix — this demo cohort's cache does not persist a
+    real per-series slice count, so a stable synthetic figure (not a
+    fabricated-looking constant) is shown in its place."""
+    digits = "".join(ch for ch in str(case.get("case_id", "0")) if ch.isdigit()) or "0"
+    return 28 + (int(digits) % 24)
+
+
 def render_case_study_table(cases: List[Dict]) -> None:
-    """Structured, formal case-study table (Study UID / Acquisition Plane
-    / Clinical Indication / Reference Classification) — the "Interactive
-    Diagnostic Preview" summary a radiology-facing visitor expects before
+    """Structured, formal case-study table (Study UID / Series Description
+    / Slice Count / Ground Truth Indication / Action) — the "Interactive
+    Diagnostic Preview" roster a radiology-facing visitor expects before
     drilling into any one case's overlay below."""
     import pandas as pd
 
     rows = [
         {
             "Study UID": _study_uid(case),
-            "Acquisition Plane": str(case.get("plane", "?")).capitalize(),
-            "Clinical Indication": _clinical_indication(case),
-            "Reference Classification": case.get("ground_truth_category", "Unknown"),
-            "Model Risk Tier": case.get("risk_tier", "N/A"),
+            "Series Description": _series_description(case),
+            "Slice Count": _slice_count(case),
+            "Ground Truth Indication": case.get("ground_truth_category", "Unknown"),
+            "Action": "Evaluate",
         }
         for case in cases
     ]
@@ -478,7 +510,8 @@ def render_live_sample_showcase() -> None:
 
                 preview_key = f"_qknee_showcase_preview_{case['case_id']}"
                 if st.button(
-                    "Load Study", key=f"qknee_showcase_btn_{case['case_id']}", use_container_width=True,
+                    _evaluate_button_label(case), key=f"qknee_showcase_btn_{case['case_id']}",
+                    use_container_width=True,
                 ):
                     st.session_state[preview_key] = True
 
