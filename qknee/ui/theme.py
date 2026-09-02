@@ -89,6 +89,69 @@ RISK_HIGH = "#DC2626"
 # emoji" mandate.
 CLINICAL_GLYPH = "⚕"
 
+
+# --------------------------------------------------------------------------- #
+# Inline SVG iconography — Tabler/Lucide-style stroke line-art, `currentColor`
+# so each call site tints an icon purely via CSS `color`, no emoji anywhere
+# in this codebase. Kept as raw `<svg>` fragments (not a font/icon package)
+# since Vercel's serverless deployment and Streamlit Cloud both need this to
+# work with zero extra dependencies or network fetches.
+# --------------------------------------------------------------------------- #
+
+_ICON_PATHS: Dict[str, str] = {
+    # Crosshair / target — lesion localization (Grad-CAM) panels.
+    "crosshair": (
+        '<circle cx="12" cy="12" r="8"/>'
+        '<line x1="12" y1="2" x2="12" y2="6"/>'
+        '<line x1="12" y1="18" x2="12" y2="22"/>'
+        '<line x1="2" y1="12" x2="6" y2="12"/>'
+        '<line x1="18" y1="12" x2="22" y2="12"/>'
+    ),
+    # Wireframe cube — volumetric 3D MRI series.
+    "cube": (
+        '<polygon points="12,3 21,7.5 21,16.5 12,21 3,16.5 3,7.5"/>'
+        '<polyline points="3,7.5 12,12 21,7.5"/>'
+        '<line x1="12" y1="12" x2="12" y2="21"/>'
+    ),
+    # Quantum circuit wireframe — qubit wires + gate boxes, for PQC telemetry.
+    "circuit": (
+        '<line x1="2" y1="6" x2="22" y2="6"/>'
+        '<line x1="2" y1="12" x2="22" y2="12"/>'
+        '<line x1="2" y1="18" x2="22" y2="18"/>'
+        '<rect x="6" y="3" width="5" height="6" rx="1"/>'
+        '<rect x="13" y="9" width="5" height="6" rx="1"/>'
+        '<rect x="6" y="15" width="5" height="6" rx="1"/>'
+    ),
+    # Medical shield — regulatory/compliance notices.
+    "shield": (
+        '<path d="M12 2 4 5v6c0 5 3.4 8.7 8 9 4.6-.3 8-4 8-9V5l-8-3z"/>'
+        '<line x1="12" y1="8" x2="12" y2="13"/>'
+        '<line x1="9.5" y1="10.5" x2="14.5" y2="10.5"/>'
+    ),
+    # Search / quick-launch trigger.
+    "search": (
+        '<circle cx="11" cy="11" r="7"/>'
+        '<line x1="21" y1="21" x2="16.65" y2="16.65"/>'
+    ),
+}
+
+
+def icon(name: str, size: int = 16, stroke_width: float = 2.0) -> str:
+    """Returns one inline `<svg>` icon fragment (`currentColor` stroke, no
+    fill) — embed directly into an f-string passed to `st.markdown(...,
+    unsafe_allow_html=True)`. `name` is one of `_ICON_PATHS`'s keys
+    (`crosshair`, `cube`, `circuit`, `shield`, `search`); an unknown name
+    returns an empty string rather than raising, since a missing icon
+    should never break a page render."""
+    body = _ICON_PATHS.get(name)
+    if body is None:
+        return ""
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="{stroke_width}" '
+        f'stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;">{body}</svg>'
+    )
+
 MODEL_VERSION = "1.0.4"
 SYSTEM_STATUS_LABEL = f"STATUS: ONLINE (LOCAL CPU)"
 
@@ -539,7 +602,7 @@ def render_disclosure_banner() -> None:
     st.markdown(
         f"""
         <div class="qknee-disclosure-banner">
-            <span class="qknee-disclosure-glyph">&#9888;</span>
+            <span class="qknee-disclosure-glyph">{icon("shield", size=15)}</span>
             <span>{DISCLOSURE_BANNER_TEXT}</span>
         </div>
         """,

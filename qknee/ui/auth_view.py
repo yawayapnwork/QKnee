@@ -194,7 +194,7 @@ def _login_via_api_or_error(username: str, password: str) -> dict:
     if not (api_url and _api_is_reachable(api_url)):
         raise _AuthServiceError(
             "The authentication service is currently unreachable. "
-            "Try ⚡ 'Sign in with Demo Account' below for offline access, or try again shortly."
+            "Try 'Sign in with Demo Account' below for offline access, or try again shortly."
         )
     return _login_via_api(api_url, username, password)
 
@@ -204,7 +204,7 @@ def _signup_via_api_or_error(payload: dict) -> dict:
     if not (api_url and _api_is_reachable(api_url)):
         raise _AuthServiceError(
             "The registration service is currently unreachable. "
-            "Try ⚡ 'Sign in with Demo Account' below for offline access, or try again shortly."
+            "Try 'Sign in with Demo Account' below for offline access, or try again shortly."
         )
     return _signup_via_api(api_url, payload)
 
@@ -381,7 +381,7 @@ def render_login_tab() -> None:
         username = st.text_input("Email or Username", key="qknee_login_username")
         password = st.text_input("Password", type="password", key="qknee_login_password")
         submitted = st.form_submit_button(
-            "Sign In", type="primary", disabled=locked, use_container_width=True,
+            "Sign In", type="primary", disabled=locked, width="stretch",
         )
 
     if submitted and not locked:
@@ -392,7 +392,7 @@ def render_login_tab() -> None:
 
     st.divider()
     st.caption("Just exploring? Skip the form entirely:")
-    if st.button("Sign in with Demo Account", key="qknee_demo_login", use_container_width=True, disabled=locked):
+    if st.button("Sign in with Demo Account", key="qknee_demo_login", width="stretch", disabled=locked):
         _attempt_demo_login()
 
 
@@ -471,7 +471,7 @@ def render_signup_tab() -> None:
             "Password", type="password", key="qknee_signup_password", help="At least 8 characters.",
         )
         role_label = st.selectbox("Role", UI_ROLES, key="qknee_signup_role")
-        submitted = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Create Account", type="primary", width="stretch")
 
     if submitted:
         errors = _validate_signup_fields(full_name, email, password)
@@ -554,13 +554,14 @@ def render_global_navbar() -> None:
 
     active = _active_nav_item()
 
-    # Unequal column weights, not an equal 3-way split: "Performance
-    # Benchmarks" is roughly twice as many characters as "Workstation" —
-    # forcing all three pills to the same width is what was clipping it.
-    # `status_col` needs enough of its own room for both the status pill
-    # and "Clinician Portal" side by side — too little here is what made
-    # it visually overlap the last nav pill.
-    brand_col, nav_col, status_col = st.columns([1.4, 2.4, 2.4])
+    # `nav_col` needs enough room for all three pills at their real label
+    # lengths ("Diagnostic Viewer" / "Cohort Analytics & ROC" / "Clinical
+    # Audit Trail" are all similar length, ~17-22 characters) — too little
+    # here is what let a pill's `white-space:nowrap` label visually spill
+    # out of its column and overlap its neighbor. `status_col` needs its
+    # own room for the telemetry strip plus "Clinician Portal" side by
+    # side without the two colliding either.
+    brand_col, nav_col, status_col = st.columns([1.1, 3.3, 2.4])
 
     with brand_col:
         st.markdown(
@@ -583,7 +584,7 @@ def render_global_navbar() -> None:
         # only these three pills (active-tab slate highlight, min-width
         # against clipping) without also restyling every other button.
         with st.container(key="qknee_navbar"):
-            pill_cols = st.columns([1.0, 1.7, 1.2])
+            pill_cols = st.columns([1.05, 1.35, 1.2])
             nav_items = [
                 (_NAV_ITEM_WORKSTATION, landing_page.VIEW_DIAGNOSTIC),
                 (_NAV_ITEM_BENCHMARKS, landing_page.VIEW_BENCHMARK),
@@ -592,7 +593,7 @@ def render_global_navbar() -> None:
             for pill_col, (label, view) in zip(pill_cols, nav_items):
                 with pill_col:
                     button_type = "primary" if label == active else "secondary"
-                    if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
+                    if st.button(label, key=f"qknee_nav_pill_{label}", width="stretch", type=button_type):
                         if view is not None:
                             _go_to_workspace_tab(view)
                         else:
@@ -600,7 +601,7 @@ def render_global_navbar() -> None:
                             st.rerun()
 
     with status_col:
-        right_cols = st.columns([3.0, 1.1])
+        right_cols = st.columns([2.6, 1.3])
         with right_cols[0]:
             st.markdown(
                 f'<div style="display:flex; align-items:center; height:2.2rem; justify-content:flex-end;">'
@@ -612,11 +613,11 @@ def render_global_navbar() -> None:
             if st.session_state.get(AUTHENTICATED_KEY, False):
                 user_info = st.session_state.get(USER_INFO_KEY) or {}
                 display_name = user_info.get("full_name") or user_info.get("username", "User")
-                if st.button(_initials(display_name), key="qknee_nav_account", use_container_width=True,
+                if st.button(_initials(display_name), key="qknee_nav_account", width="stretch",
                              help=f"{display_name} — Log Out"):
                     _log_out()
             else:
-                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", use_container_width=True):
+                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", width="stretch"):
                     st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
                     st.rerun()
 
