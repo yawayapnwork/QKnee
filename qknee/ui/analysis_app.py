@@ -150,17 +150,36 @@ def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[
     readout collapses it into a single risk probability. This is what the
     Quantum State Attribution panel plots.
 
+    Prefers `vqc_model.predict_fast()` (duck-typed via `hasattr`) when
+    available: `run_live_analysis` below already called `runner.classify()`
+    on this exact angle vector moments earlier, which — for a
+    `VQCClassifier` — runs through `predict_fast` and populates its
+    per-instance angle cache; calling `predict_fast` again here for the
+    *same* angles is then a cache hit (sub-millisecond), rather than
+    redundantly re-running the full slow `TorchLayer`/`default.qubit`/
+    `backprop` circuit a second time just to read back the expectation
+    values `classify()` already computed and discarded. Falls back to the
+    original direct `quantum_layer(...)` call for any model without
+    `predict_fast` (e.g. `DataReuploadingVQC`).
+
     Returns `None` (rather than guessing) if `vqc_model` doesn't expose a
     `.quantum_layer` attribute — e.g. a custom ansatz that doesn't follow
     `VQCClassifier`'s structure.
     """
+    if hasattr(vqc_model, "predict_fast"):
+        try:
+            _, expvals = vqc_model.predict_fast(np.asarray(quantum_angles).reshape(-1))
+            return expvals
+        except Exception as exc:  # noqa: BLE001 - fall through to the direct quantum_layer call below
+            logger.warning("predict_fast failed for Pauli-Z readout (%s); using quantum_layer directly.", exc)
+
     quantum_layer = getattr(vqc_model, "quantum_layer", None)
     if quantum_layer is None:
         return None
 
     import torch
 
-    with torch.no_grad():
+    with torch.inference_mode():
         angles_tensor = torch.from_numpy(np.asarray(quantum_angles)).float()
         expvals = quantum_layer(angles_tensor)
     return expvals.detach().cpu().numpy().reshape(-1)
@@ -403,7 +422,7 @@ def render_fast_path_view(case: dict) -> None:
     with gauge_col:
         render_prediction_badge(result)
         st.pyplot(render_risk_gauge(result.risk_score), width="stretch")
-        st.metric("Quantum Circuit Latency (Cached)", f"{result.quantum_latency_ms:.1f} ms")
+        st.metric("Quantum Circuit Latency (Cached)", format_latency_ms(result.quantum_latency_ms))
         st.caption(f"Backend: **{result.backend}**")
 
     with attrib_col:
@@ -510,13 +529,17 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     the heatmap explains that prediction."""
     from qknee.xai.gradcam import overlay_heatmap
 
-    t0 = time.perf_counter()
+    # perf_counter_ns() rather than perf_counter(): the quantum stage alone
+    # now regularly lands under 1ms on a `VQCClassifier.predict_fast` cache
+    # hit (see qknee.models.vqc) — float-seconds precision starts losing
+    # real signal at that scale, the nanosecond counter doesn't.
+    t0_ns = time.perf_counter_ns()
     batch = runner.ingest(slice_2d)
     features = runner.extract_resnet_features(batch)
     quantum_angles = runner.reduce_to_quantum_angles(features)
-    t1 = time.perf_counter()
+    t1_ns = time.perf_counter_ns()
     risk_score = runner.classify(quantum_angles)
-    t2 = time.perf_counter()
+    t2_ns = time.perf_counter_ns()
 
     gradcam_overlay: Optional[np.ndarray] = None
     gradcam_heatmap: Optional[np.ndarray] = None
@@ -526,8 +549,8 @@ def run_live_analysis(runner, slice_2d: np.ndarray) -> AnalysisResult:
     except Exception as exc:  # noqa: BLE001 - a failed heatmap shouldn't hide the risk score
         logger.warning("Grad-CAM generation failed; showing risk score without an overlay: %s", exc)
 
-    quantum_latency_ms = (t2 - t1) * 1000
-    total_latency_ms = (t2 - t0) * 1000
+    quantum_latency_ms = (t2_ns - t1_ns) / 1e6
+    total_latency_ms = (t2_ns - t0_ns) / 1e6
     label = "Abnormality Detected" if risk_score >= RISK_THRESHOLD else "Normal"
     pauli_z_expectations = get_pauli_z_expectations(runner.vqc, quantum_angles)
 
@@ -818,6 +841,17 @@ def load_scan(uploaded_files: List) -> Optional[np.ndarray]:
         return None
 
     return array
+
+
+def format_latency_ms(latency_ms: float) -> str:
+    """Formats a millisecond latency for display, with enough precision to
+    actually show a sub-millisecond `VQCClassifier.predict_fast` cache-hit
+    value (e.g. "0.009 ms") rather than rounding it down to "0.0 ms" — one
+    decimal place is fine above 1ms, but below that the fast path's whole
+    point (near-zero latency) would otherwise be invisible in the UI."""
+    if latency_ms < 1.0:
+        return f"{latency_ms:.3f} ms"
+    return f"{latency_ms:.1f} ms"
 
 
 def normalize_uint8(slice_2d: np.ndarray) -> np.ndarray:
@@ -1280,8 +1314,8 @@ def main() -> None:
             render_condition_risk_badge("ACL Tear Probability", result.acl_risk)
             render_condition_risk_badge("Meniscal Tear Probability", result.meniscus_risk)
             render_condition_risk_badge("MCL Sprain Probability", result.mcl_risk)
-            st.metric("Quantum Circuit Latency", f"{result.quantum_latency_ms:.1f} ms")
-            st.metric("Total Pipeline Latency", f"{result.total_latency_ms:.1f} ms")
+            st.metric("Quantum Circuit Latency", format_latency_ms(result.quantum_latency_ms))
+            st.metric("Total Pipeline Latency", format_latency_ms(result.total_latency_ms))
             st.caption(f"Backend: **{result.backend}**")
 
     st.markdown("---")

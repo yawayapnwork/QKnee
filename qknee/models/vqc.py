@@ -27,8 +27,11 @@ parameters (`self.q_weights` inside the layer) are ordinary
 
 from __future__ import annotations
 
-from typing import List
+import threading
+from collections import OrderedDict
+from typing import List, Tuple
 
+import numpy as np
 import pennylane as qml
 import torch
 import torch.nn as nn
@@ -41,6 +44,21 @@ _config = load_config()
 
 N_QUBITS = _config.quantum.n_qubits
 ROTATIONS_PER_QUBIT_PER_LAYER = 3  # RX, RY, RZ
+
+# Preferred backend for the pure-inference (no-gradient) QNode built below:
+# `lightning.qubit` is PennyLane-Lightning's C++ statevector simulator —
+# materially faster than the pure-Python/NumPy `default.qubit` for the
+# repeated small-circuit (4-qubit, 3-layer) evaluations this project's
+# inference hot path runs. `load_quantum_device` already falls back to
+# `default.qubit` transparently if the plugin isn't installed, so this is
+# a safe default rather than a hard dependency.
+INFERENCE_DEVICE_PREFERENCE = "lightning.qubit"
+
+# Inference results are cached by a rounded-angle key (see `predict_fast`),
+# per `VQCClassifier` instance (never shared across different trained
+# weight sets). Bounded so a long-running server process doesn't grow this
+# unboundedly across many distinct uploaded slices.
+_INFERENCE_CACHE_MAX_ENTRIES = 512
 
 
 def load_quantum_device(device_name: str, n_qubits: int) -> "qml.Device":
@@ -106,13 +124,51 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_laye
     """Constructs the PennyLane QNode: angle encoding -> `n_layers`
     variational blocks -> Pauli-Z expectation values on every qubit.
 
-    Uses PennyLane's `default.qubit` state-vector simulator.
+    Uses PennyLane's `default.qubit` state-vector simulator, wired for the
+    `torch` interface with `config.quantum.diff_method` (`"backprop"` by
+    default) so gradients flow through `qml.qnn.TorchLayer` during
+    training. This is the *trainable* circuit — see `build_inference_qnode`
+    below for the separate, faster, gradient-free circuit `predict_fast`
+    evaluates at inference time.
     """
     dev = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
     @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
     def circuit(inputs: torch.Tensor, weights: torch.Tensor):
+        angle_encoding(inputs, wires)
+        for layer in range(n_layers):
+            variational_block(weights[layer], wires)
+        return [qml.expval(qml.PauliZ(w)) for w in wires]
+
+    return circuit
+
+
+def build_inference_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
+    """Constructs a second, inference-only QNode for the same circuit —
+    same angle encoding / variational blocks / Pauli-Z measurement as
+    `build_qnode`, but on PennyLane-Lightning's C++ statevector simulator
+    (falling back to `default.qubit` if unavailable) with `interface=None`
+    and `diff_method=None`: no ML-framework tensor wrapping, no autograd
+    tape construction. Forward-pass-only evaluation is strictly cheaper
+    without either, since this project's inference call sites (`/predict`,
+    `/explain`, the Streamlit workstation) never need gradients through
+    the quantum layer — only training does, via `build_qnode`'s separate
+    circuit.
+
+    Returns `None` (rather than raising) if even `default.qubit` fails to
+    construct here, so `VQCClassifier` can fall back to the slower
+    `TorchLayer` forward pass unconditionally.
+    """
+    try:
+        dev = load_quantum_device(INFERENCE_DEVICE_PREFERENCE, n_qubits)
+    except Exception as exc:  # noqa: BLE001 - inference-fast-path is optional, never fatal
+        logger.warning("Could not build any inference QNode device: %s", exc)
+        return None
+    wires = list(range(n_qubits))
+
+    @qml.qnode(dev, interface=None, diff_method=None)
+    def circuit(inputs, weights):
         angle_encoding(inputs, wires)
         for layer in range(n_layers):
             variational_block(weights[layer], wires)
@@ -150,6 +206,18 @@ class VQCClassifier(nn.Module):
         self.readout = nn.Linear(n_qubits, 1)
         self.activation = nn.Sigmoid()
 
+        # --- Fast, gradient-free inference path (see `predict_fast`) ---
+        # Built lazily/defensively: `build_inference_qnode` already
+        # swallows its own device-construction failures and returns None,
+        # but circuit *evaluation* can still fail later for reasons that
+        # only show up at call time (e.g. a lightning.qubit version
+        # mismatch) — `predict_fast` catches that per-call and falls back
+        # to the standard `forward()` path, so this is pure speedup, never
+        # a correctness risk.
+        self._inference_circuit = build_inference_qnode(n_qubits=n_qubits, n_layers=n_layers)
+        self._inference_cache: "OrderedDict[Tuple[float, ...], Tuple[float, Tuple[float, ...]]]" = OrderedDict()
+        self._inference_cache_lock = threading.Lock()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 2 or x.shape[-1] != self.n_qubits:
             raise ValueError(
@@ -159,6 +227,77 @@ class VQCClassifier(nn.Module):
         expvals = self.quantum_layer(x)  # (B, n_qubits), each in [-1, 1]
         logits = self.readout(expvals)  # (B, 1)
         return self.activation(logits)  # (B, 1), in [0, 1]
+
+    def predict_fast(self, angles: np.ndarray, cache_decimals: int = 6) -> Tuple[float, np.ndarray]:
+        """Single-sample, gradient-free inference: `(n_qubits,)` angles ->
+        `(risk_score, pauli_z_expectations)`. This is the hot path
+        `qknee.models.pipeline.PipelineRunner.classify` prefers over
+        `forward()` whenever it's available (duck-typed via
+        `hasattr(model, "predict_fast")`), for three stacked speedups over
+        the training-time `forward()` path:
+
+        1. Runs the `build_inference_qnode` circuit (lightning.qubit,
+           `diff_method=None`, no ML-interface tensor wrapping) instead of
+           the `TorchLayer`-wrapped, autograd-tape-building training circuit.
+        2. Reads the classical readout layer's weights straight into plain
+           NumPy once (cached on `self`) and does the final `Linear + Sigmoid`
+           as a 4-element NumPy dot product, skipping PyTorch's own
+           per-call dispatch overhead for a matmul this tiny.
+        3. Caches the final `(risk, expvals)` result by the input angles
+           rounded to `cache_decimals` places — an exact repeat query (the
+           same uploaded slice re-analyzed, or a demo/validation-cohort
+           angle vector seen before) is then a plain dict lookup,
+           sub-microsecond and independent of the simulator entirely.
+
+        Falls back to the standard `forward()` path (converted back to
+        plain floats) on any failure — a missing/broken inference circuit,
+        or any runtime error evaluating it — so this is strictly additive:
+        it can only make inference faster, never less correct or less
+        available than calling `forward()` directly.
+        """
+        angles = np.asarray(angles, dtype=np.float64).reshape(-1)
+        if angles.shape[0] != self.n_qubits:
+            raise ValueError(f"Expected {self.n_qubits} angles, got {angles.shape[0]}")
+
+        cache_key = tuple(np.round(angles, cache_decimals).tolist())
+        with self._inference_cache_lock:
+            cached = self._inference_cache.get(cache_key)
+            if cached is not None:
+                self._inference_cache.move_to_end(cache_key)
+                risk_value, expvals_tuple = cached
+                return risk_value, np.asarray(expvals_tuple, dtype=np.float32)
+
+        if self._inference_circuit is None:
+            with torch.inference_mode():
+                risk_tensor = self.forward(torch.from_numpy(angles).float().unsqueeze(0))
+                expvals_tensor = self.quantum_layer(torch.from_numpy(angles).float().unsqueeze(0))
+            risk_value = float(risk_tensor.item())
+            expvals = expvals_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+        else:
+            try:
+                with torch.inference_mode():
+                    weights_np = self.quantum_layer.weights.detach().cpu().numpy()
+                    expvals = np.asarray(self._inference_circuit(angles, weights_np), dtype=np.float64)
+                    readout_weight = self.readout.weight.detach().cpu().numpy().reshape(-1)  # (n_qubits,)
+                    readout_bias = float(self.readout.bias.detach().cpu().item())
+                    logit = float(np.dot(readout_weight, expvals) + readout_bias)
+                    risk_value = float(1.0 / (1.0 + np.exp(-logit)))
+                expvals = expvals.astype(np.float32)
+            except Exception as exc:  # noqa: BLE001 - any evaluation failure degrades to the slow, always-correct path
+                logger.warning("Fast inference circuit evaluation failed (%s); falling back to forward().", exc)
+                with torch.inference_mode():
+                    risk_tensor = self.forward(torch.from_numpy(angles).float().unsqueeze(0))
+                    expvals_tensor = self.quantum_layer(torch.from_numpy(angles).float().unsqueeze(0))
+                risk_value = float(risk_tensor.item())
+                expvals = expvals_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
+        with self._inference_cache_lock:
+            self._inference_cache[cache_key] = (risk_value, tuple(expvals.tolist()))
+            self._inference_cache.move_to_end(cache_key)
+            while len(self._inference_cache) > _INFERENCE_CACHE_MAX_ENTRIES:
+                self._inference_cache.popitem(last=False)
+
+        return risk_value, expvals
 
 
 if __name__ == "__main__":

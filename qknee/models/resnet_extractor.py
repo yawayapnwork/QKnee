@@ -140,6 +140,17 @@ class ResNet18FeatureExtractor(nn.Module):
         # conv1, bn1, relu, maxpool, layer1-4, avgpool, fc
         self.backbone = nn.Sequential(*list(backbone.children())[:-1])
 
+        # `channels_last` (NHWC) memory format lets modern CPU BLAS/MKL-DNN
+        # kernels (and cuDNN on GPU) use their vectorized/AVX-512 conv
+        # paths more effectively than the default `channels_first` (NCHW)
+        # layout — a free win for a frozen, inference-only conv backbone
+        # since there's no training-time weight-update path that would
+        # need to round-trip the conversion. Purely a memory-layout hint:
+        # never changes numerics, so this is safe regardless of whether
+        # Grad-CAM's hook-based gradient path (which shares this same
+        # `self.backbone`) is in play.
+        self.backbone = self.backbone.to(memory_format=torch.channels_last)
+
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
@@ -153,6 +164,18 @@ class ResNet18FeatureExtractor(nn.Module):
         )
         self._last_attention_weights: Optional[torch.Tensor] = None
 
+        # Lazily-built TorchScript-traced + `optimize_for_inference`'d copy
+        # of `self.backbone`, used only by `forward_slice` when gradients
+        # are disabled (see there) — built once, on first qualifying call,
+        # from a real input's shape so the trace matches production usage
+        # exactly. `None` until built, and permanently `None` again (with
+        # a logged warning) if tracing/optimization ever fails — this path
+        # is pure speedup, never required for correctness, so any failure
+        # just means every future call keeps using the eager backbone
+        # rather than raising.
+        self._traced_backbone: Optional[torch.jit.ScriptModule] = None
+        self._traced_backbone_failed = False
+
     def train(self, mode: bool = True) -> "ResNet18FeatureExtractor":
         """Override train() so the frozen backbone always stays in eval mode
         (keeps BatchNorm running stats fixed) even if the parent module is
@@ -161,6 +184,31 @@ class ResNet18FeatureExtractor(nn.Module):
         if self.freeze_backbone:
             self.backbone.eval()
         return self
+
+    def _get_traced_backbone(self, example: torch.Tensor) -> Optional[torch.jit.ScriptModule]:
+        """Builds (once) and returns the TorchScript-traced +
+        `optimize_for_inference`'d backbone, or `None` if that isn't
+        possible/safe right now. Only ever called from `forward_slice`
+        when gradients are already disabled (see there) — a traced,
+        optimized graph doesn't support the autograd tracking Grad-CAM's
+        hook-based path needs, so this must never be reached from a
+        gradient-requiring forward pass."""
+        if self._traced_backbone_failed:
+            return None
+        if self._traced_backbone is not None:
+            return self._traced_backbone
+
+        try:
+            traced = torch.jit.trace(self.backbone, example.to(memory_format=torch.channels_last))
+            traced = torch.jit.optimize_for_inference(traced)
+            self._traced_backbone = traced
+            logger.info("Traced + optimized ResNet18 backbone for inference (TorchScript).")
+        except Exception as exc:  # noqa: BLE001 - tracing is a pure speedup; never fatal
+            logger.warning("TorchScript trace/optimize_for_inference failed (%s); using eager backbone.", exc)
+            self._traced_backbone_failed = True
+            return None
+
+        return self._traced_backbone
 
     def forward_slice(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features from a batch of 2D images.
@@ -175,6 +223,22 @@ class ResNet18FeatureExtractor(nn.Module):
             raise ValueError(
                 f"Expected input shape (B, 3, H, W), got {tuple(x.shape)}"
             )
+
+        x = x.to(memory_format=torch.channels_last)
+
+        # The traced/optimized backbone strips the graph structure Grad-CAM's
+        # forward/backward hooks (registered on `self.backbone`'s named
+        # submodules — see qknee.xai.gradcam.GradCAM) rely on, and can't be
+        # backpropagated through — so it's only used when this call is
+        # already gradient-free (every pure-inference caller: `/predict`,
+        # `/explain`'s prediction step, the dashboard/workstation). Grad-CAM's
+        # own forward pass always runs with gradients enabled, so it
+        # transparently keeps using the eager `self.backbone` below.
+        if not torch.is_grad_enabled():
+            traced_backbone = self._get_traced_backbone(x)
+            if traced_backbone is not None:
+                features = traced_backbone(x)  # (B, 512, 1, 1)
+                return torch.flatten(features, start_dim=1)  # (B, 512)
 
         features = self.backbone(x)  # (B, 512, 1, 1)
         return torch.flatten(features, start_dim=1)  # (B, 512)

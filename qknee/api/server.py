@@ -351,6 +351,13 @@ class PredictionResponse(BaseModel):
     diagnosis: str = Field(..., description="'Tear Detected' if risk_score >= 0.5, else 'Normal'.")
     gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
     backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
+    latency_ms: Optional[float] = Field(
+        None,
+        description="Wall-clock time for this call's inference stage (ResNet18 -> PCA -> VQC -> Grad-CAM for "
+                    "'live', the seeded mock generator for 'mock'), measured with time.perf_counter_ns() for "
+                    "sub-millisecond precision. None for backends that don't measure it (e.g. a cached/proxied "
+                    "response where this process never ran the pipeline).",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -407,7 +414,24 @@ class QKneeBackend:
     torch/torchvision/pennylane import chain actually happens — see
     `get_backend()` below, which is what defers *building* one of these
     until the first `/predict`/`/explain` request instead of at module
-    import time."""
+    import time.
+
+    Zero-latency caching lives at two distinct layers, deliberately not
+    duplicated here at the HTTP layer:
+    - `CacheService` (module-level, this file) keys on the uploaded file's
+      *content hash* — correct for the whole response (risk score *and*
+      the slice-specific Grad-CAM heatmap image), since identical bytes
+      always mean an identical response.
+    - `VQCClassifier.predict_fast`'s per-instance cache (`qknee.models.vqc`)
+      keys on the *rounded quantum-angle vector* the PCA/quantum-autoencoder
+      stage produces — correct for just the risk score + Pauli-Z
+      expectations (mathematically, identical angles always classify
+      identically), reached transparently through
+      `PipelineRunner.classify()` on every `_predict_live` call below.
+    A third, angle-keyed cache *here* would be unsound: two different
+    uploaded slices can legitimately round to very similar angle vectors
+    while needing different Grad-CAM heatmaps, so this layer's cache key
+    must stay content-hash-based, not angle-based."""
 
     def __init__(self, pca_artifact_path: Path = PCA_ARTIFACT_PATH):
         self.backend_ready = False
@@ -574,12 +598,20 @@ class QKneeBackend:
         slice_2d = self.load_slice(raw_bytes, filename)
         display_slice = self._normalize_uint8(slice_2d)
 
+        # perf_counter_ns() rather than perf_counter(): this stage now
+        # regularly lands in the low-single-digit-millisecond range (a
+        # cache hit in VQCClassifier.predict_fast's per-instance angle
+        # cache — see qknee.models.vqc — can be sub-millisecond), where
+        # perf_counter()'s float-seconds precision starts rounding away
+        # real signal; the nanosecond counter doesn't.
+        t0_ns = time.perf_counter_ns()
         if self.backend_ready:
             risk_score, heatmap_b64 = self._predict_live(display_slice)
             backend = "live"
         else:
             risk_score, heatmap_b64 = self._predict_mock(display_slice)
             backend = "mock"
+        latency_ms = (time.perf_counter_ns() - t0_ns) / 1e6
 
         diagnosis = "Tear Detected" if risk_score >= TEAR_RISK_THRESHOLD else "Normal"
 
@@ -588,6 +620,7 @@ class QKneeBackend:
             diagnosis=diagnosis,
             gradcam_heatmap=heatmap_b64,
             backend=backend,
+            latency_ms=latency_ms,
         )
 
     def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str]:

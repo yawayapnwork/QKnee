@@ -444,9 +444,18 @@ class PipelineRunner:
         return batch
 
     def extract_resnet_features(self, batch: torch.Tensor) -> np.ndarray:
-        """Stage 2: `(1, S, 3, 224, 224)` batch -> `(1, 512)` ResNet18 embedding."""
+        """Stage 2: `(1, S, 3, 224, 224)` batch -> `(1, 512)` ResNet18 embedding.
+
+        `torch.inference_mode()` rather than `torch.no_grad()`: both skip
+        autograd tracking, but `inference_mode` additionally skips the
+        version-counter bookkeeping PyTorch otherwise does per-tensor for
+        potential future autograd use — cheaper, and safe here since this
+        stage's output only ever crosses back into plain NumPy via
+        `.cpu().numpy()` below, never back into an autograd graph (the
+        gradient-requiring ResNet18 forward pass Grad-CAM's `explain()`
+        needs runs its own separate, un-wrapped forward pass instead)."""
         try:
-            with torch.no_grad():
+            with torch.inference_mode():
                 features = self.feature_extractor.extract_features(batch.to(self.device))
         except Exception as exc:
             raise PipelineValidationError(f"[ResNet18] forward pass failed: {exc}") from exc
@@ -466,7 +475,7 @@ class PipelineRunner:
             if self.encoder_type == "pca":
                 angles = self.reducer.transform(features_512d)
             else:
-                with torch.no_grad():
+                with torch.inference_mode():
                     features_tensor = torch.from_numpy(features_512d).float().to(self.device)
                     latent_angles = self.quantum_autoencoder.compress(features_tensor)
                 angles = latent_angles.cpu().numpy()
@@ -484,11 +493,31 @@ class PipelineRunner:
         return angles
 
     def classify(self, quantum_angles: np.ndarray, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> float:
-        """Stage 4: `(1, n_qubits)` angles -> scalar risk probability in `[0, 1]`."""
+        """Stage 4: `(1, n_qubits)` angles -> scalar risk probability in `[0, 1]`.
+
+        Prefers `model.predict_fast()` (duck-typed via `hasattr`) when the
+        model exposes it — `VQCClassifier`'s gradient-free, lightning.qubit
+        -backed, per-instance-cached inference path, ~5x faster cold and
+        effectively free (sub-microsecond) on a cache hit versus the
+        `TorchLayer`/`default.qubit`/`backprop` path `forward()` runs
+        below. `DataReuploadingVQC` and any other classifier without
+        `predict_fast` transparently use the `forward()` path unchanged."""
         model = vqc or self.vqc
+
+        if hasattr(model, "predict_fast"):
+            try:
+                risk_value, _ = model.predict_fast(quantum_angles.reshape(-1))
+                if not 0.0 <= risk_value <= 1.0:
+                    raise PipelineValidationError(f"[VQC] risk score {risk_value} outside expected range [0, 1]")
+                return risk_value
+            except PipelineValidationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - fast path is optional; fall through to forward() below
+                logger.warning("predict_fast failed (%s); falling back to forward().", exc)
+
         angles_tensor = torch.from_numpy(quantum_angles).float().to(self.device)
         try:
-            with torch.no_grad():
+            with torch.inference_mode():
                 risk = model(angles_tensor)
         except Exception as exc:
             raise PipelineValidationError(f"[VQC] forward pass failed: {exc}") from exc
