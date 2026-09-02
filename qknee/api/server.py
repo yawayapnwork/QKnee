@@ -155,6 +155,13 @@ TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 USE_MOCK_FALLBACK = os.getenv("USE_MOCK_FALLBACK", "false").strip().lower() in ("1", "true", "yes")
 BACKEND_API_URL = (os.getenv("BACKEND_API_URL") or "").strip().rstrip("/") or None
 
+# The Streamlit Community Cloud deployment of the clinical workstation
+# (`qknee/ui/dashboard.py`) this API serves — surfaced from `GET /` so a
+# visitor hitting the bare API root gets sent to the actual UI instead of
+# a bare JSON blob with nowhere to go. Overridable for local/staging
+# frontends via `$STREAMLIT_FRONTEND_URL`.
+STREAMLIT_FRONTEND_URL = (os.getenv("STREAMLIT_FRONTEND_URL") or "https://q-knee.streamlit.app").strip()
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
 
@@ -764,6 +771,13 @@ app = FastAPI(
     title="Q-Knee Inference API",
     description="Quantum-assisted ACL/meniscal tear risk scoring from MRI slices.",
     version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    # Starlette's default (True) — set explicitly so a Vercel rewrite that
+    # adds/drops a trailing slash (e.g. `/health` vs `/health/`) still
+    # resolves to the same route instead of a bare 404.
+    redirect_slashes=True,
 )
 
 app.add_middleware(
@@ -859,6 +873,69 @@ def _planned_backend_mode() -> str:
     if USE_MOCK_FALLBACK or not _HEAVY_IMAGING_AVAILABLE:
         return "cache-fallback"
     return "live-or-mock"
+
+
+@app.get("/", tags=["System"])
+async def root(request: Request):
+    """Landing payload for the bare API root — without this, `GET /` 404s
+    (`{"detail":"Not Found"}`) since FastAPI/Starlette only match routes
+    that are explicitly declared, and no `@app.get("/")` existed. Returns
+    a structured JSON gateway summary to API clients/`curl`, or a minimal
+    HTML welcome page (with a live link to the Streamlit workstation and
+    `/docs`) to a browser — negotiated off the request's `Accept` header,
+    so this single route serves both without a redirect."""
+    payload = {
+        "system": "Q-Knee Diagnostic API Gateway",
+        "status": "operational",
+        "version": app.version,
+        "docs_url": "/docs",
+        "redoc_url": "/redoc",
+        "openapi_url": "/openapi.json",
+        "health": "/health",
+        "frontend_workstation": STREAMLIT_FRONTEND_URL,
+        "client_endpoints": {
+            "predict": "/predict",
+            "explain": "/explain",
+            "report": "/report",
+        },
+    }
+
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and "application/json" not in accept:
+        from fastapi.responses import HTMLResponse
+
+        html = f"""
+        <!doctype html>
+        <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <title>Q-Knee Diagnostic API Gateway</title>
+            <style>
+                body {{ font-family: -apple-system, 'Segoe UI', sans-serif; background: #F8FAFC;
+                        color: #0F172A; max-width: 640px; margin: 4rem auto; padding: 0 1.5rem; }}
+                h1 {{ font-size: 1.4rem; }}
+                a {{ color: #0284C7; }}
+                code {{ background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 4px;
+                        padding: 0.1rem 0.35rem; font-family: 'SF Mono', Consolas, monospace; }}
+                ul {{ line-height: 1.9; }}
+            </style>
+        </head>
+        <body>
+            <h1>Q-Knee Diagnostic API Gateway</h1>
+            <p>Status: <strong>operational</strong> &middot; Version: <code>{payload["version"]}</code></p>
+            <p>This is the inference API. For the interactive clinical workstation, go to
+               <a href="{STREAMLIT_FRONTEND_URL}">{STREAMLIT_FRONTEND_URL}</a>.</p>
+            <ul>
+                <li><a href="/docs">Swagger UI (/docs)</a></li>
+                <li><a href="/redoc">ReDoc (/redoc)</a></li>
+                <li><a href="/health">Health check (/health)</a></li>
+            </ul>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html)
+
+    return payload
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
