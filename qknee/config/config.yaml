@@ -76,8 +76,11 @@ api:
   host: "0.0.0.0"
   port: 8000
   cors_origins:
+    - "https://q-knee.streamlit.app"
+    - "https://q-knee-gamma.vercel.app"
     - "http://localhost:8501"
     - "http://127.0.0.1:8501"
+    - "http://localhost:3000"
   tear_risk_threshold: 0.5
   # Dev-only fallback signing key — every non-dev deployment MUST override
   # this via the $QKNEE_JWT_SECRET_KEY env var (see loader.py's

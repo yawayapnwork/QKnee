@@ -164,6 +164,7 @@ STREAMLIT_FRONTEND_URL = (os.getenv("STREAMLIT_FRONTEND_URL") or "https://q-knee
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
+BENCHMARK_RESULTS_PATH = _REPO_ROOT / "qknee" / "artifacts" / "benchmark_results.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -365,6 +366,22 @@ class HealthResponse(BaseModel):
     )
     user_store_backend: str = Field(..., description="'SQLAlchemyUserRepository' or 'LocalFileUserRepository'.")
     cache_backend: str = Field(..., description="'redis' or 'in-memory' — see qknee.api.server.CacheService.")
+    artifacts: Dict[str, bool] = Field(
+        default_factory=dict,
+        description="Whether each local model artifact file exists on disk (PCA scaler, ACL/meniscus VQC "
+                    "checkpoints, the precomputed demo cache) — all False on a lightweight/serverless "
+                    "deployment that proxies to BACKEND_API_URL instead of loading them locally.",
+    )
+    quantum_simulator: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="PennyLane NISQ simulator status: whether `pennylane` imports and a "
+                    "`default.qubit` device of the configured qubit count constructs successfully.",
+    )
+    latency_benchmark: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Most recent `scripts/run_benchmark.py` measurement for the VQC head "
+                    "(latency_ms_per_sample, roc_auc), or null if no benchmark has been run yet.",
+    )
 
 
 class ExplanationResponse(BaseModel):
@@ -768,9 +785,9 @@ class ProxyBackend:
 # --------------------------------------------------------------------------- #
 
 app = FastAPI(
-    title="Q-Knee Inference API",
-    description="Quantum-assisted ACL/meniscal tear risk scoring from MRI slices.",
-    version="1.0.0",
+    title="Q-Knee Diagnostic Platform API",
+    description="Hybrid Quantum-Classical ML Pipeline for Automated Knee MRI Triage",
+    version="1.0.4",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -863,6 +880,72 @@ def get_backend() -> BackendType:
     return backend
 
 
+def _artifact_availability() -> Dict[str, bool]:
+    """Cheap `Path.exists()` checks only — no file I/O beyond a stat call,
+    no torch/pennylane import, so this is safe to run on every `/health`
+    hit (including the very first, cold-start one) without adding
+    meaningful latency or risking a 500 if a path is misconfigured."""
+    try:
+        return {
+            "pca_artifact": _config.paths.pca_artifact.exists(),
+            "acl_checkpoint": _config.paths.acl_checkpoint.exists(),
+            "meniscus_checkpoint": _config.paths.meniscus_checkpoint.exists(),
+            "precomputed_cache": PRECOMPUTED_CACHE_PATH.exists(),
+        }
+    except Exception as exc:  # noqa: BLE001 - a health probe must never itself 500
+        logger.warning("Artifact availability check failed: %s", exc)
+        return {}
+
+
+def _quantum_simulator_status() -> Dict[str, Any]:
+    """Verifies PennyLane's NISQ simulator is actually importable and can
+    stand up a `default.qubit` device at the configured qubit count —
+    the same statevector backend `/predict`/`/explain` build their VQC
+    on — without running a full forward pass (no TorchLayer, no
+    gradients: just enough to prove the simulator itself is healthy).
+    Wrapped so a missing/broken PennyLane install on a lightweight
+    (Vercel/proxy-mode) deployment degrades to `available: false` here
+    rather than 500ing the whole health probe."""
+    try:
+        import pennylane as qml
+
+        n_qubits = _config.quantum.n_qubits
+        qml.device("default.qubit", wires=n_qubits)
+        return {
+            "available": True,
+            "device": "default.qubit",
+            "n_qubits": n_qubits,
+            "pennylane_version": getattr(qml, "version", lambda: "unknown")(),
+        }
+    except Exception as exc:  # noqa: BLE001 - report unavailability, never raise from a health probe
+        return {"available": False, "reason": str(exc)}
+
+
+def _latency_benchmark_status() -> Optional[Dict[str, Any]]:
+    """Most recent `scripts/run_benchmark.py` measurement for the VQC
+    head, read straight from the static `benchmark_results.json` export
+    (no live timing run — that would defeat the point of a fast health
+    probe). Returns `None` if no benchmark has been generated yet, or if
+    the file exists but fails to parse — never raises."""
+    if not BENCHMARK_RESULTS_PATH.exists():
+        return None
+    try:
+        import json
+
+        payload = json.loads(BENCHMARK_RESULTS_PATH.read_text(encoding="utf-8"))
+        for model in payload.get("models", []):
+            if "VQC" in model.get("name", ""):
+                return {
+                    "model": model.get("name"),
+                    "latency_ms_per_sample": model.get("latency_ms_per_sample"),
+                    "roc_auc": model.get("roc_auc"),
+                }
+        return None
+    except Exception as exc:  # noqa: BLE001 - a stale/malformed benchmark file shouldn't fail /health
+        logger.warning("Failed to read benchmark results at %s: %s", BENCHMARK_RESULTS_PATH, exc)
+        return None
+
+
 def _planned_backend_mode() -> str:
     """Which backend `get_backend()` *would* build, computed from plain
     env vars/import-availability flags only — never actually triggers the
@@ -877,27 +960,49 @@ def _planned_backend_mode() -> str:
 
 @app.get("/", tags=["System"])
 async def root(request: Request):
-    """Landing payload for the bare API root — without this, `GET /` 404s
-    (`{"detail":"Not Found"}`) since FastAPI/Starlette only match routes
-    that are explicitly declared, and no `@app.get("/")` existed. Returns
-    a structured JSON gateway summary to API clients/`curl`, or a minimal
-    HTML welcome page (with a live link to the Streamlit workstation and
-    `/docs`) to a browser — negotiated off the request's `Accept` header,
-    so this single route serves both without a redirect."""
+    """Intelligent gateway for the bare API root — without this, `GET /`
+    404s (`{"detail":"Not Found"}`) since FastAPI/Starlette only match
+    routes that are explicitly declared, and no `@app.get("/")` existed.
+
+    Content-negotiated off the request's `Accept` header, so this single
+    route serves two audiences without a real HTTP redirect:
+
+    - A **browser** (`Accept: text/html`) gets a sterile clinical-gateway
+      HTML page that meta-refreshes to the Streamlit workstation
+      (`$STREAMLIT_FRONTEND_URL`) after 2 seconds — long enough to read
+      the system telemetry and grab a `/docs`/`/redoc` link first, short
+      enough that a human visitor still lands on the real UI momentarily.
+    - An **API/headless client** (`curl`, `fetch`, a monitoring probe —
+      anything not explicitly asking for `text/html`) gets the structured
+      JSON gateway payload below instead.
+
+    `endpoints` below points at the versioned `/api/v1/...` aliases
+    (registered alongside their unprefixed originals on `/health`,
+    `/predict`, `/explain`, `/report` — see those routes' stacked
+    decorators) rather than the unprefixed paths, so every link this
+    payload/page advertises actually resolves.
+    """
     payload = {
-        "system": "Q-Knee Diagnostic API Gateway",
-        "status": "operational",
+        "platform": "Q-Knee Diagnostic Platform",
+        "track": "AI & Quantum Innovation Track",
         "version": app.version,
-        "docs_url": "/docs",
-        "redoc_url": "/redoc",
-        "openapi_url": "/openapi.json",
-        "health": "/health",
-        "frontend_workstation": STREAMLIT_FRONTEND_URL,
-        "client_endpoints": {
-            "predict": "/predict",
-            "explain": "/explain",
-            "report": "/report",
+        "status": "operational",
+        "architecture": {
+            "spatial_extractor": "ResNet18 (512-dim continuous embedding)",
+            "compression_bottleneck": "Linear / PCA (512 -> 4 scalars)",
+            "quantum_kernel": "4-Qubit Variational Quantum Circuit (Angle Encoding, CNOT Entanglement)",
+            "explainability": "Grad-CAM Spatial Saliency + Pauli-Z Expectation",
         },
+        "dataset": "RSNA / Stanford MRNet Knee MRI",
+        "endpoints": {
+            "docs": "/docs",
+            "redoc": "/redoc",
+            "health": "/api/v1/health",
+            "predict": "/api/v1/predict",
+            "explain": "/api/v1/explain",
+            "report": "/api/v1/report",
+        },
+        "frontend_workstation": STREAMLIT_FRONTEND_URL,
     }
 
     accept = request.headers.get("accept", "")
@@ -909,27 +1014,88 @@ async def root(request: Request):
         <html lang="en">
         <head>
             <meta charset="utf-8">
-            <title>Q-Knee Diagnostic API Gateway</title>
+            <meta http-equiv="refresh" content="2; url={STREAMLIT_FRONTEND_URL}">
+            <title>Q-Knee Diagnostic Platform // Clinical Gateway</title>
             <style>
-                body {{ font-family: -apple-system, 'Segoe UI', sans-serif; background: #F8FAFC;
-                        color: #0F172A; max-width: 640px; margin: 4rem auto; padding: 0 1.5rem; }}
-                h1 {{ font-size: 1.4rem; }}
-                a {{ color: #0284C7; }}
-                code {{ background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 4px;
-                        padding: 0.1rem 0.35rem; font-family: 'SF Mono', Consolas, monospace; }}
-                ul {{ line-height: 1.9; }}
+                :root {{
+                    --bg: #F8FAFC; --card: #FFFFFF; --border: #E2E8F0;
+                    --slate: #0F172A; --muted: #475569; --teal: #0D9488; --blue: #0284C7;
+                }}
+                * {{ box-sizing: border-box; }}
+                body {{
+                    font-family: -apple-system, 'Segoe UI', Inter, sans-serif;
+                    background: var(--bg); color: var(--slate);
+                    max-width: 640px; margin: 3.5rem auto; padding: 0 1.5rem;
+                }}
+                .card {{
+                    background: var(--card); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 1.75rem 1.9rem;
+                    box-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04);
+                }}
+                h1 {{ font-size: 1.25rem; font-weight: 800; margin: 0 0 0.3rem 0; letter-spacing: -0.01em; }}
+                .redirect-note {{ font-size: 0.78rem; color: var(--muted); margin-bottom: 1.3rem; }}
+                .meta-grid {{
+                    display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem 1.4rem;
+                    margin: 1.2rem 0 1.5rem 0;
+                }}
+                .meta-label {{
+                    font-size: 0.66rem; font-weight: 700; letter-spacing: 0.05em;
+                    text-transform: uppercase; color: var(--muted); margin-bottom: 0.2rem;
+                }}
+                .meta-value {{
+                    font-family: 'SF Mono', 'JetBrains Mono', Consolas, monospace;
+                    font-size: 0.8rem; color: var(--slate);
+                }}
+                .status-dot {{
+                    display: inline-block; width: 0.45rem; height: 0.45rem; border-radius: 50%;
+                    background: var(--teal); margin-right: 0.4rem;
+                }}
+                .actions {{ display: flex; flex-direction: column; gap: 0.6rem; margin-top: 0.5rem; }}
+                .btn {{
+                    display: block; text-align: center; text-decoration: none;
+                    border-radius: 999px; padding: 0.65rem 1rem; font-weight: 700; font-size: 0.85rem;
+                }}
+                .btn-primary {{ background: var(--teal); color: #FFFFFF; }}
+                .btn-secondary {{ background: var(--card); color: var(--blue); border: 1px solid var(--border); }}
+                .btn-tertiary {{ background: transparent; color: var(--muted); font-weight: 600; font-size: 0.78rem; }}
+                .footer {{
+                    margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--border);
+                    font-size: 0.68rem; color: var(--muted); text-align: center; line-height: 1.6;
+                }}
             </style>
         </head>
         <body>
-            <h1>Q-Knee Diagnostic API Gateway</h1>
-            <p>Status: <strong>operational</strong> &middot; Version: <code>{payload["version"]}</code></p>
-            <p>This is the inference API. For the interactive clinical workstation, go to
-               <a href="{STREAMLIT_FRONTEND_URL}">{STREAMLIT_FRONTEND_URL}</a>.</p>
-            <ul>
-                <li><a href="/docs">Swagger UI (/docs)</a></li>
-                <li><a href="/redoc">ReDoc (/redoc)</a></li>
-                <li><a href="/health">Health check (/health)</a></li>
-            </ul>
+            <div class="card">
+                <h1>Q-Knee Diagnostic Platform // Clinical Gateway</h1>
+                <div class="redirect-note">Redirecting to the diagnostic workstation in 2 seconds&hellip;</div>
+                <div class="meta-grid">
+                    <div>
+                        <div class="meta-label">Track</div>
+                        <div class="meta-value">AI &amp; Quantum Innovation (24-Hour Sprint)</div>
+                    </div>
+                    <div>
+                        <div class="meta-label">Core Engine</div>
+                        <div class="meta-value">4-Qubit Variational Quantum Circuit (PennyLane TorchLayer)</div>
+                    </div>
+                    <div>
+                        <div class="meta-label">Dataset</div>
+                        <div class="meta-value">RSNA / Stanford MRNet Knee MRI Cohort</div>
+                    </div>
+                    <div>
+                        <div class="meta-label">Status</div>
+                        <div class="meta-value"><span class="status-dot"></span>Operational (Local Statevector NISQ Simulator)</div>
+                    </div>
+                </div>
+                <div class="actions">
+                    <a class="btn btn-primary" href="{STREAMLIT_FRONTEND_URL}">Launch Diagnostic Workstation (Streamlit) &rarr;</a>
+                    <a class="btn btn-secondary" href="/docs">Interactive OpenAPI Documentation (Swagger) &rarr;</a>
+                    <a class="btn btn-tertiary" href="/redoc">ReDoc Specification &rarr;</a>
+                </div>
+                <div class="footer">
+                    Investigational Research Prototype Only &bull; Stanford MRNet Validation Cohort &bull;
+                    Confirmatory Radiologist Over-Read Required
+                </div>
+            </div>
         </body>
         </html>
         """
@@ -939,6 +1105,7 @@ async def root(request: Request):
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
+@app.get("/api/v1/health", response_model=HealthResponse, tags=["Diagnostics"], include_in_schema=False)
 def health() -> HealthResponse:
     """Reports whether the live QKneeModel backend loaded successfully,
     which of the three backend implementations is (or will be) active,
@@ -952,7 +1119,19 @@ def health() -> HealthResponse:
     host's) readiness/liveness probe, hit immediately and repeatedly after
     boot, so it must never itself be what triggers the one-time
     torch/torchvision/pennylane import + ResNet18/VQC load that the first
-    real `/predict`/`/explain`/`/report` request pays for."""
+    real `/predict`/`/explain`/`/report` request pays for.
+
+    Also reports local artifact availability, PennyLane NISQ simulator
+    status, and the last measured VQC latency benchmark — each gathered
+    by its own try/except-wrapped helper (`_artifact_availability`,
+    `_quantum_simulator_status`, `_latency_benchmark_status`), so a
+    missing file, an unimportable PennyLane, or a malformed benchmark
+    JSON degrades that one field to a falsy/empty value instead of
+    turning a cold-start health check into a 500."""
+    artifacts = _artifact_availability()
+    quantum_simulator = _quantum_simulator_status()
+    latency_benchmark = _latency_benchmark_status()
+
     if backend is None:
         return HealthResponse(
             status="ok",
@@ -961,6 +1140,9 @@ def health() -> HealthResponse:
             mode=_planned_backend_mode(),
             user_store_backend=type(user_store).__name__,
             cache_backend=cache_service.backend_name,
+            artifacts=artifacts,
+            quantum_simulator=quantum_simulator,
+            latency_benchmark=latency_benchmark,
         )
     return HealthResponse(
         status="ok",
@@ -969,6 +1151,9 @@ def health() -> HealthResponse:
         mode=_planned_backend_mode(),
         user_store_backend=type(user_store).__name__,
         cache_backend=cache_service.backend_name,
+        artifacts=artifacts,
+        quantum_simulator=quantum_simulator,
+        latency_benchmark=latency_benchmark,
     )
 
 
@@ -1002,6 +1187,7 @@ def _decode_png_base64(png_base64: str) -> "np.ndarray":
 
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
+@app.post("/api/v1/predict", response_model=PredictionResponse, tags=["Inference"], include_in_schema=False)
 async def predict(
     request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
@@ -1042,6 +1228,7 @@ async def predict(
 
 
 @app.post("/explain", response_model=ExplanationResponse, tags=["Inference"])
+@app.post("/api/v1/explain", response_model=ExplanationResponse, tags=["Inference"], include_in_schema=False)
 async def explain(
     request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
@@ -1079,6 +1266,7 @@ async def explain(
 
 
 @app.post("/report", tags=["Inference"])
+@app.post("/api/v1/report", tags=["Inference"], include_in_schema=False)
 async def report(
     request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),

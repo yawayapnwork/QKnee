@@ -220,6 +220,18 @@ def _apply_env_overrides(raw: Dict[str, Any]) -> Dict[str, Any]:
             node = node.setdefault(key, {})
         node[leaf] = override
 
+    # `api.cors_origins` is a List[str], not a scalar, so it can't reuse the
+    # plain string-assignment loop above (which would hand the dataclass a
+    # bare string where a list is expected). `$QKNEE_CORS_ORIGINS`, when
+    # set, is a comma-separated origin list — this lets a multi-cloud
+    # deployment (Vercel API + Streamlit Cloud UI + a local dev frontend)
+    # widen/narrow the allowed origins per-environment without editing
+    # config.yaml or rebuilding the image.
+    cors_override = os.environ.get("QKNEE_CORS_ORIGINS")
+    if cors_override is not None:
+        origins = [origin.strip() for origin in cors_override.split(",") if origin.strip()]
+        raw.setdefault("api", {})["cors_origins"] = origins
+
     return raw
 
 
