@@ -39,24 +39,36 @@ import streamlit as st
 # Design tokens — sterile clinical light theme
 # --------------------------------------------------------------------------- #
 
-APP_BACKGROUND = "#F8FAFC"       # sterile surgical off-white — page canvas
-CARD_SURFACE = "#FFFFFF"         # pure clinical white — cards, masthead, sidebar panels
-SURFACE_IVORY = "#FFFFFF"        # kept for call-site compat — same clinical white surface
-STERILE_WHITE = "#0F172A"        # institutional midnight slate — primary text/header color
-                                  # (name kept for call-site compat with earlier dark-theme pass)
-FOREST_GREEN = "#16A34A"         # clinical green — chart "positive"/primary accent slots in
-                                  # analysis_app.py/dashboard.py (name kept for call-site compat)
+APP_BACKGROUND = "#FFFFFF"       # clean white — page canvas (mint-tinted sections are applied
+                                  # per-block via SECTION_MINT_BG, not globally)
+CARD_SURFACE = "#FFFFFF"         # crisp white — cards, masthead, sidebar panels
+SURFACE_IVORY = "#FFFFFF"        # kept for call-site compat — same white surface
+STERILE_WHITE = "#1F2937"        # dark slate — primary text/header color (name kept for
+                                  # call-site compat with earlier theme passes)
+FOREST_GREEN = "#107050"         # deep surgical emerald — chart "positive"/primary accent slots
+                                  # in analysis_app.py/dashboard.py (name kept for call-site compat)
 SAGE_GREEN = "#16A34A"           # clinical green — low-risk fills, success/online indicators
 SAGE_TINT = "#16A34A1A"          # translucent green chip background
-DIAGNOSTIC_BLUE = "#0284C7"      # primary diagnostic blue — active/interactive accent, tab underlines
-CYAN_SECONDARY = "#0369A1"       # darker blue — hover/pressed variant alongside DIAGNOSTIC_BLUE
-PRIMARY_ACTION_BLUE = "#0284C7"  # Clinician Portal / primary CTA fill
+DIAGNOSTIC_BLUE = "#56B8A0"      # soft seafoam mint — active/interactive accent, tab underlines
+CYAN_SECONDARY = "#48A992"       # deeper mint — hover/pressed variant alongside DIAGNOSTIC_BLUE
+PRIMARY_ACTION_BLUE = "#107050"  # deep surgical emerald — primary CTA fill ("Launch Workstation")
 BORDER_GREY = "#E2E8F0"          # 1px card/divider borders
 BORDER_STRONG = "#CBD5E1"        # button borders / emphasized divider / hover border
-TEXT_MUTED = "#475569"           # muted clinical grey — secondary text/labels
-TEXT_FAINT = "#64748B"           # neutral slate — tertiary micro-copy, "normal finding" tint
+TEXT_MUTED = "#4B5563"           # muted description grey — secondary text/labels
+TEXT_FAINT = "#6B7280"           # neutral slate — tertiary micro-copy, "normal finding" tint
 MONO_TEXT = "#1E293B"            # tabular monospace readouts (DICOM tags, coordinates, latencies)
 AMBER = "#D97706"                # muted amber — regulatory disclosure banner, moderate-risk badge
+
+# Medical-brand palette (ORTHOC-style institutional hospital site) —
+# used directly by the marketing landing page (hero, departments, about,
+# doctors, footer); the tokens above double as the same colors under
+# their clinical-workstation names so the diagnostic console and the
+# marketing site read as one coherent brand.
+BRAND_PRIMARY = "#107050"        # deep surgical emerald green
+BRAND_PRIMARY_DARK = "#0D5C43"
+BRAND_MINT = "#56B8A0"           # soft seafoam mint
+BRAND_MINT_DARK = "#48A992"
+SECTION_MINT_BG = "#F2FAF7"      # mint-tinted alternating section background
 
 # Kept for backward-compat with call sites still referencing older token
 # names from earlier theme passes; both now resolve into the light
@@ -64,8 +76,8 @@ AMBER = "#D97706"                # muted amber — regulatory disclosure banner,
 CLINICAL_SLATE = APP_BACKGROUND
 SURGICAL_TEAL = SAGE_GREEN
 
-RADIUS_SHARP = "4px"
-CARD_SHADOW = "none"
+RADIUS_SHARP = "10px"            # smooth rounded corners (8-12px) across cards/buttons
+CARD_SHADOW = "0 4px 16px rgba(16, 112, 80, 0.07)"  # soft elevation shadow
 
 RISK_LOW = "#16A34A"
 RISK_MODERATE = "#D97706"
@@ -292,6 +304,7 @@ def inject_clinical_theme() -> None:
             background: {CARD_SURFACE};
             border: 1px solid {BORDER_GREY};
             border-radius: {RADIUS_SHARP};
+            box-shadow: {CARD_SHADOW};
             padding: 1.05rem 1.15rem;
             height: 100%;
         }}
@@ -308,13 +321,19 @@ def inject_clinical_theme() -> None:
         }}
 
         /* White clinical specification cards (landing page technical grid) —
-        pure white surface, no blur/glass/gradient treatment */
+        crisp white surface with soft elevation, no blur/glass/gradient */
         .qknee-card-glass {{
             background: {CARD_SURFACE};
             border: 1px solid {BORDER_GREY};
             border-radius: {RADIUS_SHARP};
+            box-shadow: {CARD_SHADOW};
             padding: 20px;
             height: 100%;
+            transition: box-shadow 0.15s ease, transform 0.15s ease;
+        }}
+        .qknee-card-glass:hover {{
+            box-shadow: 0 8px 24px rgba(16, 112, 80, 0.12);
+            transform: translateY(-2px);
         }}
         .qknee-card-pill {{
             display: inline-block;
@@ -375,33 +394,36 @@ def inject_clinical_theme() -> None:
             margin-top: 0.15rem;
         }}
 
-        /* Buttons: clean rectangular white buttons, slate border, no
-        gradients/pill curves/playful transitions */
+        /* Buttons: clean rounded white buttons with a slate border; the
+        primary CTA is a solid emerald pill with a soft mint-tinted shadow,
+        matching the medical-brand hero/CTA treatment. */
         .stButton > button, .stDownloadButton > button {{
-            border-radius: {RADIUS_SHARP};
+            border-radius: 999px;
             font-weight: 600;
             font-size: 0.85rem;
             border: 1px solid {BORDER_STRONG};
             background-color: {CARD_SURFACE};
             color: {STERILE_WHITE};
             white-space: nowrap;
-            transition: none;
+            transition: background-color 0.15s ease, box-shadow 0.15s ease;
             box-shadow: none;
         }}
         .stButton > button:hover, .stDownloadButton > button:hover {{
-            border-color: {BORDER_STRONG};
-            color: {STERILE_WHITE};
-            background-color: #F1F5F9;
+            border-color: {BRAND_MINT};
+            color: {BRAND_PRIMARY_DARK};
+            background-color: {SECTION_MINT_BG};
         }}
         .stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"] {{
             background-color: {PRIMARY_ACTION_BLUE};
             border-color: {PRIMARY_ACTION_BLUE};
             color: {CARD_SURFACE};
+            box-shadow: 0 4px 14px rgba(16, 112, 80, 0.22);
         }}
         .stButton > button[kind="primary"]:hover, .stDownloadButton > button[kind="primary"]:hover {{
-            background-color: {CYAN_SECONDARY};
-            border-color: {CYAN_SECONDARY};
+            background-color: {BRAND_PRIMARY_DARK};
+            border-color: {BRAND_PRIMARY_DARK};
             color: {CARD_SURFACE};
+            box-shadow: 0 6px 18px rgba(16, 112, 80, 0.3);
         }}
 
         /* Form widgets: selects, uploaders, text inputs, dataframes */
