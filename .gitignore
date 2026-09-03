@@ -30,8 +30,12 @@ htmlcov/
 # whatever accounts get signed up on a given deployment (Argon2 hashes, not
 # plaintext, but still not something to commit). users.json is the old
 # JSON-file backend's path (kept ignored in case a stale one lingers
-# locally); qknee_users.db is the current default SQLite backend's path.
+# locally) — both its historical qknee/api/ location and qknee/artifacts/,
+# where it was also seen committed (see git history); qknee_users.db is
+# the current default SQLite backend's path.
 qknee/api/users.json
+qknee/artifacts/users.json
+extras/api/users.json
 qknee_users.db
 
 # IDE
