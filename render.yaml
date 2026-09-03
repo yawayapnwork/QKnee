@@ -1,0 +1,31 @@
+# Render Blueprint for the Q-Knee FastAPI backend (qknee/api/server.py).
+#
+# This service is deployed via Render's native Python buildpack, not the
+# repo's Dockerfile (docker-compose.yml / Dockerfile is for local dev and
+# other container targets) — which is why `.python-version` at the repo
+# root, not the Dockerfile's `FROM python:3.12-slim-bookworm`, is what
+# actually controls the interpreter Render provisions. Without it, Render's
+# buildpack defaults to the newest available CPython (3.14 as of this
+# writing), which has no prebuilt wheels yet for several packages here
+# (onnx/onnxruntime most notably — see requirements.txt's own note) and
+# falls back to compiling them from source, running the free-tier build
+# container out of memory.
+services:
+  - type: web
+    name: qknee-api
+    env: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: >-
+      pip install --upgrade pip &&
+      pip install --only-binary :all: -r requirements.txt ||
+      pip install -r requirements.txt
+    startCommand: uvicorn qknee.api.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.14
+      - key: QKNEE_JWT_SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false

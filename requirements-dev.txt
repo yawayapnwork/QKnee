@@ -1,5 +1,12 @@
-# Extra dependencies for running the test suite (qknee/tests/) — not needed
-# in the production container images built by the Dockerfile.
+# Extra dependencies for running the test suite (qknee/tests/) and local
+# model-export tooling — not needed in the production container images
+# built by the Dockerfile, nor on Render (see requirements.txt's own note
+# on why onnx/onnxruntime were moved out of the production install).
 -r requirements.txt
 pytest==9.1.1
 httpx==0.28.1  # required by fastapi.testclient.TestClient (qknee/tests/test_api_server.py)
+
+# scripts/export_onnx.py only — local, on-demand model export/validation,
+# never imported by the running API or Streamlit UI in production.
+onnx>=1.15.0
+onnxruntime>=1.17.0

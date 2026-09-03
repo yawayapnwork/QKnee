@@ -23,6 +23,15 @@
 #      Qt/GTK GUI toolchain a headless server container never uses, which
 #      is both a much smaller wheel and avoids missing-shared-library
 #      install failures on a minimal Debian slim base image.
+#   3. Upper bounds on torch/torchvision/numpy (and see `.python-version`
+#      at the repo root, pinning the interpreter to 3.10.14): Render's
+#      native Python buildpack defaults to the newest CPython (3.14 as of
+#      this writing) when nothing pins it, and several packages here —
+#      most notably `onnx`/`onnxruntime` (moved to requirements-dev.txt
+#      below for exactly this reason) — have no prebuilt wheel for that
+#      version yet, forcing a from-source CMake/Protobuf build that runs
+#      the free-tier build container out of memory. Every version bound in
+#      this file is chosen to have a universal `cp310-manylinux` wheel.
 #
 # PennyLane note: this project only ever simulates a 4-qubit circuit
 # (`config.yaml`'s `quantum.n_qubits`), whose full state vector is 16
@@ -31,8 +40,8 @@
 # backend exists for much larger qubit counts; pulling it in here would
 # add a native-extension wheel for no simulation-speed benefit at n=4, so
 # it's deliberately not listed.
-torch>=2.2.0
-torchvision>=0.17.0
+torch>=2.2.0,<2.4.0
+torchvision>=0.17.0,<0.19.0
 
 pyyaml>=6.0.1
 pennylane>=0.35.0
@@ -77,27 +86,26 @@ python-multipart>=0.0.9
 argon2-cffi>=23.1.0
 PyJWT>=2.8.0
 
-# Optional PostgreSQL/Redis storage backends (qknee/api/auth.py's
-# SQLAlchemyUserRepository, qknee/api/server.py's CacheService) — both
-# packages below are small/pure-Python-ish and safe to install
-# unconditionally, but neither actually *requires* a Postgres/Redis
-# server: with $DATABASE_URL/$REDIS_URL unset (the default on a
-# single-node free-tier deployment), SQLAlchemy is only ever used against
-# the stdlib `sqlite3` driver and redis-py's client is never connected —
-# both modules degrade to a local JSON store / in-process cache instead.
-#   - A Postgres DBAPI driver (`psycopg2-binary` or `psycopg[binary]`) is
-#     deliberately NOT pinned here: it's only imported (lazily, inside
-#     SQLAlchemyUserRepository) if `$DATABASE_URL` actually names a
-#     `postgresql://` URL. Install one yourself alongside this file if
-#     you're pointing at a real Postgres instance; if it's missing,
-#     SQLAlchemyUserRepository's construction fails loudly and
-#     `_build_user_repository()` catches that and falls back to
-#     LocalFileUserRepository rather than crashing the API.
+# PostgreSQL/Redis storage backends (qknee/api/auth.py's UserRepository,
+# qknee/api/server.py's CacheService). Neither actually *requires* a live
+# Postgres/Redis server: with $DATABASE_URL/$REDIS_URL unset (the default
+# on a single-node free-tier deployment), UserRepository falls back to a
+# local `sqlite:///./qknee_users.db` file and redis-py's client is never
+# connected (CacheService degrades to an in-process TTL cache instead).
+# `psycopg2-binary` is pinned unconditionally (rather than left for an
+# operator to install alongside a real `$DATABASE_URL=postgresql://...`)
+# so a Postgres-backed Render deployment works out of the box.
 SQLAlchemy>=2.0.25
+psycopg2-binary>=2.9.9
+sqlmodel>=0.0.16
 redis>=5.0.0
 
-# ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) —
-# unused unless a caller explicitly opts into the ONNX backend; also kept
-# for the shared Docker image.
-onnx>=1.15.0
-onnxruntime>=1.17.0
+# ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) is
+# NOT installed here — onnx/onnxruntime have no prebuilt wheel for newer
+# CPython versions and fall back to compiling CMake/Protobuf from source,
+# which is what took the Render build OOM in the first place. Neither
+# package is imported anywhere except lazily inside that opt-in ONNX
+# backend path (never at module import time, and never by the default
+# `backend_engine: "pytorch"` config), so omitting them from the
+# production install is safe. See requirements-dev.txt for local ONNX
+# export/experimentation.

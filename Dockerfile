@@ -64,8 +64,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # `requirements.txt` install below) specifically so an unrelated edit to
 # `requirements.txt` doesn't invalidate this layer and force re-downloading
 # these large wheels every time.
+# Pinned to stay within requirements.txt's own `torch>=2.2.0,<2.4.0` /
+# `torchvision>=0.17.0,<0.19.0` bounds (chosen for universal cp310-manylinux
+# wheel availability on Render's native buildpack) — an out-of-bounds pin
+# here would make the `pip install -r requirements.txt` layer below detect
+# a constraint violation and reinstall/downgrade torch mid-build, defeating
+# this layer's whole caching purpose.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install torch==2.13.0 torchvision==0.28.0 \
+    pip install torch==2.3.1 torchvision==0.18.1 \
         --index-url https://download.pytorch.org/whl/cpu
 
 # Remaining Python dependencies, last — this is the layer most likely to
