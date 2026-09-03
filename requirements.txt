@@ -100,6 +100,14 @@ psycopg2-binary>=2.9.9
 sqlmodel>=0.0.16
 redis>=5.0.0
 
+# Safeguard only — qknee.api.auth deliberately does NOT use pydantic's
+# `EmailStr` (which requires this package to even import the module
+# declaring it; a missing/failed install previously crashed the whole API
+# at Render boot with `ImportError: email-validator is not installed`).
+# Email fields are plain `str` validated by a local regex `field_validator`
+# instead, so the app works identically whether or not this resolves.
+email-validator>=2.1.0
+
 # ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) is
 # NOT installed here — onnx/onnxruntime have no prebuilt wheel for newer
 # CPython versions and fall back to compiling CMake/Protobuf from source,

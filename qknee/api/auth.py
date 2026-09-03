@@ -67,7 +67,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -99,6 +99,25 @@ INFERENCE_ROLES: tuple[str, ...] = ("radiologist",)
 
 _PASSWORD_SPECIAL_CHARS = re.compile(r"[^a-zA-Z0-9]")
 
+# Deliberately NOT `pydantic.EmailStr`: that type requires the optional
+# `email-validator` package to be installed, and importing it (even just to
+# declare a field's type — the check happens at class-definition time, when
+# Pydantic compiles the model) raises `ImportError: email-validator is not
+# installed, run pip install 'pydantic[email]'` if it isn't. `requirements.txt`
+# does list `email-validator` as a safeguard, but this module must still
+# import cleanly without it — a bare `str` field plus this regex validator
+# gives "good enough" structural validation (not full RFC 5322 compliance)
+# with zero external dependencies, so a missing/failed `email-validator`
+# install on a host like Render can never take the whole API down.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email_format(email: str) -> str:
+    email = email.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise ValueError("Invalid email address format")
+    return email
+
 
 def _validate_password_strength(password: str) -> str:
     if len(password) < 8:
@@ -115,13 +134,18 @@ def _validate_password_strength(password: str) -> str:
 class UserCreate(BaseModel):
     """`/register` request body."""
 
-    email: EmailStr = Field(..., description="Unique institutional email address.")
+    email: str = Field(..., description="Unique institutional email address.")
     password: str = Field(..., max_length=128, description="Plaintext password; never stored or logged.")
     full_name: str = Field(..., min_length=1, max_length=128)
     role: str = Field(
         default=DEFAULT_ROLE,
         description=f"One of {ROLES}; defaults to '{DEFAULT_ROLE}' if omitted.",
     )
+
+    @field_validator("email")
+    @classmethod
+    def _check_email_format(cls, value: str) -> str:
+        return _validate_email_format(value)
 
     @field_validator("password")
     @classmethod
@@ -136,6 +160,11 @@ class UserLogin(BaseModel):
 
     username: str
     password: str
+
+    @field_validator("username")
+    @classmethod
+    def _check_username_email_format(cls, value: str) -> str:
+        return _validate_email_format(value)
 
 
 class UserResponse(BaseModel):
