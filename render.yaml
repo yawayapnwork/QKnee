@@ -21,7 +21,7 @@ services:
       pip install --upgrade pip &&
       pip install --only-binary :all: -r requirements.txt ||
       pip install -r requirements.txt
-    startCommand: uvicorn qknee.api.server:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m qknee.api.server
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.14

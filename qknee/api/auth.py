@@ -71,6 +71,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
@@ -296,19 +297,71 @@ class User(Base):
         )
 
 
-DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./qknee_users.db"
-_is_sqlite = DATABASE_URL.startswith("sqlite")
-_engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
-    pool_pre_ping=not _is_sqlite,
-    future=True,
-)
-_SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
+_SQLITE_FALLBACK_URL = "sqlite:///./qknee_users.db"
+_SQLITE_MEMORY_URL = "sqlite:///:memory:"
+_RAW_DATABASE_URL = os.getenv("DATABASE_URL") or _SQLITE_FALLBACK_URL
 
-# Automatic table creation on startup, per spec — safe to call unconditionally
-# (a no-op if the table already exists).
-Base.metadata.create_all(_engine)
+# Render/Heroku-provisioned Postgres add-ons commonly hand back the legacy
+# `postgres://` scheme, which SQLAlchemy 2.0 rejects outright
+# (`NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:postgres`) —
+# normalize it to `postgresql://` before it ever reaches `create_engine`.
+if _RAW_DATABASE_URL.startswith("postgres://"):
+    _RAW_DATABASE_URL = "postgresql://" + _RAW_DATABASE_URL[len("postgres://"):]
+
+
+def _build_engine(database_url: str):
+    """Builds the engine and eagerly creates the `users` table, so a bad
+    connection string or an unreachable host fails HERE — inside this
+    function, at import time — rather than as a hard-to-diagnose 500 on the
+    first real request. Callers (module scope, below) catch any failure and
+    fall back further down the chain instead of letting it kill the whole
+    process: a misconfigured/unreachable `$DATABASE_URL` (SSL handshake
+    latency, DNS failure, wrong credentials, ...) on a platform like Render
+    must never take the entire API down before Uvicorn can even bind a
+    port.
+
+    `sqlite:///:memory:` needs `StaticPool` (a single, never-closed
+    connection shared by every checkout) — SQLAlchemy's default pooling
+    otherwise hands each connection its own private in-memory database, so
+    a request served on a different pooled connection than the one that
+    created the `users` table would see it as empty/missing.
+    """
+    is_sqlite = database_url.startswith("sqlite")
+    is_memory = database_url == _SQLITE_MEMORY_URL
+    engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False} if is_sqlite else {},
+        poolclass=StaticPool if is_memory else None,
+        pool_pre_ping=not is_sqlite,
+        future=True,
+    )
+    Base.metadata.create_all(engine)
+    return engine
+
+
+try:
+    _engine = _build_engine(_RAW_DATABASE_URL)
+    DATABASE_URL = _RAW_DATABASE_URL
+except Exception as exc:  # noqa: BLE001 - any driver/connectivity/syntax failure degrades, never crashes
+    logger.error(
+        "Neon DB connection failed (%s); falling back to the local SQLite store at %s. Set a "
+        "valid $DATABASE_URL (postgresql://...) to use a real database.",
+        exc, _SQLITE_FALLBACK_URL,
+    )
+    try:
+        _engine = _build_engine(_SQLITE_FALLBACK_URL)
+        DATABASE_URL = _SQLITE_FALLBACK_URL
+    except Exception as exc2:  # noqa: BLE001 - e.g. a read-only container filesystem
+        logger.error(
+            "Local SQLite file store at %s is also unavailable (%s); falling back to an "
+            "in-memory SQLite database so the API can still boot. User accounts will NOT "
+            "persist across restarts until a working $DATABASE_URL is configured.",
+            _SQLITE_FALLBACK_URL, exc2,
+        )
+        DATABASE_URL = _SQLITE_MEMORY_URL
+        _engine = _build_engine(DATABASE_URL)
+
+_SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, future=True)
 
 
 class UserAlreadyExistsError(Exception):

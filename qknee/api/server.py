@@ -1411,8 +1411,15 @@ if __name__ == "__main__":
     # Render (and most other PaaS free tiers) assign the listen port at
     # runtime via `$PORT` and route traffic only to that port — a
     # hardcoded/config-only port silently fails to bind where the
-    # platform actually expects it. `$PORT`, when set, always wins;
-    # `config.yaml`'s `api.port` (8000 by default) is the local-dev
-    # fallback when `$PORT` is unset.
-    port = int(os.getenv("PORT", _config.api.port))
-    uvicorn.run("qknee.api.server:app", host=_config.api.host, port=port, reload=True)
+    # platform actually expects it. `$PORT`, when set, always wins; 10000
+    # (Render's own typical default) is the fallback when it's unset.
+    #
+    # Deliberately no `reload=True` here: the reloader spawns a watcher
+    # subprocess that re-imports this module in a child process — harmless
+    # for local dev, but an unnecessary extra failure mode in production
+    # (and the actual Render/Docker deployment invokes the `uvicorn` CLI
+    # directly against `qknee.api.server:app`, never `python
+    # qknee/api/server.py`, so this block is a defense-in-depth fallback
+    # for any start command that does call this file directly).
+    port = int(os.getenv("PORT", 10000))
+    uvicorn.run("qknee.api.server:app", host="0.0.0.0", port=port, log_level="info")
