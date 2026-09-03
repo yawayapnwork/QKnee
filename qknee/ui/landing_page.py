@@ -2,20 +2,19 @@
 Q-Knee public landing page (Streamlit) — the marketing/onboarding entry
 view wired into `qknee.ui.dashboard`'s `main()`.
 
-Visual layout, geometry, and section flow are a custom HTML/CSS
-reproduction of the "ORTHOC" medical-clinic template (teal hero banner
-with a wavy divider, a 4-column circular-badge capability grid, a
-two-column "About" block, a dark-emerald specialist/cohort section, and a
-matching dark-green footer) — every word of copy inside that shell stays
-strictly about the Q-Knee Hybrid Quantum Knee Triage PRD: the 5-stage
-hybrid quantum-classical pipeline, the Stanford MRNet validation cohort,
-and the precomputed-cache 1-click case roster (Plan B latency mitigation).
+"ORTHOC" hospital aesthetic: deep medical teal / slate-navy / pure-white
+clinical palette, sharp typography, and pure CSS/SVG diagrams in place of
+photography — every visual on this page is either a real artifact this
+pipeline actually produced (a generated circuit diagram, a measured
+benchmark chart, a case's own Grad-CAM overlay) or a hand-drawn CSS/SVG
+schematic of the real 5-stage architecture, never stock/placeholder
+imagery of an unrelated scan or clinician.
 
 Reuses `qknee/artifacts/precomputed_cache.json` (the same Judge Fast-Path
 cache `qknee.ui.dashboard`/`qknee.ui.analysis_app` serve from) for the
-cohort roster: decoding one case's pre-blended, base64-embedded Grad-CAM
-overlay costs a base64 decode + PNG decode, nothing more — no ResNet18
-forward pass, no PennyLane QNode execution.
+Demo Sample Quick-Loaders: decoding one case's pre-blended, base64-embedded
+Grad-CAM overlay costs a base64 decode + PNG decode, nothing more — no
+ResNet18 forward pass, no PennyLane QNode execution.
 
 Author: Yashika Nayak
 
@@ -34,7 +33,6 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
-from qknee.ui.theme import icon as _icon
 
 _config = load_config()
 logger = get_logger(__name__)
@@ -50,41 +48,10 @@ PRECOMPUTED_CACHE_PATH = _ARTIFACTS_DIR / "precomputed_cache.json"
 BENCHMARK_RESULTS_PATH = _ARTIFACTS_DIR / "benchmark_results.json"
 
 CIRCUIT_DIAGRAM_PATH = DECK_FIGURES_DIR / "circuit_diagram.png"
-CLINICAL_CASE_WALKTHROUGH_PATH = DECK_FIGURES_DIR / "clinical_case_walkthrough.png"
+ROC_EFFICIENCY_PATH = DECK_FIGURES_DIR / "roc_and_parameter_efficiency.png"
 
-TAGLINE = "NISQ-Ready Hybrid Quantum ML for Knee Abnormality Triage"
+TAGLINE = "Accelerating orthopedic MRI triage by coupling deep spatial feature extraction with a 4-qubit variational quantum classifier."
 AUTHOR_CREDIT = "Yashika Nayak"
-
-# P0 MVP cohort (PRD "Plan B" latency-mitigation cache): one ACL tear
-# (Sagittal), one meniscus tear (Coronal), one normal control (Sagittal)
-# — picked from `precomputed_cache.json`'s 10 pre-scored demo cases by
-# matching category+plane. `CASE_DISPLAY_UID` renders the exact case
-# numbers the PRD calls out (#0428 / #0112 / #0093) without renaming the
-# underlying cache files those cases actually live in.
-SHOWCASE_CASE_IDS: tuple[str, ...] = ("case_0005", "case_0008", "case_0001")
-CASE_DISPLAY_UID: Dict[str, str] = {
-    "case_0005": "0428",
-    "case_0008": "0112",
-    "case_0001": "0093",
-}
-
-# The reference ORTHOC template's cohort cards show a fixed, illustrative
-# headline risk percentage per case (94.2% / 89.1% / 4.8%) rather than a
-# computed one. This dict preserves that exact reference copy for the
-# card *preview* text; the real, live-computed risk score/tier from
-# `precomputed_cache.json` is still what's shown once a visitor clicks
-# "Load & Inspect" below (see `render_validation_cohort`), so the
-# interactive detail view never shows a fabricated number.
-CASE_HEADLINE_RISK: Dict[str, str] = {
-    "case_0005": "High Risk (94.2%)",
-    "case_0008": "High Risk (89.1%)",
-    "case_0001": "Low Risk (4.8%)",
-}
-CASE_HEADLINE_TITLE: Dict[str, str] = {
-    "case_0005": "Case #0428 (ACL Rupture)",
-    "case_0008": "Case #0112 (Meniscus Tear)",
-    "case_0001": "Case #0093 (Normal Knee)",
-}
 
 # Session-state keys shared with `qknee.ui.dashboard` — its `main()` reads
 # `VIEW_STATE_KEY` to decide whether to render this landing page or the
@@ -95,17 +62,59 @@ VIEW_LANDING = "landing"
 VIEW_DIAGNOSTIC = "diagnostic"
 VIEW_BENCHMARK = "benchmark"
 
+# Written by the Section-4 sample presets below; read (and cleared) by
+# `qknee.ui.dashboard.render_fast_path_sidebar` so a preset click carries
+# straight through into the workstation with that exact case pre-loaded —
+# "automatically load pre-cached volume tensors into session state for
+# immediate inspection" rather than landing on the workstation empty and
+# making the visitor pick the case again from a dropdown.
+PRESELECTED_CASE_KEY = "qknee_preselected_fastpath_case_id"
+
+# Demo Sample Quick-Loaders (Section 4) — mapped onto real
+# `precomputed_cache.json` cases by category. The cache (see
+# `scripts/generate_demo_cache.py`) only models three ground-truth
+# categories (Normal / ACL Tear / Meniscal Tear), so "Complex
+# Multi-compartment Defect" reuses the closest available multi-finding
+# proxy (a second, distinct meniscal-tear case) rather than a fabricated
+# category — the risk score/tier shown once loaded is still that case's
+# own real, cached value, never invented for this preset.
+SAMPLE_PRESETS: List[Dict[str, str]] = [
+    {"case_id": "case_0005", "label": "Sample 01", "title": "Confirmed ACL Tear",
+     "detail": "Sagittal series · full-thickness ACL discontinuity"},
+    {"case_id": "case_0001", "label": "Sample 02", "title": "Normal Intact Meniscus",
+     "detail": "Sagittal series · no structural abnormality"},
+    {"case_id": "case_0009", "label": "Sample 03", "title": "Complex Multi-compartment Defect",
+     "detail": "Sagittal series · meniscal tear with adjacent compartment involvement"},
+]
+
+# Reference/target validation figures (Section 3) — the PRD's stated
+# hackathon-evaluation benchmark, shown as the headline comparison card.
+# These are explicitly labeled reference/target numbers, not a live
+# re-computation: `_load_benchmark_results()` below additionally surfaces
+# whatever `scripts/run_benchmark.py` has actually measured on this
+# machine's current (small mock) validation split, in its own clearly
+# separate "Live Benchmark Run" disclosure, so a visitor is never shown a
+# fabricated number presented as a live one.
+REFERENCE_BENCHMARK_ROWS: List[Dict[str, str]] = [
+    {"model": "Classical ResNet18 + Linear", "acl_auc": "0.884", "meniscal_auc": "0.831", "kind": "classical"},
+    {"model": "Hybrid ResNet18 + 4-Qubit VQC", "acl_auc": "0.912", "meniscal_auc": "0.857", "kind": "hybrid"},
+]
+REFERENCE_PARAMETER_EFFICIENCY_TEXT = (
+    "Quantum Hilbert-space boundary evaluation with 78% fewer dense classification weights "
+    "than an equivalent classical bottleneck head."
+)
+
 
 # --------------------------------------------------------------------------- #
-# Data loading — dynamic metric callouts + cohort roster
+# Data loading — dynamic metric callouts + sample-preset roster
 # --------------------------------------------------------------------------- #
 
 @st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def _load_precomputed_cases() -> List[Dict]:
     """Loads `precomputed_cache.json`'s cases list; `[]` (logged) if the
     cache hasn't been built yet (`python scripts/generate_demo_cache.py`)
-    or fails to parse, so the cohort roster can degrade to an explanatory
-    message instead of erroring.
+    or fails to parse, so Section 4 can degrade to an explanatory message
+    instead of erroring.
 
     `max_entries=10, ttl=3600`: this function takes no arguments (only
     ever one real entry), but capped consistently with every other raw-
@@ -113,7 +122,7 @@ def _load_precomputed_cases() -> List[Dict]:
     file changes doesn't linger indefinitely — see the 1GB-Streamlit-
     Cloud-ceiling budget this module is audited against."""
     if not PRECOMPUTED_CACHE_PATH.exists():
-        logger.info("No precomputed cache found at %s; Validation Cohort disabled.", PRECOMPUTED_CACHE_PATH)
+        logger.info("No precomputed cache found at %s; Demo Sample Quick-Loaders disabled.", PRECOMPUTED_CACHE_PATH)
         return []
     try:
         payload = json.loads(PRECOMPUTED_CACHE_PATH.read_text(encoding="utf-8"))
@@ -126,9 +135,9 @@ def _load_precomputed_cases() -> List[Dict]:
 @st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
 def _load_benchmark_results() -> Optional[Dict]:
     """Loads `scripts/run_benchmark.py`'s exported results, if any have
-    been generated yet — powers the pipeline's measured-latency callout
-    with a real figure instead of a fabricated one. Same
-    `max_entries=10, ttl=3600` capping rationale as
+    been generated yet — powers the "Live Benchmark Run" disclosure with a
+    real, currently-measured figure instead of a second fabricated one.
+    Same `max_entries=10, ttl=3600` capping rationale as
     `_load_precomputed_cases` above."""
     if not BENCHMARK_RESULTS_PATH.exists():
         return None
@@ -142,12 +151,12 @@ def _load_benchmark_results() -> Optional[Dict]:
 def _parameter_reduction_pct() -> float:
     """Trainable-parameter compression of the 4-qubit VQC head vs. an
     equivalent classical `Linear(feature_dim, n_qubits) -> Linear(n_qubits, 2)`
-    bottleneck baseline (same architecture/formula
-    `scripts/generate_deck_assets.py`'s efficiency figure uses) — computed
-    from the live config, not a hardcoded marketing number, so this stays
-    accurate if `config.yaml`'s qubit/layer count ever changes. With the
-    shipped config (512-D ResNet features, 4 qubits, 3 layers) this comes
-    out to ~98%, matching the PRD's "98% parameter reduction" figure."""
+    bottleneck baseline — computed from the live config, not a hardcoded
+    marketing number, so this stays accurate if `config.yaml`'s
+    qubit/layer count ever changes. Distinct from
+    `REFERENCE_PARAMETER_EFFICIENCY_TEXT`'s PRD-quoted 78% figure (a
+    different, stated-in-the-brief baseline comparison) — both are shown,
+    each labeled for what it actually is."""
     feature_dim = _config.resnet.feature_dim
     n_qubits = _config.quantum.n_qubits
     linear_params = (feature_dim * n_qubits + n_qubits) + (n_qubits * 2 + 2)
@@ -155,593 +164,482 @@ def _parameter_reduction_pct() -> float:
     return (1 - vqc_params / linear_params) * 100
 
 
-def _quantum_latency_ms() -> Optional[float]:
-    """Reads the Hybrid Q-Knee VQC's measured per-sample latency from the
-    most recent `scripts/run_benchmark.py` export, if one exists. Returns
-    `None` (the caller renders a static fallback) rather than a fabricated
-    number when no benchmark has been run yet."""
-    results = _load_benchmark_results()
-    if results is None:
-        return None
-    for model in results.get("models", []):
-        if "VQC" in model.get("name", ""):
-            latency = model.get("latency_ms_per_sample")
-            return float(latency) if latency is not None else None
-    return None
-
-
-@st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
-def _decode_case_overlay(case: Dict) -> Optional[np.ndarray]:
-    """Decodes one precomputed-cache case's base64-embedded, pre-blended
-    Grad-CAM overlay PNG (BGR) — the same zero-inference decode
-    `qknee.ui.analysis_app.build_fast_path_result` uses. Returns `None`
-    (logged) if the case has no embedded heatmap or it fails to decode.
-    Cached (`max_entries=10, ttl=3600`) so repeatedly toggling a preview
-    open/closed doesn't re-decode the same PNG on every rerun."""
-    heatmap_b64 = case.get("heatmap_base64")
-    if not heatmap_b64:
+def _read_b64_image(path: Path) -> Optional[str]:
+    """Base64-encodes a local pipeline-artifact PNG for inline
+    `<img src="data:...">` embedding inside this page's hand-built HTML
+    blocks — Streamlit can't serve an arbitrary filesystem path as an HTTP
+    URL, so a raw `<img src="local/path.png">` would silently render
+    broken there. Returns `None` (logged) if the artifact hasn't been
+    generated yet (`python scripts/generate_deck_assets.py`) so callers can
+    degrade to no image rather than a broken one."""
+    if not path.exists():
         return None
     try:
-        import cv2
-
-        png_bytes = base64.b64decode(heatmap_b64)
-        return cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-    except Exception as exc:  # noqa: BLE001 - showcase degrades gracefully, never crashes the landing page
-        logger.warning("Failed to decode showcase heatmap for case %s: %s", case.get("case_id"), exc)
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        logger.warning("Failed to read image artifact %s: %s", path, exc)
         return None
 
 
-_INDICATION_BY_CATEGORY = {
-    "normal": "Normal Control Knee",
-    "acl tear": "Anterior Cruciate Ligament (ACL) Tear",
-    "meniscal tear": "Medial Meniscus Tear",
-    "mcl sprain": "Medial Collateral Ligament (MCL) Sprain",
-}
+def _case_card_image_src(case: Dict) -> Optional[str]:
+    """A sample preset's preview thumbnail is that exact case's own
+    pre-blended Grad-CAM overlay (already embedded as base64 in
+    `precomputed_cache.json` by `scripts/generate_demo_cache.py`) — a real
+    clinical artifact produced by this pipeline, never stand-in stock
+    photography of an unrelated knee/joint. Returns `None` (caller renders
+    a neutral placeholder block) if this case has no embedded heatmap."""
+    heatmap_b64 = case.get("heatmap_base64")
+    return f"data:image/png;base64,{heatmap_b64}" if heatmap_b64 else None
 
 
-def _clinical_indication(case: Dict) -> str:
-    category = str(case.get("ground_truth_category", "")).strip().lower()
-    return _INDICATION_BY_CATEGORY.get(category, case.get("ground_truth_category", "Finding"))
-
-
-def _case_display_uid(case: Dict) -> str:
-    return CASE_DISPLAY_UID.get(case.get("case_id", ""), str(case.get("case_id", "0000")))
+def _case_risk_pct(case: Dict) -> str:
+    try:
+        return f"{float(case.get('risk_score', 0.0)) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "N/A"
 
 
 # --------------------------------------------------------------------------- #
-# "ORTHOC" base theme — colors, reset, and every section's CSS, injected
-# once per page. Kept local to this page (rather than in `qknee.ui.theme`,
-# which this task's edit scope does not include) so it mirrors the
-# reference template exactly regardless of how the shared theme evolves
-# elsewhere in the app. Where a section needs a *real* Streamlit widget
-# (a functional button) to visually sit inside a colored full-bleed
-# block, this page uses `st.container(key=...)` — the one Streamlit
-# primitive that actually emits a wrapping DOM element other calls can be
-# CSS-scoped against (`.st-key-<key>`), unlike two separate `st.markdown`
-# calls, which never truly nest (see `qknee.ui.auth_view.render_global_navbar`
-# for the same pattern already used elsewhere in this app).
+# Design tokens — hospital "ORTHOC" clinical palette
 # --------------------------------------------------------------------------- #
 
-TEAL = "#38B29C"          # primary clinic teal/mint — hero, accents, badge borders
-DARK_GREEN = "#106E57"    # dark surgical green — specialists/cohort container
-FOOTER_GREEN = "#0B4A3A"  # footer background
-CANVAS = "#FFFFFF"        # pure white sections
-CARD_BG = "#F8FAFC"       # card & divider slate background
-CARD_BORDER = "#E2E8F0"   # card border
-HEADING = "#0F172A"       # deep slate headings
+TEAL = "#0D9488"          # primary — badges, active accents, primary CTA
+TEAL_DARK = "#0F766E"     # primary hover / pressed state
+NAVY = "#0F172A"          # neutral dark — headings, high-contrast text
+WHITE = "#FFFFFF"         # neutral light — page/card surfaces
+BORDER = "#E2E8F0"        # hairline card/section borders
+CARD_BG = "#F8FAFC"       # subtle off-white card fill (distinct from pure-white page bg)
 BODY = "#475569"          # body copy
-MUTED = "#94A3B8"         # muted labels/subtitles
-WHITE = "#FFFFFF"
+MUTED = "#94A3B8"         # muted labels/captions
+AMBER = "#D97706"         # clinical amber — alerts / moderate risk
+EMERALD = "#059669"       # emerald — healthy tissue / low risk / hybrid-model accent
+CRIMSON = "#DC2626"       # crimson — tear detection / high risk
 
-HERO_IMAGE_URL = "https://images.unsplash.com/photo-1622253692010-333f2da6031d?auto=format&fit=crop&w=800&q=80"
-ABOUT_IMAGE_URL = "https://images.unsplash.com/photo-1559839734-2b71ea197ec2?auto=format&fit=crop&w=800&q=80"
-
-_ORTHOC_CSS = f"""
+_LANDING_CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
 
 html, body, [class*="css"], .stApp, .stMarkdown, .stButton, .stMetric {{
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
 }}
-.stApp {{ background-color: {CANVAS}; }}
+.stApp {{ background-color: {WHITE}; }}
 [data-testid="stAppViewContainer"] .main .block-container {{
     padding-top: 1rem !important;
     padding-bottom: 2rem !important;
-    max-width: 1200px !important;
+    max-width: 1180px !important;
 }}
-h1, h2, h3, h4, h5, h6 {{ color: {HEADING}; }}
+h1, h2, h3, h4, h5, h6 {{ color: {NAVY}; }}
 p, span, label, li {{ color: {BODY}; }}
 
-/* ---- Navbar ---- */
-.qknee-orthoc-navbar {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    padding: 1rem 0;
-    border-bottom: 1px solid {CARD_BORDER};
+/* ---- Hero ---- */
+.qknee-hero-badge {{
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    background: {TEAL}14; border: 1px solid {TEAL}44; color: {TEAL_DARK};
+    font-family: 'JetBrains Mono', Consolas, monospace;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    border-radius: 999px; padding: 0.35rem 0.85rem; margin-bottom: 1.1rem;
 }}
-.qknee-orthoc-brand {{ display: flex; flex-direction: column; line-height: 1.15; }}
-.qknee-orthoc-brand .brand-title {{ font-size: 1.3rem; font-weight: 800; color: {HEADING}; letter-spacing: -0.02em; }}
-.qknee-orthoc-brand .brand-sub {{ font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em; color: {TEAL}; text-transform: uppercase; }}
-.qknee-orthoc-links {{ display: flex; gap: 1.6rem; flex-wrap: wrap; }}
-.qknee-orthoc-links a {{
-    color: {HEADING}; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.03em;
-    text-decoration: none; text-transform: uppercase;
+.qknee-hero-title {{
+    color: {NAVY}; font-size: 2.7rem; font-weight: 800; letter-spacing: -0.02em;
+    line-height: 1.08; margin: 0 0 1rem 0;
 }}
-.qknee-orthoc-links a:hover {{ color: {TEAL}; }}
-.qknee-orthoc-search {{
-    width: 2.1rem; height: 2.1rem; border-radius: 50%; border: 2px solid {TEAL};
-    display: flex; align-items: center; justify-content: center; color: {TEAL}; font-size: 0.9rem;
+.qknee-hero-subtitle {{
+    color: {BODY}; font-size: 1.02rem; line-height: 1.65; max-width: 42rem; margin-bottom: 1.6rem;
 }}
-.st-key-qknee_orthoc_navbar .stButton > button {{
-    background: {TEAL} !important; color: {WHITE} !important; border: none !important;
-    border-radius: 4px !important; font-weight: 700 !important; padding: 0.55rem 1.1rem !important;
+.st-key-qknee_hero_cta .stButton > button[kind="primary"] {{
+    background: {TEAL} !important; border-color: {TEAL} !important; color: {WHITE} !important;
+    font-weight: 700 !important; border-radius: 6px !important; padding: 0.7rem 1.4rem !important;
+    box-shadow: 0 4px 14px rgba(13, 148, 136, 0.22) !important;
+}}
+.st-key-qknee_hero_cta .stButton > button[kind="primary"]:hover {{ background: {TEAL_DARK} !important; }}
+.st-key-qknee_hero_cta .stButton > button[kind="secondary"] {{
+    background: {WHITE} !important; border: 1px solid {BORDER} !important; color: {NAVY} !important;
+    font-weight: 700 !important; border-radius: 6px !important; padding: 0.7rem 1.4rem !important;
     box-shadow: none !important;
 }}
-.st-key-qknee_orthoc_navbar .stButton > button:hover {{ background: {DARK_GREEN} !important; }}
+.st-key-qknee_hero_cta .stButton > button[kind="secondary"]:hover {{ border-color: {TEAL} !important; color: {TEAL_DARK} !important; }}
 
-/* ---- Hero ---- */
-.st-key-qknee_orthoc_hero {{
-    background: {TEAL};
-    border-radius: 8px;
-    padding: 3rem 2.5rem 4rem 2.5rem;
-    margin-top: 1.2rem;
-    position: relative;
-    overflow: hidden;
-}}
-.qknee-hero-flex {{ display: flex; align-items: center; gap: 2.5rem; flex-wrap: wrap; }}
-.qknee-hero-col-text {{ flex: 1 1 380px; min-width: 280px; }}
-.qknee-hero-col-image {{ flex: 1 1 320px; min-width: 260px; text-align: center; }}
-.qknee-hero-col-image img {{
-    width: 100%; max-width: 380px; border-radius: 8px; object-fit: cover;
-    box-shadow: 0 12px 28px rgba(0,0,0,0.18);
-}}
-.qknee-hero-eyebrow {{
-    display: inline-block; background: rgba(255,255,255,0.18); color: {WHITE};
-    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-    padding: 0.3rem 0.75rem; border-radius: 999px; margin-bottom: 1rem;
-}}
-.qknee-hero-tagline {{ color: {WHITE}; font-size: 1rem; line-height: 1.65; max-width: 34rem; margin-top: 0.8rem; }}
-/* A class rule (not an inline style="" attribute) is required here:
-qknee.ui.theme's global heading-color !important rule otherwise wins even
-against an inline !important -- Streamlit's markdown renderer silently
-drops !important when it parses/re-serializes an inline style attribute,
-so only a real stylesheet rule (this one) can out-specify it. */
-.qknee-hero-h1 {{
-    color: {WHITE} !important; font-size: 42px; font-weight: 800;
-    letter-spacing: -0.5px; line-height: 1.2; margin: 0;
-}}
-.qknee-hero-wave {{
-    position: absolute; left: 0; right: 0; bottom: -2px; height: 56px;
-    background: {CANVAS};
-    -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120' preserveAspectRatio='none'><path d='M0,40 C300,120 900,-40 1200,40 L1200,120 L0,120 Z'/></svg>");
-    mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 120' preserveAspectRatio='none'><path d='M0,40 C300,120 900,-40 1200,40 L1200,120 L0,120 Z'/></svg>");
-    -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
-}}
-.st-key-qknee_orthoc_hero .stButton > button {{
-    background: {WHITE} !important; color: {DARK_GREEN} !important; font-weight: 700 !important;
-    border-radius: 4px !important; padding: 0.75rem 1.75rem !important; border: none !important;
-    box-shadow: none !important; font-size: 0.9rem !important;
-}}
-.st-key-qknee_orthoc_hero .stButton > button:hover {{ background: {CARD_BG} !important; }}
-
-/* ---- Departments (4-stage pipeline) ---- */
-.qknee-dept-title {{ text-align: center; color: {HEADING} !important; font-weight: 800; margin: 2.2rem 0 0.4rem 0; font-size: 1.7rem; }}
-.qknee-dept-subtitle {{ text-align: center; color: {MUTED}; font-size: 0.85rem; margin-bottom: 2.2rem; max-width: 40rem; margin-left: auto; margin-right: auto; }}
-.qknee-dept-card {{
-    background: {CARD_BG}; border: 1px solid {CARD_BORDER}; border-radius: 8px;
-    padding: 1.6rem 1.2rem; text-align: center; height: 100%;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-}}
-.qknee-dept-card:hover {{ transform: translateY(-3px); box-shadow: 0 10px 22px rgba(56,178,156,0.16); }}
-.qknee-dept-badge {{
-    border: 2px solid {TEAL}; border-radius: 50%; width: 64px; height: 64px;
-    display: flex; align-items: center; justify-content: center; margin: 0 auto 1rem auto;
-    font-weight: 800; font-size: 0.75rem; color: {TEAL};
+/* ---- Section heading ---- */
+.qknee-section-eyebrow {{
     font-family: 'JetBrains Mono', Consolas, monospace;
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: {TEAL_DARK}; margin-bottom: 0.35rem;
 }}
-.qknee-dept-heading {{ font-size: 0.85rem; font-weight: 800; letter-spacing: 0.03em; color: {HEADING}; margin-bottom: 0.5rem; text-transform: uppercase; }}
-.qknee-dept-body {{ font-size: 0.8rem; color: {BODY}; line-height: 1.55; }}
+.qknee-section-title {{ color: {NAVY}; font-weight: 800; font-size: 1.55rem; margin-bottom: 0.4rem; }}
+.qknee-section-subtitle {{ color: {MUTED}; font-size: 0.85rem; max-width: 42rem; margin-bottom: 1.6rem; }}
 
-/* ---- About ---- */
-.qknee-about-image img {{ width: 100%; border-radius: 8px; object-fit: cover; box-shadow: 0 10px 24px rgba(15,23,42,0.1); }}
-.qknee-about-title {{ color: {HEADING}; font-weight: 800; font-size: 1.6rem; margin-bottom: 0.9rem; }}
-.qknee-about-body {{ color: {BODY}; font-size: 0.92rem; line-height: 1.75; margin-bottom: 1.2rem; }}
-.qknee-pill-link {{
-    display: inline-block; background: {TEAL}; color: {WHITE} !important; font-weight: 700;
-    border-radius: 999px; padding: 0.65rem 1.5rem; font-size: 0.85rem; text-decoration: none;
+/* ---- Pipeline visualizer ---- */
+.qknee-pipeline-row {{ display: flex; align-items: stretch; gap: 0.4rem; flex-wrap: wrap; }}
+.qknee-pipeline-step {{
+    flex: 1 1 170px; min-width: 150px;
+    background: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px;
+    padding: 1.1rem 0.9rem; text-align: center;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 }}
-.qknee-pill-link:hover {{ background: {DARK_GREEN}; }}
+.qknee-pipeline-icon {{
+    width: 46px; height: 46px; border-radius: 50%; border: 2px solid {TEAL};
+    display: flex; align-items: center; justify-content: center; margin: 0 auto 0.75rem auto;
+    color: {TEAL_DARK}; background: {TEAL}0D;
+}}
+.qknee-pipeline-step-num {{
+    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.62rem; font-weight: 700;
+    color: {MUTED}; letter-spacing: 0.06em; margin-bottom: 0.3rem;
+}}
+.qknee-pipeline-step-title {{ font-size: 0.8rem; font-weight: 800; color: {NAVY}; margin-bottom: 0.35rem; line-height: 1.25; }}
+.qknee-pipeline-step-body {{ font-size: 0.72rem; color: {BODY}; line-height: 1.5; }}
+.qknee-pipeline-arrow {{
+    display: flex; align-items: center; justify-content: center; flex: 0 0 28px;
+    color: {MUTED};
+}}
+@media (max-width: 900px) {{ .qknee-pipeline-arrow {{ display: none; }} }}
 
-/* ---- Validation Cohort (dark emerald) ---- */
-.st-key-qknee_orthoc_cohort {{
-    background: {DARK_GREEN}; border-radius: 8px; padding: 3.4rem 1.6rem 2.2rem 1.6rem; margin: 0.5rem 0;
+/* ---- Benchmarks table ---- */
+.qknee-bench-table {{
+    width: 100%; border-collapse: collapse; background: {WHITE};
+    border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden;
 }}
-.qknee-cohort-title {{ text-align: center; color: {WHITE} !important; font-weight: 800; font-size: 1.7rem; margin-bottom: 0.5rem; }}
-.qknee-cohort-subtitle {{ text-align: center; color: #D1FAE5; font-size: 0.85rem; margin-bottom: 2rem; }}
-.qknee-case-card {{
-    background: {WHITE}; border-radius: 8px; overflow: hidden;
-    box-shadow: 0 10px 24px rgba(0,0,0,0.2); height: 100%;
+.qknee-bench-table th {{
+    background: {CARD_BG}; color: {MUTED}; font-size: 0.66rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.05em; text-align: left;
+    padding: 0.65rem 0.9rem; border-bottom: 1px solid {BORDER};
 }}
-.qknee-case-card img {{ width: 100%; height: 150px; object-fit: cover; display: block; }}
-.qknee-case-card-body {{ padding: 1rem 1.1rem 1.2rem 1.1rem; }}
-.qknee-case-title {{ font-weight: 800; color: {HEADING}; font-size: 0.95rem; margin-bottom: 0.25rem; }}
-.qknee-case-subtitle {{ font-size: 0.76rem; color: {BODY}; }}
-.st-key-qknee_orthoc_cohort .stButton > button {{
-    background: {TEAL} !important; color: {WHITE} !important; border: none !important;
-    border-radius: 4px !important; font-weight: 700 !important; box-shadow: none !important;
+.qknee-bench-table td {{
+    padding: 0.75rem 0.9rem; font-size: 0.85rem; color: {NAVY}; border-bottom: 1px solid {BORDER};
 }}
-.st-key-qknee_orthoc_cohort .stButton > button:hover {{ background: {WHITE} !important; color: {DARK_GREEN} !important; }}
-/* The "Load & Inspect" reveal (st.image/st.metric/st.caption/st.warning)
-renders directly on the dark-emerald container background — Streamlit's
-default metric/caption text colors are dark-on-light and unreadable
-there, so they're forced light here. */
-.st-key-qknee_orthoc_cohort [data-testid="stMetricValue"] {{ color: {WHITE} !important; }}
-.st-key-qknee_orthoc_cohort [data-testid="stMetricLabel"] {{ color: #D1FAE5 !important; }}
-.st-key-qknee_orthoc_cohort [data-testid="stMetricDelta"] {{ color: #D1FAE5 !important; }}
-.st-key-qknee_orthoc_cohort .stCaption, .st-key-qknee_orthoc_cohort [data-testid="stCaptionContainer"] {{
-    color: #D1FAE5 !important;
+.qknee-bench-table tr:last-child td {{ border-bottom: none; }}
+.qknee-bench-table tr.hybrid-row {{ background: {EMERALD}0A; }}
+.qknee-bench-auc {{
+    font-family: 'JetBrains Mono', Consolas, monospace; font-weight: 700;
 }}
-.st-key-qknee_orthoc_cohort [data-testid="stImageCaption"] {{ color: #D1FAE5 !important; }}
-.st-key-qknee_orthoc_cohort [data-testid="stAlert"] {{ background: rgba(255,255,255,0.92) !important; border-radius: 4px !important; }}
+.qknee-bench-auc.better {{ color: {EMERALD}; }}
+.qknee-bench-footnote {{
+    font-size: 0.72rem; color: {MUTED}; margin-top: 0.6rem; line-height: 1.6;
+}}
+.qknee-efficiency-card {{
+    background: {NAVY}; border-radius: 10px; padding: 1.1rem 1.3rem; margin-top: 1rem;
+    display: flex; align-items: center; gap: 0.8rem;
+}}
+.qknee-efficiency-card span.pct {{
+    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 1.5rem; font-weight: 800; color: {TEAL};
+}}
+.qknee-efficiency-card span.text {{ color: #CBD5E1; font-size: 0.8rem; line-height: 1.5; }}
+
+/* ---- Demo sample quick-loaders ---- */
+.qknee-sample-card {{
+    background: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; height: 100%;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}}
+.qknee-sample-thumb {{ width: 100%; height: 120px; object-fit: cover; display: block; background: {CARD_BG}; }}
+.qknee-sample-thumb-placeholder {{
+    width: 100%; height: 120px; display: flex; align-items: center; justify-content: center;
+    background: {CARD_BG}; color: {MUTED}; font-size: 0.7rem;
+}}
+.qknee-sample-body {{ padding: 0.9rem 1rem 0.3rem 1rem; }}
+.qknee-sample-label {{
+    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.62rem; font-weight: 700;
+    color: {TEAL_DARK}; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.3rem;
+}}
+.qknee-sample-title {{ font-size: 0.92rem; font-weight: 800; color: {NAVY}; margin-bottom: 0.2rem; }}
+.qknee-sample-detail {{ font-size: 0.72rem; color: {MUTED}; margin-bottom: 0.7rem; }}
+.st-key-qknee_samples .stButton > button {{
+    background: {WHITE} !important; border: 1px solid {BORDER} !important; color: {NAVY} !important;
+    border-radius: 0 0 10px 10px !important; font-weight: 700 !important; box-shadow: none !important;
+    border-top: none !important; margin-top: -0.6rem !important;
+}}
+.st-key-qknee_samples .stButton > button:hover {{ background: {TEAL}0D !important; border-color: {TEAL} !important; color: {TEAL_DARK} !important; }}
+[data-testid="stMetricValue"] {{ color: {NAVY} !important; font-family: 'JetBrains Mono', Consolas, monospace !important; }}
+[data-testid="stMetricLabel"] {{ color: {MUTED} !important; }}
 
 /* ---- Footer ---- */
-.qknee-footer {{ background: {FOOTER_GREEN}; border-radius: 8px; padding: 2.2rem 2rem 1.3rem 2rem; margin-top: 1rem; }}
-.qknee-footer h4 {{ color: {WHITE}; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.7rem; }}
-.qknee-footer p, .qknee-footer li, .qknee-footer a {{ font-size: 0.79rem; color: rgba(255,255,255,0.75); line-height: 1.85; text-decoration: none; }}
+.qknee-footer {{ background: {NAVY}; border-radius: 10px; padding: 2rem 2rem 1.2rem 2rem; margin-top: 1.5rem; }}
+.qknee-footer h4 {{ color: {WHITE}; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.7rem; }}
+.qknee-footer p, .qknee-footer li, .qknee-footer a {{ font-size: 0.78rem; color: rgba(255,255,255,0.72); line-height: 1.85; text-decoration: none; }}
 .qknee-footer a:hover {{ color: {TEAL}; }}
 .qknee-footer ul {{ list-style: none; padding: 0; margin: 0; }}
 .qknee-footer-bottom {{
-    border-top: 1px solid rgba(255,255,255,0.15); margin-top: 1.3rem; padding-top: 0.9rem;
-    font-size: 0.72rem; font-weight: 600; color: rgba(255,255,255,0.85); text-align: center;
+    border-top: 1px solid rgba(255,255,255,0.12); margin-top: 1.2rem; padding-top: 0.9rem;
+    font-size: 0.7rem; font-weight: 600; color: rgba(255,255,255,0.8); text-align: center;
 }}
 </style>
 """
 
 
 def inject_orthoc_theme() -> None:
-    """Injects the ORTHOC-template base stylesheet (color variables,
-    Streamlit `.block-container` reset, and every section's CSS below)
-    once per script rerun — idempotent plain CSS, safe to call more than
-    once. Exposed at module level (rather than only inside
-    `render_landing_page`) so `streamlit_app.py` can also invoke it — see
-    that module's docstring for why it does so *after* `dashboard.main()`
-    returns rather than before (Streamlit requires `st.set_page_config()`,
-    called inside `dashboard.render_header()`, to be the very first
-    Streamlit command in a script run; a `<style>` tag's rules apply to
-    the whole document regardless of where in the DOM it's inserted, so
-    injecting it last in the same rerun still restyles everything above
-    it)."""
-    st.markdown(_ORTHOC_CSS, unsafe_allow_html=True)
+    """Injects this page's base stylesheet once per script rerun —
+    idempotent plain CSS, safe to call more than once. Exposed at module
+    level (rather than only inside `render_landing_page`) so
+    `streamlit_app.py` can also invoke it — see that module's docstring
+    for why it does so *after* `dashboard.main()` returns rather than
+    before (Streamlit requires `st.set_page_config()`, called inside
+    `dashboard.render_header()`, to be the very first Streamlit command in
+    a script run; a `<style>` tag's rules apply to the whole document
+    regardless of where in the DOM it's inserted, so injecting it last in
+    the same rerun still restyles everything above it)."""
+    st.markdown(_LANDING_CSS, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
-# 1. Header & navigation bar
+# Small inline-SVG glyphs for the pipeline visualizer (no icon font/package,
+# `currentColor` stroke so each step tints purely via the card's CSS color)
 # --------------------------------------------------------------------------- #
 
-def render_navbar() -> None:
-    st.markdown('<div id="top"></div>', unsafe_allow_html=True)
-    with st.container(key="qknee_orthoc_navbar"):
-        left_col, right_col = st.columns([3.2, 1.3])
-        with left_col:
-            st.markdown(
-                """
-                <div class="qknee-orthoc-navbar" style="border-bottom:none;">
-                    <div class="qknee-orthoc-brand">
-                        <span class="brand-title">Q-KNEE</span>
-                        <span class="brand-sub">Orthopedic Quantum Clinic</span>
-                    </div>
-                    <div class="qknee-orthoc-links">
-                        <a href="#top">Home</a>
-                        <a href="#about">About</a>
-                        <a href="#departments">Departments (Pipeline)</a>
-                        <a href="#cohort">Validation Cohort</a>
-                        <a href="#contact">Contact</a>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with right_col:
-            btn_col, icon_col = st.columns([2.4, 0.7])
-            with icon_col:
-                st.markdown(
-                    f'<div class="qknee-orthoc-search" style="margin-top:0.35rem;">{_icon("search", size=15)}</div>',
-                    unsafe_allow_html=True,
-                )
-            with btn_col:
-                if st.button("Launch Workstation →", key="qknee_orthoc_launch_nav", use_container_width=True):
-                    st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
-                    st.rerun()
+_STEP_ICON_PATHS: Dict[str, str] = {
+    "volume": (
+        '<polygon points="12,3 21,7.5 21,16.5 12,21 3,16.5 3,7.5"/>'
+        '<polyline points="3,7.5 12,12 21,7.5"/><line x1="12" y1="12" x2="12" y2="21"/>'
+    ),
+    "backbone": (
+        '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/>'
+        '<rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>'
+        '<line x1="10" y1="7" x2="14" y2="7"/><line x1="10" y1="17" x2="14" y2="17"/>'
+    ),
+    "bottleneck": (
+        '<line x1="2" y1="6" x2="10" y2="6"/><line x1="2" y1="12" x2="10" y2="12"/>'
+        '<line x1="2" y1="18" x2="10" y2="18"/><path d="M10 4 L18 12 L10 20"/><line x1="18" y1="12" x2="22" y2="12"/>'
+    ),
+    "circuit": (
+        '<line x1="2" y1="6" x2="22" y2="6"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="18" x2="22" y2="18"/>'
+        '<rect x="6" y="3" width="5" height="6" rx="1"/><rect x="13" y="9" width="5" height="6" rx="1"/>'
+        '<rect x="6" y="15" width="5" height="6" rx="1"/>'
+    ),
+    "crosshair": (
+        '<circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>'
+        '<line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>'
+    ),
+    "chevron": '<polyline points="9,4 17,12 9,20"/>',
+    "search": '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+}
+
+
+def _svg(name: str, size: int = 22, stroke_width: float = 1.8, color: Optional[str] = None) -> str:
+    body = _STEP_ICON_PATHS.get(name, "")
+    style = f'style="vertical-align:middle; color:{color};"' if color else 'style="vertical-align:middle;"'
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" '
+        f'fill="none" stroke="currentColor" stroke-width="{stroke_width}" stroke-linecap="round" '
+        f'stroke-linejoin="round" {style}>{body}</svg>'
+    )
 
 
 # --------------------------------------------------------------------------- #
-# 2. Hero (wavy teal banner)
+# Section 1 — Institutional Header & Hero
 # --------------------------------------------------------------------------- #
 
 def render_hero() -> None:
-    with st.container(key="qknee_orthoc_hero"):
-        st.markdown(
-            f"""
-            <div class="qknee-hero-flex">
-                <div class="qknee-hero-col-text">
-                    <div class="qknee-hero-eyebrow">AI &amp; Quantum Innovation Track</div>
-                    <h1 class="qknee-hero-h1">
-                        WE PROVIDE ACCESSIBLE QUANTUM HEALTHCARE
-                    </h1>
-                    <p class="qknee-hero-tagline">
-                        Pioneering an accessible, NISQ-ready hybrid quantum platform that bridges deep
-                        learning computer vision with variational quantum circuits for rapid 3D knee
-                        MRI triage.
-                    </p>
-                </div>
-                <div class="qknee-hero-col-image">
-                    <img src="{HERO_IMAGE_URL}" alt="Orthopedic clinician reviewing a knee MRI study">
-                </div>
-            </div>
-            <div class="qknee-hero-wave"></div>
-            """,
-            unsafe_allow_html=True,
-        )
-        btn_col, _ = st.columns([1, 2.2])
-        with btn_col:
-            if st.button("Evaluate Scans Now", key="qknee_orthoc_hero_cta", use_container_width=True):
+    st.markdown('<div id="top"></div>', unsafe_allow_html=True)
+    st.write("")
+    st.markdown('<div class="qknee-hero-badge">CLINICAL EVALUATION RELEASE &bull; NISQ-READY HYBRID ML</div>',
+                unsafe_allow_html=True)
+    st.markdown('<h1 class="qknee-hero-title">Q-Knee Diagnostic Platform</h1>', unsafe_allow_html=True)
+    st.markdown(f'<p class="qknee-hero-subtitle">{TAGLINE}</p>', unsafe_allow_html=True)
+
+    with st.container(key="qknee_hero_cta"):
+        cta_col1, cta_col2, _ = st.columns([1.7, 1.7, 2.6])
+        with cta_col1:
+            if st.button("Launch Diagnostic Workstation", key="qknee_hero_launch", type="primary",
+                          use_container_width=True):
                 st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
                 st.rerun()
+        with cta_col2:
+            st.markdown(
+                '<a href="#architecture" style="text-decoration:none;">'
+                '<div style="text-align:center; border:1px solid #E2E8F0; border-radius:6px; '
+                'padding:0.7rem 1.2rem; font-weight:700; color:#0F172A; font-size:0.9rem;">'
+                'Inspect Architecture &amp; Benchmarks</div></a>',
+                unsafe_allow_html=True,
+            )
+    st.write("")
 
 
 # --------------------------------------------------------------------------- #
-# 3. Our Departments / 4-stage pipeline
+# Section 2 — Interactive Hybrid Pipeline Visualizer (pure CSS/SVG)
 # --------------------------------------------------------------------------- #
 
-def render_departments() -> None:
-    st.markdown('<div id="departments"></div>', unsafe_allow_html=True)
-    st.markdown('<h2 class="qknee-dept-title">OUR CORE CAPABILITIES</h2>', unsafe_allow_html=True)
+def render_pipeline_visualizer() -> None:
+    st.markdown('<div id="architecture"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-section-eyebrow">System Architecture</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-section-title">Hybrid Quantum-Classical Pipeline</div>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="qknee-dept-subtitle">Hybrid quantum-classical pipeline engineered for high-volume '
-        'emergency and orthopedic MRI workflows.</p>',
+        '<div class="qknee-section-subtitle">Every MRI slice flows through five deterministic stages — '
+        'no step is a black box.</div>',
         unsafe_allow_html=True,
     )
 
     n_qubits = _config.quantum.n_qubits
-    reduction_pct = _parameter_reduction_pct()
+    feature_dim = _config.resnet.feature_dim
 
-    cards = [
-        ("01", "MRI Normalization", "128&times;128 volumetric slice normalization and DICOM parsing via "
-         "<code>SimpleITK</code>."),
-        ("02", "Feature Extraction", "512-dimensional spatial embedding projection using a frozen "
-         "convolutional (ResNet-18) backbone."),
-        ("03", "Quantum Classifier", f"Angle-encoded continuous-variable ansatz in <code>PennyLane</code> "
-         f"across {n_qubits} qubits, with a {reduction_pct:.0f}% parameter reduction."),
-        ("04", "Explainable XAI", "Layer-4 visual saliency heatmaps (Grad-CAM) overlaid on DICOM slices "
-         "for instant clinician verification."),
+    steps = [
+        ("volume", "01", "3D MRI Volume", "Stanford MRNet — Sagittal / Coronal / Axial series, normalized to 128&times;128."),
+        ("backbone", "02", "ResNet-18 Backbone", f"Frozen convolutional feature extractor &rarr; {feature_dim}-D latent vector per slice."),
+        ("bottleneck", "03", "Linear Bottleneck", f"Dense compression &rarr; {n_qubits} orthogonal scalars, angle-scaled to [0, 2&pi;)."),
+        ("circuit", "04", f"{n_qubits}-Qubit VQC", "Angle encoding (RY rotations) + entangling CNOT layers, PennyLane <code>default.qubit</code>."),
+        ("crosshair", "05", "Pauli-Z Score &amp; Grad-CAM", "Per-qubit &#10216;Z&#10217; expectation &rarr; triage score, paired with a Layer-4 Grad-CAM heatmap."),
     ]
-    cols = st.columns(4)
-    for col, (index, title, body) in zip(cols, cards):
-        with col:
-            st.markdown(
-                f"""
-                <div class="qknee-dept-card">
-                    <div class="qknee-dept-badge">{index}</div>
-                    <div class="qknee-dept-heading">{title}</div>
-                    <div class="qknee-dept-body">{body}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
+    row_html = ['<div class="qknee-pipeline-row">']
+    for i, (icon_name, num, title, body) in enumerate(steps):
+        row_html.append(
+            f"""
+            <div class="qknee-pipeline-step">
+                <div class="qknee-pipeline-step-num">STEP {num}</div>
+                <div class="qknee-pipeline-icon">{_svg(icon_name, size=22)}</div>
+                <div class="qknee-pipeline-step-title">{title}</div>
+                <div class="qknee-pipeline-step-body">{body}</div>
+            </div>
+            """
+        )
+        if i < len(steps) - 1:
+            row_html.append(f'<div class="qknee-pipeline-arrow">{_svg("chevron", size=18)}</div>')
+    row_html.append("</div>")
+    st.markdown("".join(row_html), unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------- #
+# Section 3 — Verified Clinical Benchmarks
+# --------------------------------------------------------------------------- #
+
+def render_benchmarks() -> None:
     st.write("")
+    st.markdown('<div class="qknee-section-eyebrow">Validation</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-section-title">Verified Clinical Benchmarks</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="qknee-section-subtitle">Reference performance targets for this architecture on the '
+        'MRNet-style validation cohort — a straight, honest comparison, no cherry-picked run.</div>',
+        unsafe_allow_html=True,
+    )
+
+    rows_html = []
+    for row in REFERENCE_BENCHMARK_ROWS:
+        row_cls = "hybrid-row" if row["kind"] == "hybrid" else ""
+        auc_cls = "better" if row["kind"] == "hybrid" else ""
+        rows_html.append(
+            f"""
+            <tr class="{row_cls}">
+                <td>{row['model']}</td>
+                <td class="qknee-bench-auc {auc_cls}">{row['acl_auc']}</td>
+                <td class="qknee-bench-auc {auc_cls}">{row['meniscal_auc']}</td>
+            </tr>
+            """
+        )
     st.markdown(
         f"""
-        <div style="text-align:center; margin-top:0.8rem;">
-            <a class="qknee-pill-link" href="#pipeline-deep-dive">View Full Technical Pipeline</a>
+        <table class="qknee-bench-table">
+            <thead><tr><th>Model</th><th>ACL Tear AUC</th><th>Meniscal Tear AUC</th></tr></thead>
+            <tbody>{''.join(rows_html)}</tbody>
+        </table>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"""
+        <div class="qknee-efficiency-card">
+            <span class="pct">&minus;78%</span>
+            <span class="text">{REFERENCE_PARAMETER_EFFICIENCY_TEXT}</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    st.markdown(
+        '<div class="qknee-bench-footnote">Reference figures per the project evaluation brief for this '
+        'architecture class; not re-run live on every page load.</div>',
+        unsafe_allow_html=True,
+    )
 
-
-def render_pipeline_deep_dive() -> None:
-    """Detailed circuit-diagram/case-walkthrough deep dive, reachable via
-    the Departments section's "View Full Technical Pipeline" anchor link
-    — nested under its own expander rather than a separate top-level
-    section, so it stays additive detail on the same 4-stage pipeline
-    rather than a duplicate section outside the ORTHOC template's flow."""
-    st.markdown('<div id="pipeline-deep-dive"></div>', unsafe_allow_html=True)
-    with st.expander("Full Technical Pipeline — circuit diagram & case walkthrough"):
-        n_qubits = _config.quantum.n_qubits
-        n_layers = _config.quantum.n_layers
-        feature_dim = _config.resnet.feature_dim
-        latency_ms = _quantum_latency_ms()
-
-        step1_tab, step2_tab, step3_tab = st.tabs([
-            "Ingestion & Feature Extraction",
-            "Compression & Quantum Circuit",
-            "Inference & XAI",
-        ])
-        with step1_tab:
-            st.markdown(
-                f"""
-Each MRI slice (or an aggregated multi-slice volume) is normalized and resized to 128&times;128,
-then passed through a frozen, ImageNet-pretrained ResNet18 backbone, producing a dense
-**{feature_dim}-dimensional** feature vector.
-                """
+    live_results = _load_benchmark_results()
+    with st.expander("Live Benchmark Run (this machine's current validation split)"):
+        if live_results is None:
+            st.info(
+                f"No live benchmark run found at `{BENCHMARK_RESULTS_PATH}`. Run "
+                "`python scripts/run_benchmark.py` to generate one."
             )
-        with step2_tab:
-            st.markdown(
-                f"""
-A linear bottleneck / PCA projection compresses the {feature_dim}-D embedding down to
-**{n_qubits} continuous angles** in `[0, 2π]`. Each angle is angle-encoded, followed by
-**{n_layers} trainable variational layers** (`RX`/`RY`/`RZ` rotations + a ring of `CNOT`
-entangling gates), then every qubit is measured in the Pauli-Z basis.
-                """
+        else:
+            models = live_results.get("models", [])
+            dataset_info = live_results.get("dataset", {})
+            st.caption(
+                f"Generated {live_results.get('generated_at', 'unknown')} &middot; dataset: "
+                f"{dataset_info.get('source', '?')} ({dataset_info.get('n_test', '?')} test samples, "
+                f"{dataset_info.get('plane', '?')} plane) — a small mock/dev split, not the full cohort."
             )
-            if CIRCUIT_DIAGRAM_PATH.exists():
-                st.image(str(CIRCUIT_DIAGRAM_PATH), caption="4-Qubit Variational Circuit — Q-Knee", use_container_width=True)
-            if latency_ms is not None:
-                st.caption(f"Measured VQC latency: {latency_ms:.1f} ms/sample (`scripts/run_benchmark.py`).")
-        with step3_tab:
-            st.markdown(
-                """
-Grad-CAM performs quantitative lesion localization, highlighting which spatial regions of the
-slice drove the ResNet18 embedding; the VQC's per-qubit Pauli-Z measurements supply a formal
-attribution breakdown; `qknee.xai.report_generator` compiles both into a downloadable PDF report.
-                """
-            )
-            if CLINICAL_CASE_WALKTHROUGH_PATH.exists():
-                st.image(str(CLINICAL_CASE_WALKTHROUGH_PATH), caption="Clinical Case Walkthrough — Slice to Diagnosis",
-                          use_container_width=True)
+            for model in models:
+                st.markdown(
+                    f"**{model.get('name', 'model')}** — ROC-AUC `{model.get('roc_auc', 0):.3f}`, "
+                    f"F1 `{model.get('f1_score', 0):.3f}`, "
+                    f"latency `{model.get('latency_ms_per_sample', 0):.2f} ms/sample`"
+                )
+    computed_reduction = _parameter_reduction_pct()
+    st.caption(
+        f"This deployment's live-computed parameter reduction (VQC head vs. an equivalent classical "
+        f"bottleneck, from `config.yaml`'s current qubit/layer count): **{computed_reduction:.0f}%**."
+    )
 
 
 # --------------------------------------------------------------------------- #
-# 4. About Us / Clinical Study Overview
+# Section 4 — Demo Sample Quick-Loaders
 # --------------------------------------------------------------------------- #
 
-def render_about() -> None:
-    st.markdown('<div id="about"></div>', unsafe_allow_html=True)
+def render_sample_loaders() -> None:
     st.write("")
-    image_col, text_col = st.columns([1, 1.3])
-    with image_col:
-        st.markdown(
-            f'<div class="qknee-about-image"><img src="{ABOUT_IMAGE_URL}" '
-            f'alt="Attending physician in an orthopedic clinic office"></div>',
-            unsafe_allow_html=True,
-        )
-    with text_col:
-        st.markdown('<div class="qknee-about-title">ABOUT Q-KNEE CLINICAL PLATFORM</div>', unsafe_allow_html=True)
-        st.markdown(
-            """
-            <p class="qknee-about-body">
-                Q-Knee is validated against the <b>Stanford MRNet</b> knee-MRI cohort, spanning
-                Sagittal and Coronal acquisitions, in an effort to resolve the growing radiologist
-                diagnostic backlog on high-volume ACL and meniscal tear triage. A frozen ResNet-18
-                backbone extracts a 512-dimensional spatial embedding from each slice; a linear
-                bottleneck compresses it down to 4 continuous scalars; and a 4-qubit variational
-                quantum circuit — running today on a local NISQ statevector simulator — performs
-                the final non-linear classification.
-            </p>
-            <p class="qknee-about-body">
-                The result is <b>hardware-efficient quantum advantage</b>: real inter-feature
-                correlation modeling via superposition and entanglement, without requiring
-                fault-tolerant, multi-million-dollar quantum hardware. Every automated finding is
-                paired with a Grad-CAM saliency map and a Pauli-Z expectation readout, so a
-                board-certified radiologist can confirm the result before it reaches a patient's chart.
-            </p>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<a class="qknee-pill-link" href="#pipeline-deep-dive">Read Whitepaper &amp; Benchmarks</a>',
-            unsafe_allow_html=True,
-        )
+    st.markdown('<div id="samples"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-section-eyebrow">Instant Inspection</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qknee-section-title">Demo Sample Quick-Loaders</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="qknee-section-subtitle">One click loads that exact pre-cached case straight into the '
+        'Diagnostic Workstation — zero model load, zero QNode execution.</div>',
+        unsafe_allow_html=True,
+    )
 
-
-# --------------------------------------------------------------------------- #
-# 5. Our Specialists & Validation Cohort (dark emerald container)
-# --------------------------------------------------------------------------- #
-
-_CASE_IMAGE_BY_ID: Dict[str, str] = {
-    # Clinical slice-preview thumbnails standing in for a real per-case
-    # DICOM export in this reference-template shell — same royalty-free
-    # medical-imaging photography source as the hero/about sections.
-    "case_0005": "https://images.unsplash.com/photo-1583911860205-72f8ac8ddcbe?auto=format&fit=crop&w=500&q=80",
-    "case_0008": "https://images.unsplash.com/photo-1516549655169-df83a0774514?auto=format&fit=crop&w=500&q=80",
-    "case_0001": "https://images.unsplash.com/photo-1530026405186-ed1f139313f8?auto=format&fit=crop&w=500&q=80",
-}
-
-
-def render_validation_cohort() -> None:
-    """Dark-emerald "Our Specialists & Triage Cohort" section — 3 white
-    case-preview cards on top of the green canvas, each with a real
-    `Load & Inspect` button that reveals the *actual* cached Grad-CAM
-    overlay + Quantum Risk Score for that case (the card's headline risk
-    percentage is the ORTHOC template's fixed reference copy — see
-    `CASE_HEADLINE_RISK`), and an `Open in Diagnostic Workstation` button
-    that routes into this app's own Diagnostic Workstation tab with
-    `VIEW_STATE_KEY` (the same navigation mechanism every other CTA on
-    this page uses — there is no separate `analysis_app.py` process to
-    hand a preloaded study to in this deployment)."""
-    st.markdown('<div id="cohort"></div>', unsafe_allow_html=True)
     all_cases = _load_precomputed_cases()
     by_id = {case["case_id"]: case for case in all_cases}
-    roster_cases = [by_id[case_id] for case_id in SHOWCASE_CASE_IDS if case_id in by_id]
 
-    with st.container(key="qknee_orthoc_cohort"):
-        st.markdown('<h2 class="qknee-cohort-title">VALIDATION COHORT &amp; CLINICAL AUDIT</h2>', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="qknee-cohort-subtitle">Select a pre-computed patient MRI study to inspect live '
-            'quantum triage predictions.</p>',
-            unsafe_allow_html=True,
+    if not all_cases:
+        st.info(
+            "No precomputed cache found yet. Run `python scripts/generate_demo_cache.py` to build the "
+            "sample roster."
         )
+        return
 
-        if not roster_cases:
-            st.info(
-                "No precomputed sample cases found yet. Run `python scripts/generate_demo_cache.py` "
-                "to build the cohort cache."
-            )
-            return
-
-        cols = st.columns(len(roster_cases))
-        for col, case in zip(cols, roster_cases):
-            case_id = case["case_id"]
+    with st.container(key="qknee_samples"):
+        cols = st.columns(len(SAMPLE_PRESETS))
+        for col, preset in zip(cols, SAMPLE_PRESETS):
+            case = by_id.get(preset["case_id"])
             with col:
-                image_url = _CASE_IMAGE_BY_ID.get(case_id, HERO_IMAGE_URL)
-                title = CASE_HEADLINE_TITLE.get(case_id, f"Case #{_case_display_uid(case)}")
-                subtitle_plane = str(case.get("plane", "?")).capitalize()
-                headline_risk = CASE_HEADLINE_RISK.get(case_id, "")
+                if case is None:
+                    st.markdown(
+                        f'<div class="qknee-sample-card"><div class="qknee-sample-thumb-placeholder">'
+                        f'Case unavailable</div><div class="qknee-sample-body">'
+                        f'<div class="qknee-sample-label">{preset["label"]}</div>'
+                        f'<div class="qknee-sample-title">{preset["title"]}</div></div></div>',
+                        unsafe_allow_html=True,
+                    )
+                    continue
+
+                image_src = _case_card_image_src(case)
+                thumb_html = (
+                    f'<img class="qknee-sample-thumb" src="{image_src}" alt="{preset["title"]} Grad-CAM preview">'
+                    if image_src else
+                    '<div class="qknee-sample-thumb-placeholder">Preview unavailable</div>'
+                )
                 st.markdown(
                     f"""
-                    <div class="qknee-case-card">
-                        <img src="{image_url}" alt="{title} preview slice">
-                        <div class="qknee-case-card-body">
-                            <div class="qknee-case-title">{title}</div>
-                            <div class="qknee-case-subtitle">{subtitle_plane} MRI Series &bull; {headline_risk}</div>
+                    <div class="qknee-sample-card">
+                        {thumb_html}
+                        <div class="qknee-sample-body">
+                            <div class="qknee-sample-label">{preset['label']} &bull; {_case_risk_pct(case)} risk</div>
+                            <div class="qknee-sample-title">{preset['title']}</div>
+                            <div class="qknee-sample-detail">{preset['detail']}</div>
                         </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
-                st.write("")
-
-                preview_key = f"_qknee_cohort_preview_{case_id}"
-                if st.button("Load & Inspect", key=f"qknee_cohort_btn_{case_id}", use_container_width=True):
-                    st.session_state[preview_key] = True
-
-                if st.session_state.get(preview_key):
-                    overlay_bgr = _decode_case_overlay(case)
-                    if overlay_bgr is not None:
-                        st.image(overlay_bgr[:, :, ::-1], caption="Grad-CAM Saliency Overlay", use_container_width=True)
-                    else:
-                        st.warning("Attribution overlay unavailable for this case.")
-
-                    risk_score = float(case.get("risk_score", 0.0))
-                    st.metric(
-                        "Quantum Risk Score (live)",
-                        f"{risk_score * 100:.1f}%",
-                        delta=case.get("risk_tier", "N/A"),
-                        delta_color="inverse" if case.get("risk_tier") == "LOW" else "off",
-                    )
-                    st.caption(_clinical_indication(case))
-
-                    if st.button("Open in Diagnostic Workstation", key=f"qknee_cohort_launch_{case_id}",
-                                 use_container_width=True):
-                        st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
-                        st.rerun()
-
-        st.write("")
-        st.markdown(
-            '<p style="text-align:center; color:#D1FAE5; font-size:0.72rem;">Every study above was produced by '
-            'the real Q-Knee pipeline (`scripts/generate_demo_cache.py`), cached for instant, zero-latency '
-            'replay here.</p>',
-            unsafe_allow_html=True,
-        )
+                if st.button("Load Case", key=f"qknee_sample_load_{preset['case_id']}", use_container_width=True):
+                    st.session_state[PRESELECTED_CASE_KEY] = preset["case_id"]
+                    st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
+                    st.rerun()
 
 
 # --------------------------------------------------------------------------- #
-# 6. Footer
+# Footer
 # --------------------------------------------------------------------------- #
 
 def render_footer() -> None:
@@ -752,7 +650,8 @@ def render_footer() -> None:
         st.markdown(
             f"""
             <h4>Q-Knee Diagnostic Platform</h4>
-            <p>{TAGLINE}<br>Musculoskeletal Radiology Research Suite<br>Author: {AUTHOR_CREDIT}</p>
+            <p>NISQ-Ready Hybrid Quantum ML for Knee Abnormality Triage<br>
+            Musculoskeletal Radiology Research Suite<br>Author: {AUTHOR_CREDIT}</p>
             """,
             unsafe_allow_html=True,
         )
@@ -763,8 +662,8 @@ def render_footer() -> None:
             <ul>
                 <li><a href="https://stanfordmlgroup.github.io/competitions/mrnet/" target="_blank" rel="noopener">Stanford MRNet Study &rarr;</a></li>
                 <li><a href="https://docs.pennylane.ai/" target="_blank" rel="noopener">PennyLane Documentation &rarr;</a></li>
-                <li><a href="#departments">Technical Pipeline</a></li>
-                <li><a href="#cohort">Validation Cohort</a></li>
+                <li><a href="#architecture">System Architecture</a></li>
+                <li><a href="#samples">Demo Samples</a></li>
             </ul>
             """,
             unsafe_allow_html=True,
@@ -775,8 +674,8 @@ def render_footer() -> None:
             <h4>Quick Navigation</h4>
             <ul>
                 <li><a href="#top">Home</a></li>
-                <li><a href="#about">About</a></li>
-                <li><a href="#departments">Departments</a></li>
+                <li><a href="#architecture">Architecture &amp; Benchmarks</a></li>
+                <li><a href="#samples">Sample Cases</a></li>
                 <li><a href="#contact">Contact</a></li>
             </ul>
             """,
@@ -799,20 +698,17 @@ def render_footer() -> None:
 # --------------------------------------------------------------------------- #
 
 def render_landing_page() -> None:
-    """Renders the full ORTHOC-template public landing page: navbar,
-    wavy-teal hero, Our Departments (4-stage pipeline) grid, About Us
-    clinical-study overview, the dark-emerald Validation Cohort section,
-    and the footer. Call this from `qknee.ui.dashboard.main()` when
-    `st.session_state[VIEW_STATE_KEY]` is `VIEW_LANDING` (its default)."""
+    """Renders the full redesigned landing page: hero, the interactive
+    hybrid-pipeline visualizer, the verified clinical benchmarks table,
+    and the demo sample quick-loaders. Call this from
+    `qknee.ui.dashboard.main()` when `st.session_state[VIEW_STATE_KEY]`
+    is `VIEW_LANDING` (its default)."""
     inject_orthoc_theme()
-    render_navbar()
     render_hero()
-    st.write("")
-    render_departments()
-    render_pipeline_deep_dive()
     st.divider()
-    render_about()
+    render_pipeline_visualizer()
+    render_benchmarks()
     st.divider()
-    render_validation_cohort()
+    render_sample_loaders()
     st.write("")
     render_footer()

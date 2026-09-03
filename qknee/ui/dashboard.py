@@ -48,6 +48,7 @@ from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
 from qknee.ui import auth_view, theme
 from qknee.ui.landing_page import (
+    PRESELECTED_CASE_KEY,
     VIEW_BENCHMARK,
     VIEW_DIAGNOSTIC,
     VIEW_LANDING,
@@ -886,7 +887,15 @@ def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
     memory (each case's Grad-CAM overlay is embedded as base64, so
     serving it costs no filesystem read, no model load, and no QNode
     execution) — a low-latency demonstration mode for time-constrained
-    review. Returns `(use_fast_path, selected_case)`."""
+    review. Returns `(use_fast_path, selected_case)`.
+
+    Also consumes `st.session_state[PRESELECTED_CASE_KEY]` — set by one of
+    `qknee.ui.landing_page`'s Demo Sample Quick-Loader buttons — so a
+    landing-page preset click carries that exact case straight into the
+    workstation pre-loaded, rather than landing here empty and making the
+    visitor re-pick it from the dropdown. Consumed (popped) on read so it
+    only pins the toggle/selection for the one rerun right after the
+    click; the visitor is free to pick a different case afterward."""
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Clinical Action Bar")
     st.sidebar.caption("NISQ Acceleration Cache")
@@ -894,9 +903,14 @@ def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
     cache = load_precomputed_cache()
     cases: List[Dict] = (cache or {}).get("cases", [])
 
+    preselected_case_id = st.session_state.pop(PRESELECTED_CASE_KEY, None)
+    preselected_available = preselected_case_id is not None and any(
+        case["case_id"] == preselected_case_id for case in cases
+    )
+
     use_fast_path = st.sidebar.toggle(
         "Toggle NISQ Acceleration Cache",
-        value=False,
+        value=preselected_available,
         disabled=not cases,
         help=f"Instantly replays one of {len(cases)} precomputed case(s) from "
              f"`{PRECOMPUTED_CACHE_PATH}` — zero model load, zero QNode "
@@ -914,7 +928,10 @@ def render_fast_path_sidebar() -> Tuple[bool, Optional[Dict]]:
         return False, None
 
     case_labels = [f"{case['case_id']} ({case.get('plane', '?')})" for case in cases]
-    selected_label = st.sidebar.selectbox("Accelerated Case", case_labels)
+    default_index = 0
+    if preselected_available:
+        default_index = next(i for i, case in enumerate(cases) if case["case_id"] == preselected_case_id)
+    selected_label = st.sidebar.selectbox("Accelerated Case", case_labels, index=default_index)
     selected_case = cases[case_labels.index(selected_label)]
     st.sidebar.success(f"Serving '{selected_case['case_id']}' from the acceleration cache — 0 ms inference.")
     return True, selected_case
@@ -1105,7 +1122,6 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
     if gradcam_overlay is None and result.gradcam_heatmap is not None:
         gradcam_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
 
-    st.markdown("#### Clinical Action Bar")
     try:
         pdf_bytes = generate_radiology_report(
             output_path=None,
@@ -1155,39 +1171,65 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
     )
 
 
+def render_markdown_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
+    """Companion to `render_report_download`'s PDF export: the same
+    structured findings (risk scores, per-qubit Pauli-Z readout, latency
+    profile, backend/metadata) as a plain-text Markdown file — a
+    one-click, dependency-free export for a reviewer who just wants the
+    numbers in a diffable/pasteable format rather than a formatted PDF."""
+    pauli_z = result.pauli_z_expectations
+    pauli_z_lines = (
+        "\n".join(f"- **q{i}**: {value:+.3f}" for i, value in enumerate(pauli_z))
+        if pauli_z is not None else "- Unavailable for this backend/case."
+    )
+
+    def _risk_line(label: str, value: Optional[float]) -> str:
+        if value is None:
+            return f"- **{label} Tear Risk**: N/A (unavailable in this mode)"
+        _, tier = theme.risk_tier(value)
+        return f"- **{label} Tear Risk**: {value * 100:.1f}% ({tier})"
+
+    markdown_report = f"""# Q-Knee Diagnostic Report
+
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Backend: `{result.backend}`
+
+## Tear Risk
+
+{_risk_line("ACL", result.acl_risk)}
+{_risk_line("MCL", result.mcl_risk)}
+{_risk_line("Medial Meniscus", result.meniscus_risk)}
+
+## Quantum Circuit Diagnostics — Per-Qubit Pauli-Z Expectation ⟨Z⟩
+
+{pauli_z_lines}
+
+## Pipeline Latency
+
+- Feature extraction: {result.resnet_latency_ms:.1f} ms
+- PCA reduction: {result.pca_latency_ms:.1f} ms
+- Quantum circuit: {result.quantum_latency_ms:.1f} ms
+- Total: {result.total_latency_ms:.1f} ms
+
+---
+{theme.NOT_A_DEVICE_FOOTNOTE}
+"""
+    st.download_button(
+        label="Export Structured Report (Markdown)",
+        data=markdown_report,
+        file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Main app
 # --------------------------------------------------------------------------- #
 
 def render_diagnostic_tab() -> None:
-    # Live inference (`/predict`, `/explain`, and their in-process
-    # PipelineRunner equivalent) is a clinical action, so — unlike the
-    # Benchmark tab's static precomputed data — it requires an
-    # authenticated session (see `qknee.ui.auth_view`). The API layer
-    # already enforces this via `qknee.api.auth.require_role` when running
-    # in HTTP-API mode; this gate covers the in-process/mock modes too,
-    # where there's no HTTP boundary to enforce it at.
-    if not auth_view.is_authenticated():
-        st.info(
-            "Sign in to access the live diagnostic workstation — upload a study and execute real "
-            "ResNet18 + quantum-circuit inference.",
-        )
-        if st.button("Sign In", key="diagnostic_tab_signin", type="primary"):
-            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LOGIN
-            st.rerun()
-        return
-
-    if not auth_view.can_run_inference():
-        st.warning(
-            "Your **Student Evaluator** account has read-only access. Live diagnostic inference "
-            "requires a **Radiologist** or **Clinical Researcher** account. Review the reference "
-            "sample cases on the institutional landing page instead, or sign in with a clinical-role account.",
-        )
-        if st.button("Return to Institutional Landing", key="diagnostic_tab_readonly_home"):
-            st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
-            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
-            st.rerun()
-        return
+    authenticated = auth_view.is_authenticated()
+    can_infer = authenticated and auth_view.can_run_inference()
 
     pipeline, acl_model, mcl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
@@ -1197,11 +1239,21 @@ def render_diagnostic_tab() -> None:
     mode = "api" if use_api else ("live" if backend_ready else "mock")
     render_quantum_status(mode, backend_ready, api_url)
 
+    # The NISQ Acceleration Cache / Cached Case Replay toggles serve
+    # static, precomputed data — no live model/QNode execution — so, per
+    # the "non-authenticated visitors can browse sample cases" policy,
+    # they're available to everyone. Only a real upload + live/mock
+    # inference run, and the report-export/sign-off actions below, are
+    # gated on `authenticated`/`can_infer`.
     use_fast_path, fast_path_case = render_fast_path_sidebar()
     use_demo_cache, cached_case = render_demo_cache_sidebar()
+    using_sample_case = (use_fast_path and fast_path_case is not None) or (use_demo_cache and cached_case is not None)
 
     volume: Optional[np.ndarray] = None
     plane_index_for = None  # set below only when a real volume is loaded
+    view = "Sagittal"
+    display_slice: Optional[np.ndarray] = None
+    result: Optional[InferenceResult] = None
 
     if use_fast_path and fast_path_case is not None:
         # Judge Mode: skip upload/plane/slice/inference entirely and replay a
@@ -1212,6 +1264,29 @@ def render_diagnostic_tab() -> None:
         # Demo Mode: skip upload/plane/slice/inference entirely and replay a
         # precomputed case straight from disk — genuinely zero-latency.
         display_slice, result = load_cached_case(cached_case)
+    elif not authenticated:
+        st.info(
+            "Browsing in **Observer Mode** — sign in to upload your own study and run live "
+            "diagnostic inference. Toggle the **NISQ Acceleration Cache** in the sidebar (or use a "
+            "Demo Sample Quick-Loader from the institutional landing page) to inspect a real "
+            "pre-scored case right now, no sign-in required.",
+        )
+        if auth_view.safe_button("Sign In", key="diagnostic_tab_signin", is_primary=True):
+            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LOGIN
+            st.rerun()
+        return
+    elif not can_infer:
+        st.warning(
+            "Your **Student Evaluator** account has read-only access. Live diagnostic inference "
+            "requires a **Radiologist** or **Clinical Researcher** account. Toggle the **NISQ "
+            "Acceleration Cache** in the sidebar to review a pre-scored sample case instead, or "
+            "sign in with a clinical-role account.",
+        )
+        if auth_view.safe_button("Return to Institutional Landing", key="diagnostic_tab_readonly_home"):
+            st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
+            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
+            st.rerun()
+        return
     else:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### Radiological Ingestion Pipeline")
@@ -1223,12 +1298,9 @@ def render_diagnostic_tab() -> None:
         )
 
         if not uploaded_files:
-            st.info("Upload a `.npy`/`.nii`/`.nii.gz` volume or one or more `.dcm` files "
-                     "(a full series) from the sidebar to begin, or explore the dashboard "
-                     "below with synthetic demo data.")
+            st.sidebar.caption("No file uploaded — viewing a synthetic demo volume (24 slices).")
             rng = np.random.default_rng(123)
             volume = rng.normal(loc=128, scale=40, size=(24, 224, 224)).clip(0, 255)
-            st.sidebar.caption("Currently viewing: synthetic demo volume (24 slices)")
         else:
             volume = load_volume(uploaded_files)
             if volume is None:
@@ -1238,91 +1310,111 @@ def render_diagnostic_tab() -> None:
             )
             st.sidebar.success(f"Loaded '{display_name}' — shape {volume.shape}")
 
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### Viewport Controls")
-        view = st.sidebar.radio(
-            "Primary Plane (quantum analysis target)", ["Axial", "Coronal", "Sagittal"], horizontal=False,
-            help="Which plane's slice is fed into the ResNet18 → PCA → VQC pipeline and Grad-CAM. "
-                 "All three planes are still shown, synchronized, below.",
-        )
-
-        # Shared slice-scrubbing slider: a single fractional position in
-        # [0, 1] mapped independently onto each plane's own slice-count
-        # range, so ONE slider keeps Sagittal/Coronal/Axial synchronized
-        # even though each has a different depth along its own axis.
-        slice_fraction = st.sidebar.slider(
-            "Slice Depth Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
-            help="Scrubs the Sagittal, Coronal, and Axial views together — each plane maps this "
-                 "shared fractional position onto its own slice count.",
-        )
-
-        def plane_index_for(plane_name: str) -> Tuple[int, int]:
-            max_idx = max(view_axis_size(volume, plane_name) - 1, 0)
-            return round(slice_fraction * max_idx), max_idx
-
-        slice_index, max_index = plane_index_for(view)
-        raw_slice = get_slice(volume, view, slice_index)
-        display_slice = normalize_for_display(raw_slice)
-
-        result = None
-        if use_api:
-            try:
-                result = run_api_inference(raw_slice, api_url)
-            except Exception as exc:  # noqa: BLE001 - a failed request degrades to in-process/mock, not a crash
-                logger.warning("API inference failed (%s); falling back to in-process/mock.", exc)
-
-        if result is None:
-            if backend_ready:
-                result = run_live_inference(raw_slice, pipeline, acl_model, mcl_model, meniscus_model)
-            else:
-                result = run_mock_inference(raw_slice)
-
     # ------------------------------------------------------------------ #
-    # Synchronized 3-Plane Layout — Sagittal / Coronal / Axial side by
-    # side, all driven by the one shared `slice_fraction` slider above.
-    # Only meaningful when a real volume was loaded (Judge Mode/Demo Mode
-    # cases carry a single precomputed image, not a volume).
+    # Clean 2-Column Clinical Layout — Left: MRI Viewport (plane selector,
+    # slice slider, Grad-CAM overlay). Right: Diagnostic Triage Card (risk
+    # gauges, quantum circuit diagnostics, structured report export).
     # ------------------------------------------------------------------ #
-    if volume is not None and plane_index_for is not None:
-        st.markdown(f"#### {theme.icon('cube', size=17)} Synchronized Orthogonal Viewport", unsafe_allow_html=True)
-        plane_cols = st.columns(3)
-        for col, plane_name in zip(plane_cols, ["Sagittal", "Coronal", "Axial"]):
-            p_index, p_max = plane_index_for(plane_name)
-            p_display = normalize_for_display(get_slice(volume, plane_name, p_index))
-            p_display = theme.draw_clinical_crosshair(p_display)
-            with col:
-                is_primary = plane_name == view
-                caption = theme.slice_depth_caption(plane_name, p_index, p_max, primary=is_primary)
-                st.image(p_display, channels="BGR", use_container_width=True, clamp=True, caption=caption)
-        st.markdown("---")
+    viewport_col, triage_col = st.columns([1.3, 1])
 
-    gradcam_col, results_col, attribution_col = st.columns([1, 1, 1])
+    with viewport_col:
+        st.markdown("#### MRI Viewport")
+        if volume is not None:
+            view = st.radio(
+                "Primary Plane (quantum analysis target)", ["Axial", "Coronal", "Sagittal"], horizontal=True,
+                help="Which plane's slice is fed into the ResNet18 → PCA → VQC pipeline and Grad-CAM. "
+                     "All three planes are still shown, synchronized, below.",
+            )
 
-    with gradcam_col:
-        if use_fast_path and fast_path_case is not None:
+            # Shared slice-scrubbing slider: a single fractional position in
+            # [0, 1] mapped independently onto each plane's own slice-count
+            # range, so ONE slider keeps Sagittal/Coronal/Axial synchronized
+            # even though each has a different depth along its own axis.
+            slice_fraction = st.slider(
+                "Slice Depth Position (synced across all 3 planes)", 0.0, 1.0, 0.5, step=0.01,
+                help="Scrubs the Sagittal, Coronal, and Axial views together — each plane maps this "
+                     "shared fractional position onto its own slice count.",
+            )
+
+            def plane_index_for(plane_name: str) -> Tuple[int, int]:
+                max_idx = max(view_axis_size(volume, plane_name) - 1, 0)
+                return round(slice_fraction * max_idx), max_idx
+
+            slice_index, max_index = plane_index_for(view)
+            raw_slice = get_slice(volume, view, slice_index)
+            display_slice = normalize_for_display(raw_slice)
+
+            if use_api:
+                try:
+                    result = run_api_inference(raw_slice, api_url)
+                except Exception as exc:  # noqa: BLE001 - a failed request degrades to in-process/mock, not a crash
+                    logger.warning("API inference failed (%s); falling back to in-process/mock.", exc)
+
+            if result is None:
+                if backend_ready:
+                    result = run_live_inference(raw_slice, pipeline, acl_model, mcl_model, meniscus_model)
+                else:
+                    result = run_mock_inference(raw_slice)
+        elif use_fast_path and fast_path_case is not None:
             st.markdown(f"##### Accelerated Case {fast_path_case['case_id']} ({fast_path_case.get('plane', '?')} plane)")
             st.caption("Served from `precomputed_cache.json` — 0 ms inference.")
         elif use_demo_cache and cached_case is not None:
             st.markdown(f"##### Cached Case {cached_case['case_id']} ({cached_case.get('plane', 'sagittal')} plane)")
+
+        # Grad-CAM activation heatmap overlay — the primary slice image
+        # plus (when the backend exposes a raw heatmap) a toggleable
+        # colormap/opacity control, all inside the MRI Viewport column.
         render_gradcam_panel(display_slice, result)
 
-    with results_col:
-        st.markdown("#### Quantitative Clinical Triage Panel")
+        # Synchronized 3-Plane Layout — only meaningful when a real volume
+        # was loaded (sample-case replay carries a single precomputed
+        # image, not a volume).
+        if volume is not None and plane_index_for is not None:
+            st.markdown(f"##### {theme.icon('cube', size=15)} Synchronized Orthogonal Viewport", unsafe_allow_html=True)
+            plane_cols = st.columns(3)
+            for col, plane_name in zip(plane_cols, ["Sagittal", "Coronal", "Axial"]):
+                p_index, p_max = plane_index_for(plane_name)
+                p_display = normalize_for_display(get_slice(volume, plane_name, p_index))
+                p_display = theme.draw_clinical_crosshair(p_display)
+                with col:
+                    is_primary = plane_name == view
+                    caption = theme.slice_depth_caption(plane_name, p_index, p_max, primary=is_primary)
+                    st.image(p_display, channels="BGR", use_container_width=True, clamp=True, caption=caption)
+
+    with triage_col:
+        st.markdown("#### Diagnostic Triage Card")
+        if authenticated:
+            user_info = st.session_state.get(auth_view.USER_INFO_KEY) or {}
+            display_name = user_info.get("full_name") or user_info.get("email", "User")
+            role_label = auth_view.BACKEND_ROLE_TO_UI_LABEL.get(user_info.get("role"), user_info.get("role", "User"))
+            st.caption(f"Dr. {display_name} | {role_label}")
+        else:
+            st.caption("Observer Mode — read-only sample review")
+
         render_risk_gauge("ACL", result.acl_risk)
         render_risk_gauge("MCL", result.mcl_risk)
         render_risk_gauge("Medial Meniscus", result.meniscus_risk)
         st.markdown("---")
+        st.markdown(f"##### {theme.icon('circuit', size=15)} Quantum Circuit Diagnostics", unsafe_allow_html=True)
+        render_quantum_attribution_panel(result.pauli_z_expectations)
+        st.markdown("---")
         render_latency_metrics(result)
         st.markdown("---")
         if display_slice is not None:
-            render_report_download(display_slice, result)
-            st.button("Sign & Lock Study", use_container_width=True, key="qknee_sign_lock_dashboard",
-                      help="Locks this study's diagnostic session under the reviewing radiologist's "
-                           "attestation. Confirmatory over-read is required before clinical release.")
-
-    with attribution_col:
-        st.markdown(f"#### {theme.icon('circuit', size=17)} Quantum State Attribution Metrics", unsafe_allow_html=True)
-        render_quantum_attribution_panel(result.pauli_z_expectations)
+            if authenticated:
+                st.markdown("##### Clinical Action Bar")
+                report_col1, report_col2 = st.columns(2)
+                with report_col1:
+                    render_report_download(display_slice, result)
+                with report_col2:
+                    render_markdown_report_download(display_slice, result)
+                auth_view.safe_button(
+                    "Sign & Lock Study", key="qknee_sign_lock_dashboard",
+                    help="Locks this study's diagnostic session under the reviewing radiologist's "
+                         "attestation. Confirmatory over-read is required before clinical release.",
+                )
+            else:
+                st.caption("Sign in to export a structured PDF/Markdown report or sign & lock this study.")
 
     st.markdown("---")
     st.caption(
@@ -1347,12 +1439,20 @@ def main() -> None:
     # as a *destination hint*, independently of authentication — that
     # module knows nothing about auth. `auth_view`'s `CURRENT_PAGE_KEY` is
     # the authoritative top-level page router. Reconciling the two here
-    # (rather than in landing_page.py or auth_view.py) is what sends an
-    # unauthenticated visitor who clicks "Launch Diagnostic Workstation"
-    # to the login page instead of the workspace, then lands them on their
-    # originally-requested tab once they do sign in (VIEW_STATE_KEY is
-    # left untouched across that detour, so it's still "diagnostic" by the
-    # time `_navigate_after_auth` reads it back).
+    # (rather than in landing_page.py or auth_view.py) is what sends any
+    # visitor who clicks a workspace-bound CTA (Launch Diagnostic
+    # Workstation, a Demo Sample Quick-Loader, Review Benchmarks) straight
+    # into the workspace on the tab they asked for.
+    #
+    # Both workspace tabs are reachable unauthenticated: the Benchmarks
+    # tab is static precomputed data (no live inference), and the
+    # Diagnostic tab's own internal gate (`render_diagnostic_tab`) allows
+    # unauthenticated "Observer Mode" browsing of precomputed sample
+    # cases — it only requires sign-in for a real file upload / live
+    # inference run and for report export/sign-off, not for reaching the
+    # tab itself. So this router never needs to redirect to login on the
+    # visitor's behalf; a visitor who does want to sign in reaches
+    # `PAGE_LOGIN` via an explicit "Sign In" action instead.
     #
     # This reconciliation MUST happen before `render_header()` — the top
     # frame's navbar reads `CURRENT_PAGE_KEY` to highlight the active pill,
@@ -1361,13 +1461,7 @@ def main() -> None:
     current_page = st.session_state.get(auth_view.CURRENT_PAGE_KEY, auth_view.PAGE_LANDING)
 
     if requested_view != VIEW_LANDING and current_page not in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
-        if requested_view == VIEW_DIAGNOSTIC and not auth_view.is_authenticated():
-            current_page = auth_view.PAGE_LOGIN
-        else:
-            # The Benchmarks tab is static precomputed data (no live
-            # inference), so it's reachable unauthenticated; Diagnostic
-            # only reaches here once `is_authenticated()` is True.
-            current_page = auth_view.PAGE_WORKSPACE
+        current_page = auth_view.PAGE_WORKSPACE
         st.session_state[auth_view.CURRENT_PAGE_KEY] = current_page
 
     render_header()

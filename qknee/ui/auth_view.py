@@ -113,6 +113,40 @@ DEMO_FULL_NAME = "Demo Researcher"
 
 
 # --------------------------------------------------------------------------- #
+# Defensive Streamlit widget helpers — every `st.button` call in this
+# module (and `qknee.ui.dashboard`) routes through this wrapper rather than
+# calling `st.button` directly, so a future edit that adds an unsupported
+# kwarg (e.g. a stray `width=`) or an invalid `type=` value degrades to a
+# minimal-but-working button instead of raising `TypeError`/
+# `StreamlitAPIException` and crashing the whole page render.
+# --------------------------------------------------------------------------- #
+
+def safe_button(label: str, key: str, is_primary: bool = False, **extra) -> bool:
+    """Defensive `st.button` wrapper: pins every kwarg Streamlit actually
+    supports (`use_container_width`, `type="primary"/"secondary"`) and
+    derives a collision-resistant widget key from `key` rather than
+    trusting a caller-supplied key to already be a valid Streamlit
+    identifier. `extra` accepts only the handful of additional kwargs
+    known to be safe here (`disabled`, `help`); anything else is dropped
+    rather than forwarded, so a bad kwarg can't reach `st.button` at all.
+    Falls back to the barest possible button (still a real, clickable
+    widget) if `st.button` still raises for any other reason."""
+    clean_key = f"btn_{abs(hash(key)) % 100000}_{str(key).lower().replace(' ', '_')}"
+    safe_kwargs = {k: v for k, v in extra.items() if k in ("disabled", "help")}
+    try:
+        return st.button(
+            str(label),
+            key=clean_key,
+            use_container_width=True,
+            type="primary" if is_primary else "secondary",
+            **safe_kwargs,
+        )
+    except Exception:  # noqa: BLE001 - last-resort fallback, never let a widget crash the page
+        logger.warning("safe_button fallback triggered for key=%r", key)
+        return st.button(str(label), key=f"{clean_key}_alt", use_container_width=True)
+
+
+# --------------------------------------------------------------------------- #
 # Auth-service errors
 # --------------------------------------------------------------------------- #
 
@@ -421,7 +455,7 @@ def render_login_tab() -> None:
 
     st.divider()
     st.caption("Just exploring? Skip the form entirely:")
-    if st.button("Sign in with Demo Account", key="qknee_demo_login", use_container_width=True, disabled=locked):
+    if safe_button("Sign in with Demo Account", key="qknee_demo_login", disabled=locked):
         _attempt_demo_login()
 
 
@@ -531,7 +565,7 @@ def render_auth_page(default_tab: str = PAGE_LOGIN) -> None:
         render_signup_tab()
 
     st.divider()
-    if st.button("← Back to Home", key="qknee_auth_back_home"):
+    if safe_button("← Back to Home", key="qknee_auth_back_home"):
         _go_to_landing()
 
 
@@ -621,9 +655,8 @@ def render_global_navbar() -> None:
             for pill_col, (label, view) in zip(pill_cols, nav_items):
                 with pill_col:
                     label = str(label)
-                    btn_type = "primary" if label == active else "secondary"
                     clean_key = f"qknee_nav_pill_{re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')}"
-                    if st.button(label, key=clean_key, use_container_width=True, type=btn_type):
+                    if safe_button(label, key=clean_key, is_primary=(label == active)):
                         if view is not None:
                             _go_to_workspace_tab(view)
                         else:
@@ -645,11 +678,10 @@ def render_global_navbar() -> None:
                 display_name = user_info.get("full_name") or user_info.get("email", "User")
                 role_label = BACKEND_ROLE_TO_UI_LABEL.get(user_info.get("role"), user_info.get("role", "User"))
                 badge_text = f"Dr. {display_name} | {role_label}"
-                if st.button(_initials(display_name), key="qknee_nav_account", use_container_width=True,
-                             help=f"{badge_text} — Sign Out"):
+                if safe_button(_initials(display_name), key="qknee_nav_account", help=f"{badge_text} — Sign Out"):
                     _log_out()
             else:
-                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", use_container_width=True):
+                if safe_button("Clinician Portal", key="qknee_nav_signin", is_primary=True):
                     st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
                     st.rerun()
 
