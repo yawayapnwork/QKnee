@@ -37,19 +37,31 @@ pytestmark = [pytest.mark.slow]
 
 def _authenticated_as_radiologist(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Points the shared `qknee.api.auth.user_store` at an isolated
-    per-test JSON file, registers a `radiologist` test account, and
+    in-memory SQLite database, registers a `radiologist` test account, and
     attaches its bearer token to `client`'s default headers — every
     request `client` makes (including to the now-protected /predict,
     /explain) is pre-authenticated, so these tests keep exercising
     inference/payload behavior rather than the auth layer itself (see
     `test_auth.py` for that)."""
-    test_store = auth_module.UserStore(tmp_path / "auth" / "users.json")
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool, future=True,
+    )
+    auth_module.Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    test_store = auth_module.UserRepository(session_factory=session_factory)
     monkeypatch.setattr(auth_module, "user_store", test_store)
 
     stored = test_store.create_user(
-        auth_module.UserCreate(username="test_radiologist", password="test_password_123", role="radiologist")
+        auth_module.UserCreate(
+            email="test_radiologist@hospital.org", password="test_password_123!",
+            full_name="Test Radiologist", role="radiologist",
+        )
     )
-    token = auth_module.create_access_token(username=stored.username, role=stored.role)
+    token = auth_module.create_access_token(data={"sub": stored.email, "user_id": stored.id, "role": stored.role})
     client.headers.update({"Authorization": f"Bearer {token}"})
     return client
 

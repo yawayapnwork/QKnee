@@ -1,12 +1,13 @@
 """
-Tests for `qknee.ui.auth_view` (login/signup forms, top nav, and the
+Tests for `qknee.ui.auth_view` (sign-in/register forms, top nav, and the
 `st.session_state` auth contract wired into `qknee.ui.dashboard.main()`).
 
 Covers:
-    1. Pure helpers (username derivation, field validation, role mapping,
-       login-attempt throttling, session application) in isolation.
+    1. Pure helpers (institutional-email validation, field validation,
+       role mapping, login-attempt throttling, session application) in
+       isolation.
     2. Rendering + interaction via Streamlit's `AppTest` harness: the nav
-       bar's logged-out vs. logged-in variants, the login/signup forms,
+       bar's logged-out vs. logged-in variants, the login/register forms,
        throttling lockout, and the demo-account local fallback when no
        API is reachable.
 
@@ -15,6 +16,16 @@ FastAPI server in this test session) — see `qknee/tests/test_api_server.py`
 and `qknee/tests/test_auth.py` for the real-backend-integrated auth
 contract; the point here is verifying this module's own logic (forms,
 state, throttling, local fallback), not re-testing the API.
+
+NOTE on the AppTest section: this rewrite also fixes several assertions
+that were already stale against `qknee.ui.landing_page`'s/
+`qknee.ui.dashboard`'s actual current button/tab labels before this auth
+rewrite even started (verified via `git stash` against the pre-rewrite
+tree — e.g. no "Get Started"/"Sign In"/"Log Out" widget ever existed with
+those exact labels). The real CTA into the login page from the landing
+page is "Launch Workstation →" (`qknee_orthoc_launch_nav`) or "Evaluate
+Scans Now" (`qknee_orthoc_hero_cta`) while unauthenticated, and the real
+top-nav sign-in entry point is "Clinician Portal".
 """
 
 from __future__ import annotations
@@ -34,7 +45,7 @@ pytestmark = [pytest.mark.slow]
 @pytest.fixture(autouse=True)
 def _no_api_url(monkeypatch: pytest.MonkeyPatch):
     """Every test in this module runs as if no `$QKNEE_API_URL` is
-    configured, so regular login/signup deterministically hit the
+    configured, so regular sign-in/registration deterministically hit the
     "service unreachable" error path and only the Demo Account button
     exercises the local fallback — matching this module's own documented
     contract (see its module docstring)."""
@@ -52,52 +63,61 @@ class TestModuleImports:
         assert auth_view.USER_INFO_KEY == "user_info"
         assert auth_view.CURRENT_PAGE_KEY == "current_page"
 
+    def test_exposes_the_spec_literal_session_state_keys(self):
+        assert auth_view.SPEC_TOKEN_KEY == "auth_token"
+        assert auth_view.SPEC_USER_KEY == "current_user"
+
     def test_current_page_values_match_the_required_set(self):
         assert {auth_view.PAGE_LANDING, auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP, auth_view.PAGE_WORKSPACE} == {
             "landing", "login", "signup", "workspace",
         }
 
-    def test_ui_roles_match_the_required_copy(self):
-        assert auth_view.UI_ROLES == ("Radiologist", "Clinical Researcher", "Student Evaluator")
+    def test_ui_roles_match_the_backend_role_scheme(self):
+        assert auth_view.UI_ROLES == ("Radiologist", "Clinical Researcher", "Clinical Auditor")
 
     def test_every_ui_role_maps_to_a_valid_backend_role(self):
-        valid_backend_roles = {"radiologist", "triage_nurse", "guest_demo"}
-        assert set(auth_view.UI_ROLE_TO_BACKEND_ROLE.values()) <= valid_backend_roles
+        valid_backend_roles = {"radiologist", "researcher", "clinical_auditor"}
+        assert set(auth_view.UI_ROLE_TO_BACKEND_ROLE.values()) == valid_backend_roles
         assert set(auth_view.UI_ROLE_TO_BACKEND_ROLE.keys()) == set(auth_view.UI_ROLES)
 
 
-class TestDeriveUsernameFromEmail:
-    def test_uses_the_local_part_of_the_email(self):
-        assert auth_view._derive_username_from_email("jane.doe@hospital.org") == "jane.doe"
+class TestIsInstitutionalEmail:
+    def test_accepts_a_dot_edu_domain(self):
+        assert auth_view._is_institutional_email("jane.doe@university.edu") is True
 
-    def test_strips_disallowed_characters(self):
-        assert auth_view._derive_username_from_email("jane+test@hospital.org") == "janetest"
+    def test_accepts_a_dot_org_hospital_domain(self):
+        assert auth_view._is_institutional_email("jane.doe@hospital.org") is True
 
-    def test_pads_a_too_short_local_part(self):
-        username = auth_view._derive_username_from_email("jd@hospital.org")
-        assert len(username) >= 3
+    def test_accepts_a_domain_containing_clinic(self):
+        assert auth_view._is_institutional_email("jane.doe@cityclinic.net") is True
 
-    def test_truncates_a_too_long_local_part(self):
-        long_local_part = "a" * 100
-        username = auth_view._derive_username_from_email(f"{long_local_part}@hospital.org")
-        assert len(username) <= 64
+    def test_rejects_a_free_webmail_domain(self):
+        assert auth_view._is_institutional_email("jane.doe@gmail.com") is False
+
+    def test_rejects_a_malformed_email(self):
+        assert auth_view._is_institutional_email("not-an-email") is False
 
 
-class TestValidateSignupFields:
+class TestValidateRegisterFields:
     def test_accepts_valid_fields(self):
-        assert auth_view._validate_signup_fields("Jane Doe", "jane@hospital.org", "longenoughpw") == []
+        errors = auth_view._validate_register_fields("Jane Doe", "jane@hospital.org", "longEnough1!", "longEnough1!")
+        assert errors == []
 
     def test_rejects_empty_full_name(self):
-        errors = auth_view._validate_signup_fields("", "jane@hospital.org", "longenoughpw")
+        errors = auth_view._validate_register_fields("", "jane@hospital.org", "longEnough1!", "longEnough1!")
         assert any("name" in e.lower() for e in errors)
 
-    def test_rejects_an_invalid_email(self):
-        errors = auth_view._validate_signup_fields("Jane Doe", "not-an-email", "longenoughpw")
-        assert any("email" in e.lower() for e in errors)
+    def test_rejects_a_non_institutional_email(self):
+        errors = auth_view._validate_register_fields("Jane Doe", "jane@gmail.com", "longEnough1!", "longEnough1!")
+        assert any("institutional" in e.lower() for e in errors)
 
     def test_rejects_a_too_short_password(self):
-        errors = auth_view._validate_signup_fields("Jane Doe", "jane@hospital.org", "short")
+        errors = auth_view._validate_register_fields("Jane Doe", "jane@hospital.org", "sh0rt!", "sh0rt!")
         assert any("password" in e.lower() for e in errors)
+
+    def test_rejects_mismatched_passwords(self):
+        errors = auth_view._validate_register_fields("Jane Doe", "jane@hospital.org", "longEnough1!", "different1!")
+        assert any("match" in e.lower() for e in errors)
 
 
 class TestLoginThrottling:
@@ -119,26 +139,38 @@ class TestLoginThrottling:
 
 
 class TestApplyAuthenticatedSession:
-    def test_populates_all_four_session_state_keys(self):
+    def test_populates_the_session_state_contract(self):
         auth_view._apply_authenticated_session({
             "access_token": "fake.jwt.token",
-            "user": {"username": "jdoe", "role": "radiologist", "full_name": "Jane Doe"},
+            "user": {"email": "jdoe@hospital.org", "role": "radiologist", "full_name": "Jane Doe"},
         })
         import streamlit as st
 
         assert st.session_state[auth_view.AUTHENTICATED_KEY] is True
         assert st.session_state[auth_view.TOKEN_KEY] == "fake.jwt.token"
-        assert st.session_state[auth_view.USER_INFO_KEY]["username"] == "jdoe"
+        assert st.session_state[auth_view.USER_INFO_KEY]["email"] == "jdoe@hospital.org"
         assert st.session_state[auth_view.USER_INFO_KEY]["role"] == "radiologist"
+
+    def test_also_populates_the_spec_literal_keys(self):
+        auth_view._apply_authenticated_session({
+            "access_token": "fake.jwt.token",
+            "user": {"email": "jdoe@hospital.org", "role": "radiologist", "full_name": "Jane Doe"},
+        })
+        import streamlit as st
+
+        assert st.session_state[auth_view.SPEC_TOKEN_KEY] == "fake.jwt.token"
+        assert st.session_state[auth_view.SPEC_USER_KEY]["user_name"] == "Jane Doe"
+        assert st.session_state[auth_view.SPEC_USER_KEY]["role"] == "radiologist"
 
     def test_never_stores_a_password_field(self):
         auth_view._apply_authenticated_session({
             "access_token": "fake.jwt.token",
-            "user": {"username": "jdoe", "role": "radiologist", "password": "should-never-appear"},
+            "user": {"email": "jdoe@hospital.org", "role": "radiologist", "password": "should-never-appear"},
         })
         import streamlit as st
 
         assert "password" not in st.session_state[auth_view.USER_INFO_KEY]
+        assert "password" not in st.session_state[auth_view.SPEC_USER_KEY]
 
 
 class TestCanRunInference:
@@ -155,18 +187,18 @@ class TestCanRunInference:
         st.session_state[auth_view.USER_INFO_KEY] = {"role": "radiologist"}
         assert auth_view.can_run_inference() is True
 
-    def test_true_for_triage_nurse(self):
+    def test_false_for_researcher(self):
         import streamlit as st
 
         st.session_state[auth_view.AUTHENTICATED_KEY] = True
-        st.session_state[auth_view.USER_INFO_KEY] = {"role": "triage_nurse"}
-        assert auth_view.can_run_inference() is True
+        st.session_state[auth_view.USER_INFO_KEY] = {"role": "researcher"}
+        assert auth_view.can_run_inference() is False
 
-    def test_false_for_guest_demo(self):
+    def test_false_for_clinical_auditor(self):
         import streamlit as st
 
         st.session_state[auth_view.AUTHENTICATED_KEY] = True
-        st.session_state[auth_view.USER_INFO_KEY] = {"role": "guest_demo"}
+        st.session_state[auth_view.USER_INFO_KEY] = {"role": "clinical_auditor"}
         assert auth_view.can_run_inference() is False
 
 
@@ -175,9 +207,9 @@ class TestLocalDemoSessionPayload:
         payload = auth_view._local_demo_session_payload()
         assert "not-a-real-jwt" in payload["access_token"]
 
-    def test_carries_the_guest_demo_role(self):
+    def test_carries_the_researcher_role(self):
         payload = auth_view._local_demo_session_payload()
-        assert payload["user"]["role"] == auth_view.DEMO_ROLE == "guest_demo"
+        assert payload["user"]["role"] == auth_view.DEMO_ROLE == "researcher"
 
 
 # --------------------------------------------------------------------------- #
@@ -189,20 +221,28 @@ _DASHBOARD_PATH = str(Path(__file__).resolve().parents[2] / "qknee" / "ui" / "da
 
 
 @pytest.fixture
-def live_auth_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def live_auth_api(monkeypatch: pytest.MonkeyPatch):
     """Runs a real `qknee.api.server` (uvicorn, in a background thread) on
-    a free local port, pointed at an isolated per-test user store, and
-    yields its base URL. Only used by the one test that needs genuine
+    a free local port, pointed at an isolated in-memory-SQLite user store,
+    and yields its base URL. Only used by the one test that needs genuine
     401-vs-service-unreachable distinction (throttling must not count a
     down backend as a wrong password)."""
     import socket
     import threading
 
     import uvicorn
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
 
     import qknee.api.auth as auth_module
 
-    monkeypatch.setattr(auth_module, "user_store", auth_module.UserStore(tmp_path / "users.json"))
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool, future=True,
+    )
+    auth_module.Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    monkeypatch.setattr(auth_module, "user_store", auth_module.UserRepository(session_factory=session_factory))
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -243,36 +283,36 @@ def _state(at, key: str, default=None):
         return default
 
 
+def _click_clinician_portal(at):
+    next(b for b in at.button if b.key == "qknee_nav_signin").click().run()
+
+
 class TestTopNavRendering:
-    def test_logged_out_nav_shows_the_required_links(self):
+    def test_logged_out_nav_shows_the_amber_view_only_banner(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
 
         assert not at.exception
-        labels = {b.label for b in at.button}
-        assert {"Home", "Product Features", "Benchmarks", "Sign In", "Get Started"} <= labels
+        assert any("View-Only Mode" in md.value for md in at.markdown)
+        assert any(b.key == "qknee_nav_signin" for b in at.button)
 
-    def test_logged_in_nav_shows_avatar_role_and_logout(self):
+    def test_logged_in_nav_shows_the_clinician_badge(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Get Started" in b.label).click().run()
+        _click_clinician_portal(at)
         next(b for b in at.button if "Demo Account" in b.label).click().run()
 
         assert not at.exception
-        labels = {b.label for b in at.button}
-        assert "Log Out" in labels
-        assert any("Switch to Diagnostic Workspace" in label for label in labels)
-        # The nav badge itself is raw HTML (st.markdown), not a widget —
-        # assert on the markdown blocks instead of a button/label.
-        assert any("[Student Evaluator]" in md.value for md in at.markdown)
+        assert any("Clinical Researcher" in md.value for md in at.markdown)
+        assert any(b.key == "qknee_nav_account" for b in at.button)
 
 
 class TestLoginFlow:
     def test_missing_fields_shows_an_error(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Sign In" == b.label).click().run()
-        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Sign In" in b.label)
+        _click_clinician_portal(at)
+        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Authenticate Credentials" in b.label)
 
         submit.click().run()
 
@@ -283,10 +323,10 @@ class TestLoginFlow:
     def test_wrong_credentials_show_an_error_and_do_not_authenticate(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Sign In" == b.label).click().run()
-        at.text_input(key="qknee_login_username").set_value("nobody")
-        at.text_input(key="qknee_login_password").set_value("wrong-password")
-        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Sign In" in b.label)
+        _click_clinician_portal(at)
+        at.text_input(key="qknee_login_email").set_value("nobody@hospital.org")
+        at.text_input(key="qknee_login_password").set_value("wrong-password!1")
+        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Authenticate Credentials" in b.label)
 
         submit.click().run()
 
@@ -306,19 +346,20 @@ class TestLoginFlow:
         import requests
 
         requests.post(
-            f"{live_auth_api}/api/v1/auth/signup",
-            json={"username": "throttle_test_user", "password": "correct-password-123", "role": "guest_demo"},
+            f"{live_auth_api}/api/v1/auth/register",
+            json={"email": "throttle_test_user@hospital.org", "password": "correct-password-123!",
+                  "full_name": "Throttle Test", "role": "researcher"},
             timeout=5,
         )
 
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Sign In" == b.label).click().run()
+        _click_clinician_portal(at)
 
         for _ in range(auth_view.MAX_LOGIN_ATTEMPTS):
-            at.text_input(key="qknee_login_username").set_value("throttle_test_user")
-            at.text_input(key="qknee_login_password").set_value("wrong-password")
-            submit = next(b for b in at.button if "FormSubmitter" in b.key and "Sign In" in b.label)
+            at.text_input(key="qknee_login_email").set_value("throttle_test_user@hospital.org")
+            at.text_input(key="qknee_login_password").set_value("wrong-password!1")
+            submit = next(b for b in at.button if "FormSubmitter" in b.key and "Authenticate Credentials" in b.label)
             submit.click().run()
 
         # The lockout banner (rendered at the top of `render_login_tab`,
@@ -332,41 +373,41 @@ class TestLoginFlow:
 
 
 class TestDemoAccountFlow:
-    def test_demo_login_authenticates_a_guest_demo_session(self):
+    def test_demo_login_authenticates_a_researcher_session(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Sign In" == b.label).click().run()
+        _click_clinician_portal(at)
         demo_button = next(b for b in at.button if "Demo Account" in b.label)
 
         demo_button.click().run()
 
         assert not at.exception
         assert at.session_state["authenticated"] is True
-        assert at.session_state["user_info"]["role"] == "guest_demo"
+        assert at.session_state["user_info"]["role"] == "researcher"
         assert at.session_state["current_page"] == "workspace"
 
     def test_demo_login_lands_on_diagnostic_tab_by_default(self):
-        """No pending destination (arrived via the plain top-nav 'Sign
-        In', not a landing-page CTA) — should default to the Diagnostic
-        tab, not Benchmarks."""
+        """No pending destination (arrived via the plain top-nav
+        'Clinician Portal', not a landing-page CTA) — should default to
+        the Diagnostic tab, not Benchmarks."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Sign In" == b.label).click().run()
+        _click_clinician_portal(at)
         next(b for b in at.button if "Demo Account" in b.label).click().run()
 
         assert not at.exception
         assert at.tabs[0].label == "Diagnostic Workstation"
 
 
-class TestSignupFlow:
+class TestRegisterFlow:
     def test_invalid_fields_show_errors_without_calling_the_api(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Get Started" in b.label).click().run()
-        signup_tab = at.tabs[0]  # "Create Account" is first when arriving via Get Started
-        signup_tab.text_input(key="qknee_signup_email").set_value("not-an-email")
-        signup_tab.text_input(key="qknee_signup_password").set_value("short")
-        submit = signup_tab.get("button")[0]
+        next(b for b in at.button if b.key == "qknee_orthoc_launch_nav").click().run()
+        register_tab = next(t for t in at.tabs if "Institutional" in t.label)
+        register_tab.text_input(key="qknee_register_email").set_value("not-an-email")
+        register_tab.text_input(key="qknee_register_password").set_value("short")
+        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Institutional Access" in b.label)
 
         submit.click().run()
 
@@ -377,12 +418,13 @@ class TestSignupFlow:
     def test_valid_fields_report_service_unreachable_without_an_api(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Get Started" in b.label).click().run()
-        signup_tab = at.tabs[0]
-        signup_tab.text_input(key="qknee_signup_full_name").set_value("Jane Doe")
-        signup_tab.text_input(key="qknee_signup_email").set_value("jane@hospital.org")
-        signup_tab.text_input(key="qknee_signup_password").set_value("longenoughpassword")
-        submit = signup_tab.get("button")[0]
+        next(b for b in at.button if b.key == "qknee_orthoc_launch_nav").click().run()
+        register_tab = next(t for t in at.tabs if "Institutional" in t.label)
+        register_tab.text_input(key="qknee_register_full_name").set_value("Jane Doe")
+        register_tab.text_input(key="qknee_register_email").set_value("jane@hospital.org")
+        register_tab.text_input(key="qknee_register_password").set_value("longEnough1!")
+        register_tab.text_input(key="qknee_register_confirm_password").set_value("longEnough1!")
+        submit = next(b for b in at.button if "FormSubmitter" in b.key and "Institutional Access" in b.label)
 
         submit.click().run()
 
@@ -392,17 +434,17 @@ class TestSignupFlow:
 
 
 class TestLogoutFlow:
-    def test_log_out_clears_the_session_and_returns_to_landing(self):
+    def test_sign_out_clears_the_session_and_returns_to_landing(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if "Get Started" in b.label).click().run()
+        _click_clinician_portal(at)
         next(b for b in at.button if "Demo Account" in b.label).click().run()
-        logout_button = next(b for b in at.button if b.label == "Log Out")
+        account_button = next(b for b in at.button if b.key == "qknee_nav_account")
 
-        logout_button.click().run()
+        account_button.click().run()
 
         assert not at.exception
         assert _state(at, auth_view.AUTHENTICATED_KEY, False) is False
         assert auth_view.TOKEN_KEY not in at.session_state
         assert at.session_state["current_page"] == "landing"
-        assert any("Get Started" in b.label for b in at.button)
+        assert any(b.key == "qknee_nav_signin" for b in at.button)

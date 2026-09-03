@@ -10,7 +10,7 @@ Endpoints:
     GET  /health              - liveness/readiness probe, reports whether the
                                  real model backend loaded or the API is
                                  running in mock mode. Unauthenticated.
-    POST /api/v1/auth/signup  - register a new user (hashed password,
+    POST /api/v1/auth/register - register a new user (hashed password,
                                  role-assigned). See qknee.api.auth.
     POST /api/v1/auth/login   - authenticate and receive a JWT bearer token.
     GET  /api/v1/auth/me      - the authenticated caller's own profile.
@@ -18,8 +18,8 @@ Endpoints:
                                  MRI slice/volume upload, returns risk score,
                                  diagnosis, and a base64-encoded Grad-CAM
                                  heatmap overlay (PNG). Requires a bearer
-                                 token for a `radiologist`/`triage_nurse`
-                                 account (see qknee.api.auth.require_role).
+                                 token for a `radiologist` account (see
+                                 qknee.api.auth.require_role).
     POST /explain              - same upload contract and auth requirement as
                                  /predict, but returns just the
                                  explainability payload (Grad-CAM heatmap +
@@ -371,7 +371,11 @@ class HealthResponse(BaseModel):
                     "local ML stack, Render/Docker), 'proxy' (ProxyBackend — forwards to BACKEND_API_URL), "
                     "or 'cache-fallback' (CachedFallbackBackend — precomputed_cache.json, serverless).",
     )
-    user_store_backend: str = Field(..., description="'SQLAlchemyUserRepository' or 'LocalFileUserRepository'.")
+    user_store_backend: str = Field(
+        ...,
+        description="Always 'UserRepository' — SQLAlchemy-backed, against $DATABASE_URL "
+                    "in production or a local sqlite:///./qknee_users.db file by default.",
+    )
     cache_backend: str = Field(..., description="'redis' or 'in-memory' — see qknee.api.server.CacheService.")
     artifacts: Dict[str, bool] = Field(
         default_factory=dict,
@@ -1229,8 +1233,8 @@ async def predict(
     """Runs one MRI slice (or the middle slice of a volume) through the
     Q-Knee pipeline and returns the tear-risk score, diagnosis label, and a
     base64-encoded Grad-CAM overlay for visual explainability. Requires a
-    bearer token for a `radiologist`/`triage_nurse` account — 401 with no
-    token, 403 for a `guest_demo` token.
+    bearer token for a `radiologist` account — 401 with no token, 403 for
+    a `researcher`/`clinical_auditor` token.
 
     The expensive part of this call (ResNet18 forward pass + Grad-CAM
     backward pass) is routed through `CacheService`, keyed on the
@@ -1247,7 +1251,7 @@ async def predict(
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    logger.info("POST /predict by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
+    logger.info("POST /predict by user=%r role=%r file=%r", current_user.email, current_user.role, file.filename)
     cache_key = _predict_cache_key(raw_bytes)
     cached = await cache_service.get(cache_key)
     if cached is not None:
@@ -1280,7 +1284,7 @@ async def explain(
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    logger.info("POST /explain by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
+    logger.info("POST /explain by user=%r role=%r file=%r", current_user.email, current_user.role, file.filename)
     cache_key = _predict_cache_key(raw_bytes)
     cached = await cache_service.get(cache_key)
     if cached is not None:
@@ -1327,7 +1331,7 @@ async def report(
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    logger.info("POST /report by user=%r role=%r file=%r", current_user.username, current_user.role, file.filename)
+    logger.info("POST /report by user=%r role=%r file=%r", current_user.email, current_user.role, file.filename)
 
     active_backend = get_backend()
 

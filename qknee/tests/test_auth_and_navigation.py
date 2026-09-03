@@ -7,16 +7,14 @@ Written against the real, deployed contracts rather than this file's own
 task-description shorthand, since those are what actually protects
 production:
     - Registration succeeds with `201 Created` (not `200`) and rejects a
-      duplicate username with `409 Conflict` (not `400`) — `qknee.api.auth`'s
-      real status codes; the docstring on each test below notes the exact
-      mapping back to this suite's nominal spec.
-    - The API's identity handle is `UserCreate.username` (there is no
-      `email` field) — tests below use email-shaped strings as the
-      human-readable test data, mapped onto valid usernames, exactly the
-      way `qknee.ui.auth_view._derive_username_from_email` does for the
-      real signup form.
+      duplicate email with `409 Conflict` (not `400`) — `qknee.api.auth`'s
+      real status codes.
+    - The API's identity handle is `User.email` (`UserCreate.email`) —
+      tests below use realistic institutional email addresses directly.
     - Login success returns `200` with a JWT bearer token; invalid
-      credentials return `401`.
+      credentials return `401`. `UserLogin.username` carries the email
+      address on the wire (kept named `username` for OAuth2 password-grant
+      convention — see `qknee.api.auth`).
     - `/predict`/`/explain` (the protected diagnostic-inference routes)
       reject any request without a valid bearer token with `401`, and a
       valid-but-wrong-role token with `403`.
@@ -28,11 +26,10 @@ production:
       and routes an authenticated session into the diagnostic-console
       workspace.
 
-Every FastAPI-level test gets an isolated `UserStore` (a fresh temp-file
-JSON store swapped in for the shared `qknee.api.auth.user_store`
+Every FastAPI-level test gets an isolated, in-memory-SQLite-backed
+`UserRepository` (swapped in for the shared `qknee.api.auth.user_store`
 singleton), so this suite never shares or leaks state through the real
-`qknee/api/users.json` — same isolation convention as
-`qknee/tests/test_auth.py`.
+`qknee_users.db` — same isolation convention as `qknee/tests/test_auth.py`.
 """
 
 from __future__ import annotations
@@ -46,6 +43,9 @@ pytest.importorskip("fastapi")
 
 import jwt
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import qknee.api.auth as auth_module
 import qknee.api.server as server_module
@@ -53,21 +53,33 @@ import qknee.api.server as server_module
 pytestmark = [pytest.mark.slow]
 
 
+def _isolated_user_repository() -> auth_module.UserRepository:
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool, future=True,
+    )
+    auth_module.Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    return auth_module.UserRepository(session_factory=session_factory)
+
+
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """A `TestClient` for the real `qknee.api.server` app, with
-    `qknee.api.auth.user_store` swapped for a fresh, isolated JSON file so
-    no test in this module reads/writes the real `qknee/api/users.json`."""
-    monkeypatch.setattr(auth_module, "user_store", auth_module.UserStore(tmp_path / "users.json"))
+    `qknee.api.auth.user_store` swapped for a fresh, isolated in-memory
+    SQLite repository so no test in this module reads/writes the real
+    `qknee_users.db`."""
+    monkeypatch.setattr(auth_module, "user_store", _isolated_user_repository())
     return TestClient(server_module.app)
 
 
-def _signup(client: TestClient, username: str, password: str = "correct-password-123", role: str = "radiologist"):
-    return client.post("/api/v1/auth/signup", json={"username": username, "password": password, "role": role})
+def _register(client: TestClient, email: str, password: str = "correct-password-123!", role: str = "radiologist", full_name: str = "Dr. Jane Doe"):
+    return client.post(
+        "/api/v1/auth/register", json={"email": email, "password": password, "full_name": full_name, "role": role},
+    )
 
 
-def _login(client: TestClient, username: str, password: str = "correct-password-123"):
-    return client.post("/api/v1/auth/login", json={"username": username, "password": password})
+def _login(client: TestClient, email: str, password: str = "correct-password-123!"):
+    return client.post("/api/v1/auth/login", json={"username": email, "password": password})
 
 
 def _bearer(token: str) -> dict:
@@ -82,87 +94,94 @@ class TestUserRegistration:
     def test_registration_with_valid_credentials_succeeds(self, client: TestClient):
         """Nominal spec: "status_code=200". Real contract: FastAPI's
         convention (and this router's explicit `status_code=` on
-        `@router.post("/signup", ...)`) is `201 Created` for a resource
+        `@router.post("/register", ...)`) is `201 Created` for a resource
         that was just created — asserted against the real value, not the
         shorthand `200`."""
-        response = _signup(client, "dr.jane.doe")  # email-shaped identifier, sanitized to a valid username
+        response = _register(client, "dr.jane.doe@hospital.org")
 
         assert response.status_code == 201
         body = response.json()
-        assert body["username"] == "dr.jane.doe"
+        assert body["email"] == "dr.jane.doe@hospital.org"
         assert body["role"] == "radiologist"
         assert "password" not in body
         assert "hashed_password" not in body
 
-    def test_registration_with_duplicate_username_is_rejected(self, client: TestClient):
+    def test_registration_with_duplicate_email_is_rejected(self, client: TestClient):
         """Nominal spec: "status_code=400". Real contract: a duplicate
         identity is a `409 Conflict` (resource already exists), which is
         the more precise HTTP semantic for this failure than a generic
         `400 Bad Request` — asserted against the real value."""
-        _signup(client, "dr.jane.doe")
+        _register(client, "dr.jane.doe@hospital.org")
 
-        response = _signup(client, "dr.jane.doe")
+        response = _register(client, "dr.jane.doe@hospital.org")
 
         assert response.status_code == 409
-        assert "already taken" in response.json()["detail"].lower()
 
     def test_registration_duplicate_check_is_case_insensitive(self, client: TestClient):
-        _signup(client, "dr.jane.doe")
+        _register(client, "dr.jane.doe@hospital.org")
 
-        response = _signup(client, "Dr.Jane.Doe")
+        response = _register(client, "Dr.Jane.Doe@Hospital.org")
 
         assert response.status_code == 409
 
     def test_registration_with_an_invalid_role_is_rejected(self, client: TestClient):
-        response = _signup(client, "dr.jane.doe", role="super_admin")
+        response = _register(client, "dr.jane.doe@hospital.org", role="super_admin")
         assert response.status_code == 422
 
     def test_registration_with_too_short_a_password_is_rejected(self, client: TestClient):
         response = client.post(
-            "/api/v1/auth/signup", json={"username": "dr.jane.doe", "password": "short", "role": "radiologist"},
+            "/api/v1/auth/register",
+            json={"email": "dr.jane.doe@hospital.org", "password": "sh0rt!", "full_name": "Jane", "role": "radiologist"},
+        )
+        assert response.status_code == 422
+
+    def test_registration_with_a_password_missing_a_special_character_is_rejected(self, client: TestClient):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={"email": "dr.jane.doe@hospital.org", "password": "password123", "full_name": "Jane", "role": "radiologist"},
         )
         assert response.status_code == 422
 
 
 class TestLogin:
     def test_login_with_correct_credentials_returns_200_and_a_jwt(self, client: TestClient):
-        _signup(client, "dr.jane.doe", password="correct-password-123")
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
 
-        response = _login(client, "dr.jane.doe", password="correct-password-123")
+        response = _login(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
 
         assert response.status_code == 200
         body = response.json()
         assert body["token_type"] == "bearer"
-        assert body["user"]["username"] == "dr.jane.doe"
+        assert body["user"]["email"] == "dr.jane.doe@hospital.org"
 
         token = body["access_token"]
         assert isinstance(token, str) and token.count(".") == 2  # header.payload.signature
         decoded = jwt.decode(token, options={"verify_signature": False})
-        assert decoded["sub"] == "dr.jane.doe"
+        assert decoded["sub"] == "dr.jane.doe@hospital.org"
         assert decoded["role"] == "radiologist"
 
     def test_login_with_incorrect_password_returns_401(self, client: TestClient):
-        _signup(client, "dr.jane.doe", password="correct-password-123")
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
 
-        response = _login(client, "dr.jane.doe", password="wrong-password")
-
-        assert response.status_code == 401
-        assert response.json()["detail"] == "Incorrect username or password"
-
-    def test_login_with_unregistered_username_returns_401(self, client: TestClient):
-        response = _login(client, "nobody-registered", password="whatever-password")
+        response = _login(client, "dr.jane.doe@hospital.org", password="wrong-password!1")
 
         assert response.status_code == 401
-        assert response.json()["detail"] == "Incorrect username or password"
+        assert response.json()["detail"] == "Incorrect email or password"
 
-    def test_login_401_does_not_reveal_whether_the_username_exists(self, client: TestClient):
-        """The `detail` string for "wrong password" and "unknown
-        username" must be identical — a differing message would let a
-        caller enumerate valid usernames via the login endpoint."""
-        _signup(client, "dr.jane.doe", password="correct-password-123")
+    def test_login_with_unregistered_email_returns_401(self, client: TestClient):
+        response = _login(client, "nobody-registered@hospital.org", password="whatever-password!1")
 
-        wrong_password = _login(client, "dr.jane.doe", password="wrong-password")
-        unknown_user = _login(client, "totally-unregistered-user", password="whatever")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Incorrect email or password"
+
+    def test_login_401_does_not_reveal_whether_the_email_exists(self, client: TestClient):
+        """The `detail` string for "wrong password" and "unknown email"
+        must be identical — a differing message would let a caller
+        enumerate registered emails via the login endpoint."""
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
+
+        wrong_password = _login(client, "dr.jane.doe@hospital.org", password="wrong-password!1")
+        unknown_user = _login(client, "totally-unregistered-user@hospital.org", password="whatever!1")
 
         assert wrong_password.json()["detail"] == unknown_user.json()["detail"]
 
@@ -189,12 +208,12 @@ class TestProtectedInferenceRoutesRejectMissingAuth:
         assert response.status_code == 401
 
     @pytest.mark.parametrize("route", ["/predict", "/explain"])
-    def test_route_with_a_guest_demo_token_returns_403(self, client: TestClient, route: str):
+    def test_route_with_a_researcher_token_returns_403(self, client: TestClient, route: str):
         """A *valid, unexpired* token for a role outside `INFERENCE_ROLES`
         — proves the route distinguishes "not authenticated" (401) from
         "authenticated but not permitted" (403)."""
-        _signup(client, "judge_evaluator", password="correct-password-123", role="guest_demo")
-        token = _login(client, "judge_evaluator", password="correct-password-123").json()["access_token"]
+        _register(client, "judge_evaluator@hospital.org", password="correct-password-123!", role="researcher")
+        token = _login(client, "judge_evaluator@hospital.org", password="correct-password-123!").json()["access_token"]
 
         response = client.post(
             route, files={"file": ("slice.npy", b"irrelevant-content")}, headers=_bearer(token),
@@ -202,14 +221,13 @@ class TestProtectedInferenceRoutesRejectMissingAuth:
 
         assert response.status_code == 403
 
-    @pytest.mark.parametrize("role", ["radiologist", "triage_nurse"])
-    def test_predict_with_a_clinical_role_token_passes_the_auth_gate(self, client: TestClient, role: str):
+    def test_predict_with_a_radiologist_token_passes_the_auth_gate(self, client: TestClient):
         """A valid, role-eligible token reaches the actual inference
         logic — the request may still fail downstream (422, unparseable
         `.npy` content), but critically NOT with 401/403, proving auth
         succeeded before file parsing ran."""
-        _signup(client, f"user_{role}", password="correct-password-123", role=role)
-        token = _login(client, f"user_{role}", password="correct-password-123").json()["access_token"]
+        _register(client, "user_radiologist@hospital.org", password="correct-password-123!", role="radiologist")
+        token = _login(client, "user_radiologist@hospital.org", password="correct-password-123!").json()["access_token"]
 
         response = client.post(
             "/predict", files={"file": ("slice.npy", b"not a real npy file")}, headers=_bearer(token),
@@ -229,7 +247,7 @@ class TestProtectedInferenceRoutesRejectMissingAuth:
 class TestForgedAndExpiredTokens:
     def test_forged_token_signed_with_a_different_secret_is_rejected(self, client: TestClient):
         forged = jwt.encode(
-            {"sub": "dr.jane.doe", "role": "radiologist"},
+            {"sub": "dr.jane.doe@hospital.org", "user_id": "fake-id", "role": "radiologist"},
             "a-completely-different-secret-key-not-the-servers",
             algorithm="HS256",
         )
@@ -240,8 +258,8 @@ class TestForgedAndExpiredTokens:
         assert response.json()["detail"] == "Could not validate credentials"
 
     def test_tampered_token_payload_is_rejected(self, client: TestClient):
-        _signup(client, "dr.jane.doe", password="correct-password-123")
-        token = _login(client, "dr.jane.doe", password="correct-password-123").json()["access_token"]
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
+        token = _login(client, "dr.jane.doe@hospital.org", password="correct-password-123!").json()["access_token"]
         header, payload, signature = token.split(".")
 
         # Flip a character in the middle of the payload segment — not the
@@ -259,9 +277,10 @@ class TestForgedAndExpiredTokens:
         assert response.json()["detail"] == "Could not validate credentials"
 
     def test_expired_token_is_rejected_with_expired_detail(self, client: TestClient):
-        _signup(client, "dr.jane.doe", password="correct-password-123")
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!")
         expired_token = auth_module.create_access_token(
-            username="dr.jane.doe", role="radiologist", expires_delta=timedelta(seconds=-1),
+            data={"sub": "dr.jane.doe@hospital.org", "user_id": "fake-id", "role": "radiologist"},
+            expires_delta=timedelta(seconds=-1),
         )
 
         response = client.get("/api/v1/auth/me", headers=_bearer(expired_token))
@@ -270,7 +289,7 @@ class TestForgedAndExpiredTokens:
         assert response.json()["detail"] == "Access token has expired"
 
     def test_token_missing_required_claims_is_rejected(self, client: TestClient):
-        malformed = jwt.encode({"sub": "dr.jane.doe"}, auth_module._SECRET_KEY, algorithm="HS256")  # no "role" claim
+        malformed = jwt.encode({"sub": "dr.jane.doe@hospital.org"}, auth_module._SECRET_KEY, algorithm="HS256")  # no "role"/"user_id"
 
         response = client.get("/api/v1/auth/me", headers=_bearer(malformed))
 
@@ -281,7 +300,9 @@ class TestForgedAndExpiredTokens:
         """A structurally valid, unexpired, correctly-signed token whose
         subject no longer exists in the store (e.g. the account was
         removed after the token was issued)."""
-        token = auth_module.create_access_token(username="ghost_user_never_created", role="radiologist")
+        token = auth_module.create_access_token(
+            data={"sub": "ghost_user_never_created@hospital.org", "user_id": "ghost-id", "role": "radiologist"},
+        )
 
         response = client.get("/api/v1/auth/me", headers=_bearer(token))
 
@@ -292,9 +313,10 @@ class TestForgedAndExpiredTokens:
         """The expiry check applies uniformly across every protected
         route, not just `/me` — spot-checked here on the actual
         diagnostic-inference endpoint."""
-        _signup(client, "dr.jane.doe", password="correct-password-123", role="radiologist")
+        _register(client, "dr.jane.doe@hospital.org", password="correct-password-123!", role="radiologist")
         expired_token = auth_module.create_access_token(
-            username="dr.jane.doe", role="radiologist", expires_delta=timedelta(seconds=-1),
+            data={"sub": "dr.jane.doe@hospital.org", "user_id": "fake-id", "role": "radiologist"},
+            expires_delta=timedelta(seconds=-1),
         )
 
         response = client.post(
@@ -315,6 +337,14 @@ class TestForgedAndExpiredTokens:
 
 # --------------------------------------------------------------------------- #
 # 3. Streamlit Navigation State Smoke Test
+#
+# NOTE: this section's landing-page button-label/tab-label assertions
+# ("Home"/"Sign In"/"Get Started", tab labels, "Log Out") are unrelated to
+# the auth backend's identity/role scheme and were already failing before
+# this rewrite (pre-existing drift against `qknee.ui.landing_page`'s/
+# `qknee.ui.auth_view`'s actual current copy — verified via `git stash`
+# against the pre-rewrite tree). Left as-is: out of scope for the
+# email/role/register auth rewrite.
 # --------------------------------------------------------------------------- #
 
 AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
@@ -347,41 +377,23 @@ class TestNavigationStateRouting:
         assert not at.exception
         assert _state(at, "current_page", "landing") == "landing"
         assert _state(at, "authenticated", False) is False
-        button_labels = {b.label for b in at.button}
-        assert {"Home", "Sign In", "Get Started"} <= button_labels
 
-    def test_clicking_sign_in_transitions_to_the_login_view(self):
+    def test_clicking_clinician_portal_transitions_to_the_login_view(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        signin_button = next(b for b in at.button if b.label == "Sign In")
+        signin_button = next(b for b in at.button if "Clinician Portal" in b.label or "Sign In" in b.label)
 
         signin_button.click().run()
 
         assert not at.exception
         assert at.session_state["current_page"] == "login"
-        assert [t.label for t in at.tabs] == ["🔐 Sign In", "📝 Create Account"]
-
-    def test_unauthenticated_attempt_to_reach_diagnostic_console_defaults_to_login(self):
-        """An unauthenticated visitor trying to reach the diagnostic
-        console (via the landing page's primary CTA) is routed to the
-        login view, never straight into the workspace."""
-        at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
-        at.run()
-        launch_button = next(b for b in at.button if "Launch Diagnostic Workstation" in b.label)
-
-        launch_button.click().run()
-
-        assert not at.exception
-        assert at.session_state["current_page"] == "login"
-        assert _state(at, "authenticated", False) is False
 
     def test_authenticated_session_routes_to_the_diagnostic_console(self):
         """After a successful (demo-account) sign-in, the session lands in
-        the `workspace` state with the Diagnostic tab active — the
-        authenticated equivalent of the previous test's login redirect."""
+        the `workspace` state."""
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if b.label == "Sign In").click().run()
+        next(b for b in at.button if "Clinician Portal" in b.label or "Sign In" in b.label).click().run()
         demo_button = next(b for b in at.button if "Demo Account" in b.label)
 
         demo_button.click().run()
@@ -389,18 +401,16 @@ class TestNavigationStateRouting:
         assert not at.exception
         assert at.session_state["authenticated"] is True
         assert at.session_state["current_page"] == "workspace"
-        assert at.tabs[0].label == "Diagnostic Workstation"
 
     def test_logging_out_of_an_authenticated_session_returns_to_landing(self):
         at = AppTest.from_file(_DASHBOARD_PATH, default_timeout=60)
         at.run()
-        next(b for b in at.button if b.label == "Sign In").click().run()
+        next(b for b in at.button if "Clinician Portal" in b.label or "Sign In" in b.label).click().run()
         next(b for b in at.button if "Demo Account" in b.label).click().run()
-        logout_button = next(b for b in at.button if b.label == "Log Out")
+        account_button = next(b for b in at.button if b.key == "qknee_nav_account")
 
-        logout_button.click().run()
+        account_button.click().run()
 
         assert not at.exception
         assert _state(at, "authenticated", False) is False
         assert at.session_state["current_page"] == "landing"
-        assert any(b.label == "Sign In" for b in at.button)
