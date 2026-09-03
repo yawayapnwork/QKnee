@@ -46,15 +46,16 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
-from qknee.ui import auth_view, theme
-from qknee.ui.landing_page import (
-    PRESELECTED_CASE_KEY,
-    VIEW_BENCHMARK,
-    VIEW_DIAGNOSTIC,
-    VIEW_LANDING,
-    VIEW_STATE_KEY,
-    render_landing_page,
-)
+from qknee.ui import theme
+
+# Session-state key for a precomputed-cache case id to pre-select in the
+# NISQ Acceleration Cache toggle on the next rerun (see
+# `render_fast_path_sidebar`). Nothing in this build writes it anymore —
+# the institutional landing page's Demo Sample Quick-Loader that used to
+# set it lives in `extras/ui/landing_page.py`, outside the judged PRD
+# scope — kept as a local constant so that sidebar's read stays a
+# harmless no-op instead of a `NameError`.
+PRESELECTED_CASE_KEY = "qknee_preselected_fastpath_case_id"
 
 # --------------------------------------------------------------------------- #
 # Backend wiring: HTTP API (preferred, when $QKNEE_API_URL is set and
@@ -274,15 +275,13 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     in-process — the two-service (api + ui) docker-compose
     architecture's intended data path.
 
-    `/predict` requires a bearer token for a `radiologist`/`triage_nurse`
-    account (see `qknee.api.auth.require_role`) — this is only ever called
-    from `render_diagnostic_tab`, which already gates on
-    `auth_view.can_run_inference()` before reaching here, so
-    `st.session_state[auth_view.TOKEN_KEY]` is expected to hold a real,
-    role-eligible JWT by this point. Sends it as `Authorization: Bearer
-    <token>`; a missing/expired/insufficient-role token surfaces as a 401
-    `HTTPError`, which `raise_for_status()` below turns into the same
-    "falls back to in-process/mock" path any other API failure takes.
+    `$QKNEE_API_URL` (when set) is expected to point at an unauthenticated
+    or already-network-gated deployment of the API — this build carries no
+    clinician session/token of its own (see `extras/api`/`extras/ui` for
+    the quarantined auth-gated variant), so no `Authorization` header is
+    sent. A backend that requires one will 401, which `raise_for_status()`
+    below turns into the same "falls back to in-process/mock" path any
+    other API failure takes.
 
     The API's `QKneeModel` exposes one unified risk score (no separate
     ACL/MCL/meniscus heads), so `mcl_risk`/`meniscus_risk` are left `None`
@@ -303,8 +302,7 @@ def run_api_inference(slice_2d: np.ndarray, api_url: str) -> InferenceResult:
     buffer = io.BytesIO()
     np.save(buffer, slice_2d)
 
-    token = st.session_state.get(auth_view.TOKEN_KEY)
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    headers: Dict[str, str] = {}
 
     t0 = time.perf_counter()
     response = requests.post(
@@ -608,15 +606,14 @@ def normalize_for_display(slice_2d: np.ndarray) -> np.ndarray:
 
 def render_header() -> None:
     """Renders the single top-level frame shared by every page: page
-    config, the clinical design-system CSS, and the global tab-bar navbar.
-    Called exactly once from `main()` — subpages (`landing_page`, workspace
-    tabs) must never re-render these, or the navbar duplicates on screen.
+    config, the clinical design-system CSS, and the NISQ disclosure
+    banner. Called exactly once from `main()`.
 
-    The NISQ disclosure banner is deliberately NOT rendered here: it now
-    sits directly under the landing page's hero block (see
-    `qknee.ui.landing_page.render_hero`), not globally under the navbar —
-    the workstation/benchmark tabs still carry `theme.NOT_A_DEVICE_FOOTNOTE`
-    in their own page-bottom captions."""
+    No auth-gated navbar here — this build opens straight into the
+    diagnostic workstation (see `main()`); the institutional landing
+    page + clinician sign-in flow live in `extras/ui/`, outside the
+    judged PRD scope (ingestion -> ResNet18 -> PCA -> 4-qubit VQC ->
+    Streamlit UI -> Grad-CAM -> SVM benchmark)."""
     st.set_page_config(
         page_title="Q-Knee Workstation",
         page_icon="🔬",
@@ -624,14 +621,13 @@ def render_header() -> None:
         # Deliberately "expanded", not "collapsed": the sidebar carries
         # this app's only controls for the NISQ Acceleration Cache toggle,
         # Cached Case Replay toggle, and the DICOM/NPY/NIfTI file
-        # uploader — collapsing it by default on every page (including
-        # the workstation, since `set_page_config` is process-wide, not
-        # per-page) would hide those on first load rather than just
-        # trimming the landing page's chrome.
+        # uploader — collapsing it by default would hide those on first
+        # load rather than just trimming chrome.
         initial_sidebar_state="expanded",
     )
     theme.inject_clinical_theme()
-    auth_view.render_global_navbar()
+    st.title("Q-Knee Diagnostic Platform")
+    st.caption("NISQ-Ready Hybrid ML — ResNet18 -> PCA -> 4-Qubit VQC -> Grad-CAM")
     theme.render_disclosure_banner()
 
 
@@ -1235,9 +1231,6 @@ Backend: `{result.backend}`
 # --------------------------------------------------------------------------- #
 
 def render_diagnostic_tab() -> None:
-    authenticated = auth_view.is_authenticated()
-    can_infer = authenticated and auth_view.can_run_inference()
-
     pipeline, acl_model, mcl_model, meniscus_model = load_backend()
     backend_ready = pipeline is not None
 
@@ -1247,11 +1240,9 @@ def render_diagnostic_tab() -> None:
     render_quantum_status(mode, backend_ready, api_url)
 
     # The NISQ Acceleration Cache / Cached Case Replay toggles serve
-    # static, precomputed data — no live model/QNode execution — so, per
-    # the "non-authenticated visitors can browse sample cases" policy,
-    # they're available to everyone. Only a real upload + live/mock
-    # inference run, and the report-export/sign-off actions below, are
-    # gated on `authenticated`/`can_infer`.
+    # static, precomputed data — no live model/QNode execution — while
+    # the `else` branch below runs a real upload + live/mock inference.
+    # No sign-in gate on either path in this build (see `render_header`).
     use_fast_path, fast_path_case = render_fast_path_sidebar()
     use_demo_cache, cached_case = render_demo_cache_sidebar()
     using_sample_case = (use_fast_path and fast_path_case is not None) or (use_demo_cache and cached_case is not None)
@@ -1271,29 +1262,6 @@ def render_diagnostic_tab() -> None:
         # Demo Mode: skip upload/plane/slice/inference entirely and replay a
         # precomputed case straight from disk — genuinely zero-latency.
         display_slice, result = load_cached_case(cached_case)
-    elif not authenticated:
-        st.info(
-            "Browsing in **Observer Mode** — sign in to upload your own study and run live "
-            "diagnostic inference. Toggle the **NISQ Acceleration Cache** in the sidebar (or use a "
-            "Demo Sample Quick-Loader from the institutional landing page) to inspect a real "
-            "pre-scored case right now, no sign-in required.",
-        )
-        if auth_view.safe_button("Sign In", key="diagnostic_tab_signin", is_primary=True):
-            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LOGIN
-            st.rerun()
-        return
-    elif not can_infer:
-        st.warning(
-            "Your **Student Evaluator** account has read-only access. Live diagnostic inference "
-            "requires a **Radiologist** or **Clinical Researcher** account. Toggle the **NISQ "
-            "Acceleration Cache** in the sidebar to review a pre-scored sample case instead, or "
-            "sign in with a clinical-role account.",
-        )
-        if auth_view.safe_button("Return to Institutional Landing", key="diagnostic_tab_readonly_home"):
-            st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
-            st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
-            st.rerun()
-        return
     else:
         st.sidebar.markdown("---")
         st.sidebar.markdown("### Radiological Ingestion Pipeline")
@@ -1390,14 +1358,6 @@ def render_diagnostic_tab() -> None:
 
     with triage_col:
         st.markdown("#### Diagnostic Triage Card")
-        if authenticated:
-            user_info = st.session_state.get(auth_view.USER_INFO_KEY) or {}
-            display_name = user_info.get("full_name") or user_info.get("email", "User")
-            role_label = auth_view.BACKEND_ROLE_TO_UI_LABEL.get(user_info.get("role"), user_info.get("role", "User"))
-            st.caption(f"Dr. {display_name} | {role_label}")
-        else:
-            st.caption("Observer Mode — read-only sample review")
-
         render_risk_gauge("ACL", result.acl_risk)
         render_risk_gauge("MCL", result.mcl_risk)
         render_risk_gauge("Medial Meniscus", result.meniscus_risk)
@@ -1408,20 +1368,12 @@ def render_diagnostic_tab() -> None:
         render_latency_metrics(result)
         st.markdown("---")
         if display_slice is not None:
-            if authenticated:
-                st.markdown("##### Clinical Action Bar")
-                report_col1, report_col2 = st.columns(2)
-                with report_col1:
-                    render_report_download(display_slice, result)
-                with report_col2:
-                    render_markdown_report_download(display_slice, result)
-                auth_view.safe_button(
-                    "Sign & Lock Study", key="qknee_sign_lock_dashboard",
-                    help="Locks this study's diagnostic session under the reviewing radiologist's "
-                         "attestation. Confirmatory over-read is required before clinical release.",
-                )
-            else:
-                st.caption("Sign in to export a structured PDF/Markdown report or sign & lock this study.")
+            st.markdown("##### Clinical Action Bar")
+            report_col1, report_col2 = st.columns(2)
+            with report_col1:
+                render_report_download(display_slice, result)
+            with report_col2:
+                render_markdown_report_download(display_slice, result)
 
     st.markdown("---")
     st.caption(
@@ -1441,36 +1393,6 @@ def main() -> None:
     # call is what actually does the pre-warming.
     precomputed_cache = load_precomputed_cache()
 
-    # `qknee.ui.landing_page`'s CTAs / this module's own workspace-tab
-    # buttons write `VIEW_STATE_KEY` ("landing"/"diagnostic"/"benchmark")
-    # as a *destination hint*, independently of authentication — that
-    # module knows nothing about auth. `auth_view`'s `CURRENT_PAGE_KEY` is
-    # the authoritative top-level page router. Reconciling the two here
-    # (rather than in landing_page.py or auth_view.py) is what sends any
-    # visitor who clicks a workspace-bound CTA (Launch Diagnostic
-    # Workstation, a Demo Sample Quick-Loader, Review Benchmarks) straight
-    # into the workspace on the tab they asked for.
-    #
-    # Both workspace tabs are reachable unauthenticated: the Benchmarks
-    # tab is static precomputed data (no live inference), and the
-    # Diagnostic tab's own internal gate (`render_diagnostic_tab`) allows
-    # unauthenticated "Observer Mode" browsing of precomputed sample
-    # cases — it only requires sign-in for a real file upload / live
-    # inference run and for report export/sign-off, not for reaching the
-    # tab itself. So this router never needs to redirect to login on the
-    # visitor's behalf; a visitor who does want to sign in reaches
-    # `PAGE_LOGIN` via an explicit "Sign In" action instead.
-    #
-    # This reconciliation MUST happen before `render_header()` — the top
-    # frame's navbar reads `CURRENT_PAGE_KEY` to highlight the active pill,
-    # and would otherwise flash the pre-redirect destination for one rerun.
-    requested_view = st.session_state.get(VIEW_STATE_KEY, VIEW_LANDING)
-    current_page = st.session_state.get(auth_view.CURRENT_PAGE_KEY, auth_view.PAGE_LANDING)
-
-    if requested_view != VIEW_LANDING and current_page not in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
-        current_page = auth_view.PAGE_WORKSPACE
-        st.session_state[auth_view.CURRENT_PAGE_KEY] = current_page
-
     render_header()
     if precomputed_cache is not None:
         st.sidebar.caption(f"Pre-warmed: {precomputed_cache.get('n_cases', 0)} precomputed case(s) resident in memory.")
@@ -1483,31 +1405,10 @@ def main() -> None:
     # and nests the separately-rendered widgets in between.
     st.markdown('<div class="clinical-container">', unsafe_allow_html=True)
 
-    if current_page in (auth_view.PAGE_LOGIN, auth_view.PAGE_SIGNUP):
-        auth_view.render_auth_page(default_tab=current_page)
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    if current_page != auth_view.PAGE_WORKSPACE:
-        render_landing_page()
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Return to Institutional Landing", use_container_width=True):
-        st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
-        st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
-        st.rerun()
-
-    # `st.tabs()` always opens on its first-listed tab with no programmatic
-    # way to force a different one active — so a landing-page CTA that
-    # wants to land on a specific tab gets there by putting that tab's
-    # label first, rather than always defaulting to Diagnostic View.
+    # No institutional landing page / sign-in routing in this build (see
+    # `render_header`) — every visitor opens straight into the workspace.
     diagnostic_label, benchmark_label = "Diagnostic Workstation", "Quantitative Benchmark Analysis"
-    tab_labels = (
-        [benchmark_label, diagnostic_label] if requested_view == VIEW_BENCHMARK
-        else [diagnostic_label, benchmark_label]
-    )
+    tab_labels = [diagnostic_label, benchmark_label]
     tabs_by_label = dict(zip(tab_labels, st.tabs(tab_labels)))
 
     with tabs_by_label[diagnostic_label]:

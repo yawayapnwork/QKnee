@@ -58,11 +58,10 @@ from qknee.models.qknee_model import QKneeModel, load_checkpoint, save_checkpoin
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier
 from qknee.models.vqc_data_reuploading import DataReuploadingVQC
-from qknee.models.vqc_strongly_entangling import StronglyEntanglingVQCClassifier
 
 logger = get_logger(__name__)
 
-ANSATZ_CHOICES = ("basic", "data_reuploading", "strongly_entangling")
+ANSATZ_CHOICES = ("basic", "data_reuploading")
 PLANE_CHOICES = ("sagittal", "coronal", "axial")
 
 
@@ -89,8 +88,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Anatomical plane subdirectory to train on: <dataset_dir>/<plane>/train/... "
                               "if that subdirectory exists, else --dataset_dir is used as-is.")
     parser.add_argument("--ansatz", choices=ANSATZ_CHOICES, default="basic",
-                         help="VQC ansatz: 'basic' (VQCClassifier), 'data_reuploading' (DataReuploadingVQC), "
-                              "or 'strongly_entangling' (StronglyEntanglingVQCClassifier).")
+                         help="VQC ansatz: 'basic' (VQCClassifier) or 'data_reuploading' (DataReuploadingVQC).")
     parser.add_argument("--epochs", type=int, default=None,
                          help="Full-batch gradient steps (default: config.yaml's training.n_epochs).")
     parser.add_argument("--batch_size", type=int, default=None,
@@ -202,15 +200,13 @@ def resolve_dataset_dir(dataset_dir: Path, plane: Optional[str]) -> Path:
 # --------------------------------------------------------------------------- #
 
 def build_vqc(ansatz: str, n_qubits: int, n_layers: int) -> nn.Module:
-    """Constructs the requested VQC ansatz. All three share the same
-    `(B, n_qubits) -> (B, 1)` sigmoid-probability interface, so any of them
+    """Constructs the requested VQC ansatz. Both share the same
+    `(B, n_qubits) -> (B, 1)` sigmoid-probability interface, so either
     plugs directly into `QKneeModel`'s `vqc=` argument."""
     if ansatz == "basic":
         return VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
     elif ansatz == "data_reuploading":
         return DataReuploadingVQC(n_qubits=n_qubits, n_layers=n_layers)
-    elif ansatz == "strongly_entangling":
-        return StronglyEntanglingVQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
     raise TrainingError(f"Unknown --ansatz '{ansatz}'; expected one of {ANSATZ_CHOICES}")
 
 

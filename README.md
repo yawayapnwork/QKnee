@@ -12,14 +12,15 @@ license: mit
 
 # Q-Knee
 
-**Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via FastAPI and a Streamlit clinical dashboard.**
+**Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via a Streamlit clinical dashboard.**
+
+> This README covers the PRD-scoped pipeline: ingestion → ResNet18 → PCA → 4-qubit VQC → Streamlit UI → Grad-CAM → SVM benchmark. A FastAPI backend, clinician auth, multi-service Docker/cloud deploy config, and a few alternate model variants were quarantined (moved, not deleted) to [`extras/`](extras/README.md) — see that directory's README for what's there and why.
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](#)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.13-ee4c2c)](#)
 [![PennyLane](https://img.shields.io/badge/PennyLane-0.45-9c27b0)](#)
 [![Tests](https://img.shields.io/badge/tests-pytest-0a9edc)](#)
-[![Docker](https://img.shields.io/badge/docker-ready-2496ed)](#)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#)
 
 > ⚠️ **Research prototype.** Q-Knee is not a certified medical device and is not validated for clinical use. All metrics below are measured on a synthetic benchmark dataset (see [`qknee/models/evaluate.py`](qknee/models/evaluate.py)) used to exercise the pipeline end-to-end — they demonstrate that the quantum stage is competitive with classical baselines on this task shape, not real-world diagnostic accuracy. Retrain and clinically validate on a real, IRB-approved MRI dataset before any clinical use.
@@ -81,7 +82,7 @@ python scripts/generate_deck_assets.py  # pitch-deck-ready figures (.png + .svg)
 | **2. Spatial Feature Extraction** | [`qknee/models/resnet_extractor.py`](qknee/models/resnet_extractor.py) | A frozen, pretrained `resnet18(weights=ResNet18_Weights.DEFAULT)` with its `fc` head stripped, tapping `avgpool` directly for a 512-D embedding per slice (multi-slice volumes are mean-pooled into one embedding). |
 | **3. Dimensionality Reduction** | [`qknee/models/pca_reducer.py`](qknee/models/pca_reducer.py) | `StandardScaler → PCA(n_components=4) → MinMaxScaler(0, 2π)`, fit offline and persisted with `joblib` (`pca_scaler.pkl`) for consistent inference. |
 | **4. 4-Qubit VQC** | [`qknee/models/vqc.py`](qknee/models/vqc.py) | Continuous **angle encoding** (RX then RY per qubit) of the 4 PCA scalars, followed by 3 variational layers (RX/RY/RZ + a CNOT entangling ring), measuring PauliZ expectation values, wrapped as a `qml.qnn.TorchLayer` so it trains inside a normal PyTorch optimizer loop. |
-| **5. Explainable UI** | [`qknee/xai/gradcam.py`](qknee/xai/gradcam.py), [`qknee/ui/dashboard.py`](qknee/ui/dashboard.py) | Grad-CAM on ResNet18's `layer4` highlights the anatomical regions driving the embedding; the Streamlit dashboard and FastAPI response both surface this as an overlay. |
+| **5. Explainable UI** | [`qknee/xai/gradcam.py`](qknee/xai/gradcam.py), [`qknee/ui/dashboard.py`](qknee/ui/dashboard.py) | Grad-CAM on ResNet18's `layer4` highlights the anatomical regions driving the embedding; the Streamlit dashboard surfaces this as an overlay. |
 
 All five stages are chained by [`qknee/models/pipeline.py`](qknee/models/pipeline.py) (`PipelineRunner`) — the single entry point downstream consumers should use, with shape/dtype/range validation between every pair of stages. The end-to-end differentiable `nn.Module` (for joint training) is [`qknee/models/qknee_model.py`](qknee/models/qknee_model.py) (`QKneeModel`). All hyperparameters and paths are centralized in [`qknee/config/config.yaml`](qknee/config/config.yaml), loaded via `qknee/config/loader.py`.
 
@@ -92,7 +93,6 @@ All five stages are chained by [`qknee/models/pipeline.py`](qknee/models/pipelin
 ### Prerequisites
 
 - Python 3.11
-- (Optional) Docker + Docker Compose, for containerized deployment
 
 ### 1. Clone and create a virtual environment
 
@@ -136,9 +136,6 @@ python -m qknee.models.pipeline
 # Train + evaluate against classical baselines, save ROC/confusion-matrix figures
 python -m qknee.models.evaluate
 
-# Launch the FastAPI backend (http://localhost:8000, docs at /docs)
-uvicorn qknee.api.server:app --reload --port 8000
-
 # Launch the Streamlit clinical dashboard (http://localhost:8501)
 streamlit run qknee/ui/dashboard.py
 
@@ -147,29 +144,11 @@ pytest                    # full suite
 pytest -m "not slow"      # skip the real ResNet18/PennyLane latency benchmark
 ```
 
-### 5. Run with Docker
-
-```bash
-# Drop a fitted pca_scaler.pkl (and optionally a qknee_model.pt checkpoint)
-# into ./qknee/artifacts/ first — it's bind-mounted into both containers.
-docker compose up --build
-```
-
-This starts:
-
-| Service    | URL                          | Description |
-|------------|-------------------------------|---|
-| `api`      | http://localhost:8000/docs   | FastAPI backend |
-| `ui`       | http://localhost:8501         | Streamlit dashboard |
-| `mlflow`   | http://localhost:5000         | MLflow tracking server |
-
-See [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) for the CPU-optimized multi-stage build details.
+> A FastAPI backend, Docker/docker-compose setup, and Render/Vercel deploy config exist in [`extras/`](extras/README.md) (quarantined — outside the judged PRD scope) if you want the multi-service architecture back.
 
 ---
 
-## API usage
-
-### Programmatic (Python)
+## Programmatic usage (Python)
 
 ```python
 from qknee.models.pipeline import PipelineRunner
@@ -200,30 +179,7 @@ with torch.no_grad():
     risk_score = model(image)        # (1, 1) tensor, in [0, 1]
 ```
 
-### REST (FastAPI)
-
-Start the server, then:
-
-```bash
-curl -X POST http://localhost:8000/predict \
-  -F "file=@slice.npy;filename=slice.npy"
-```
-
-```json
-{
-  "risk_score": 0.7421,
-  "diagnosis": "Tear Detected",
-  "gradcam_heatmap": "iVBORw0KGgoAAAANSUhEUgAA...",
-  "backend": "live"
-}
-```
-
-- `risk_score` — float in `[0, 1]`
-- `diagnosis` — `"Tear Detected"` if `risk_score >= 0.5`, else `"Normal"`
-- `gradcam_heatmap` — base64-encoded PNG of the Grad-CAM overlay (decode with `base64.b64decode(...)`)
-- `backend` — `"live"` if the trained model ran, `"mock"` if the API fell back to a deterministic mock (no `pca_scaler.pkl` found)
-
-Check readiness with `GET /health`; interactive docs are auto-generated at `/docs`.
+A REST wrapper (FastAPI, `POST /predict` → the same `risk_score`/`diagnosis`/`gradcam_heatmap` payload) exists in [`extras/api/`](extras/README.md) if you need HTTP access instead of importing `qknee` directly.
 
 ---
 
@@ -239,10 +195,17 @@ qknee/
 │   ├── dataset.py                 # MRIDataset, DataLoader builders, train/eval transforms
 │   └── ingestion.py                # DataIngestion: raw input -> normalized tensor batch
 ├── models/
-│   ├── resnet_extractor.py        # frozen ResNet18 -> 512-D embedding
+│   ├── resnet_extractor.py        # frozen ResNet18 -> 512-D embedding (+ an optional ONNX
+│   │                               # Runtime backend, ONNXFeatureExtractor — see extras/README.md)
 │   ├── pca_reducer.py             # StandardScaler -> PCA(4) -> [0, 2pi] angle scaling
-│   ├── vqc.py                     # 4-qubit PennyLane VQC as a torch.nn.Module
-│   ├── vqc_strongly_entangling.py # alternate VQC using StronglyEntanglingLayers
+│   ├── vqc.py                     # 4-qubit, 3-layer PennyLane VQC as a torch.nn.Module —
+│   │                               # the ansatz config.yaml's quantum.n_qubits/n_layers names
+│   ├── vqc_data_reuploading.py    # alternate classifier backbone (pipeline.py's
+│   │                               # classifier_backbone="data_reuploading" option)
+│   ├── vqc_multitarget.py         # multi-label quantum-classical head for the 12-condition
+│   │                               # RSNA Knee task (qknee_model.py's QKneeMultiTargetModel)
+│   ├── quantum_autoencoder.py     # alternate encoder (pipeline.py's
+│   │                               # encoder_type="quantum_autoencoder" option)
 │   ├── qknee_model.py             # QKneeModel: unified ResNet18+PCA+VQC nn.Module,
 │   │                               # training loop, checkpoint save/load
 │   ├── pipeline.py                # PipelineRunner: orchestrates all 5 stages, with
@@ -251,10 +214,9 @@ qknee/
 ├── xai/
 │   └── gradcam.py                 # Grad-CAM on ResNet18 layer4 + OpenCV overlay
 ├── ui/
-│   ├── dashboard.py                # Streamlit clinical dashboard (tri-planar, dual risk heads)
+│   ├── dashboard.py                # Streamlit clinical dashboard — opens straight into the
+│   │                                # workstation, no sign-in (tri-planar, dual risk heads)
 │   └── analysis_app.py             # Streamlit single-scan analysis app
-├── api/
-│   └── server.py                   # FastAPI backend (/predict, /health)
 ├── tests/
 │   ├── conftest.py                 # shared fixtures (fitted reducer, ResNet, QKneeModel)
 │   ├── test_feature_extractor.py   # (B, 512) shape + PCA [0, 2pi] bound tests
@@ -265,13 +227,18 @@ qknee/
 
 scripts/
 ├── generate_deck_assets.py         # pitch-deck figures: ROC+efficiency chart, VQC circuit diagram, clinical case walkthrough (.png+.svg in qknee/artifacts/deck_figures/)
-└── export_onnx.py                  # exports ResNet18FeatureExtractor to ONNX (see ONNXFeatureExtractor)
+└── run_benchmark.py                # SVM / linear-probe / VQC comparison, saves benchmark_results.json
+
+extras/                              # quarantined — outside the judged PRD scope; moved, not
+│                                     # deleted. See extras/README.md for the full inventory.
+├── api/                             # FastAPI backend (was qknee/api/) + JWT/Argon2 auth
+├── ui/                              # clinician sign-in + institutional landing page
+├── deployment/                      # Dockerfile, docker-compose*.yml, render.yaml, vercel.json
+├── scripts/                         # export_onnx.py, generate_kaggle_submission.py
+├── models/                          # vqc_strongly_entangling.py (alternate ansatz)
+└── tests/                           # tests for everything above
 
 .streamlit/config.toml              # dark theme config
-Dockerfile                          # multi-stage, CPU-only PyTorch, non-root runtime
-docker-compose.yml                  # api + ui + mlflow services, shared app image
-docker-compose.override.yml         # local-dev overrides: source bind mounts + hot reload
-.dockerignore
 requirements.txt                    # runtime dependencies (+ pyyaml)
 requirements-dev.txt                # + pytest
 pytest.ini                          # slow/benchmark markers, testpaths=qknee/tests

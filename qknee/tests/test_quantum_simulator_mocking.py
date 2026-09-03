@@ -126,9 +126,9 @@ class TestQuantumDeviceSafetyGuard:
     verifies it actually falls back to `default.qubit` (never crashes the
     caller) when the configured device/plugin is unavailable, memory-
     exhausted, or otherwise broken, and that every VQC module in this
-    project (`vqc.py`, `vqc_data_reuploading.py`, `vqc_multitarget.py`,
-    `vqc_strongly_entangling.py`) actually uses it rather than calling
-    `qml.device(...)` directly and unguarded."""
+    project (`vqc.py`, `vqc_data_reuploading.py`, `vqc_multitarget.py`)
+    actually uses it rather than calling `qml.device(...)` directly and
+    unguarded."""
 
     def test_default_qubit_loads_normally(self):
         from qknee.models.vqc import load_quantum_device
@@ -187,7 +187,6 @@ class TestQuantumDeviceSafetyGuard:
             ("qknee.models.vqc", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
             ("qknee.models.vqc_data_reuploading", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
             ("qknee.models.vqc_multitarget", "build_multi_observable_qnode", {"n_qubits": 4, "n_layers": 1}),
-            ("qknee.models.vqc_strongly_entangling", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
         ],
     )
     def test_every_vqc_ansatz_builds_successfully_when_the_configured_device_is_broken(
@@ -198,8 +197,7 @@ class TestQuantumDeviceSafetyGuard:
         name and confirms `build_qnode`/`build_multi_observable_qnode`
         still succeeds (falls back to `default.qubit` via
         `load_quantum_device`), rather than raising straight out of a
-        direct, unguarded `qml.device(...)` call — the exact gap
-        `vqc_strongly_entangling.py` had before this hardening pass."""
+        direct, unguarded `qml.device(...)` call."""
         import dataclasses
         import importlib
 

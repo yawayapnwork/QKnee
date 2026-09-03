@@ -1,15 +1,18 @@
 """
-Pre-deployment sanity check for Q-Knee (Streamlit Community Cloud /
-Hugging Face Spaces + the optional FastAPI service, e.g. on Render).
+Pre-deployment sanity check for the Q-Knee Streamlit app (Streamlit
+Community Cloud / Hugging Face Spaces).
 
 Runs a sequential set of deployment gates — required-file presence,
 artifact integrity, a real inference pass through `QKneePipeline`, a real
-PDF-generation pass through `qknee.xai.report_generator`, a clean FastAPI
-import/route-mount check, a real subprocess `uvicorn` cold-boot timing
-(catches both a startup-time regression and a matplotlib font-cache
-stall), and a repeated-inference memory-stability smoke test — and prints
-a structured pass/fail report. Exits 0 only if every gate passes, non-zero
-otherwise, so it can be dropped straight into a CI job or a pre-push hook.
+PDF-generation pass through `qknee.xai.report_generator`, Streamlit UI
+path-resolution, and a repeated-inference memory-stability smoke test —
+and prints a structured pass/fail report. Exits 0 only if every gate
+passes, non-zero otherwise, so it can be dropped straight into a CI job
+or a pre-push hook.
+
+The FastAPI-specific gates (import/route-mount check, subprocess
+`uvicorn` cold-boot timing) were quarantined to `extras/` along with
+`qknee/api/` — see `extras/README.md`.
 
 Usage:
     python scripts/verify_deployment.py
@@ -252,67 +255,20 @@ def check_pdf_generation() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Gate 5: FastAPI server import + route mount
-# --------------------------------------------------------------------------- #
-
-def check_fastapi_server() -> str:
-    """Imports `qknee.api.server` fresh (forcing re-execution of module-
-    level code — the FastAPI app construction, CORS middleware, and
-    `include_router` calls — rather than reusing a cached import from
-    elsewhere in this process) and confirms `app` is a real `FastAPI`
-    instance with the expected routes actually mounted."""
-    import importlib
-    import sys as _sys
-
-    module_name = "qknee.api.server"
-    _sys.modules.pop(module_name, None)
-    server_module = importlib.import_module(module_name)
-
-    from fastapi import FastAPI
-
-    app = getattr(server_module, "app", None)
-    if not isinstance(app, FastAPI):
-        raise AssertionError(f"qknee.api.server.app is not a FastAPI instance (got {type(app)})")
-
-    # `app.openapi()`'s generated schema is used instead of walking
-    # `app.routes` directly: recent FastAPI versions wrap an
-    # `include_router()`'d router in an internal `_IncludedRouter` object
-    # rather than flattening its routes into `app.routes` eagerly, so a
-    # plain `route.path` scan silently misses every router-mounted route
-    # (e.g. the whole `/api/v1/auth/*` family here). The OpenAPI schema is
-    # FastAPI's own public, version-stable view of "what's actually
-    # mounted", so it doesn't drift when that internal representation does.
-    mounted_paths = set(app.openapi().get("paths", {}).keys())
-    expected_paths = {
-        "/health",
-        "/predict",
-        "/explain",
-        "/api/v1/auth/signup",
-        "/api/v1/auth/login",
-        "/api/v1/auth/me",
-    }
-    missing_routes = expected_paths - mounted_paths
-    if missing_routes:
-        raise AssertionError(f"expected route(s) not mounted: {sorted(missing_routes)}")
-
-    return f"{len(mounted_paths)} route(s) mounted, including all {len(expected_paths)} expected endpoint(s)"
-
-
-# --------------------------------------------------------------------------- #
-# Gate 5b: Streamlit UI modules resolve their asset paths absolutely,
+# Gate 5: Streamlit UI modules resolve their asset paths absolutely,
 # independent of the process's current working directory.
 # --------------------------------------------------------------------------- #
 
 def check_ui_path_resolution() -> str:
-    """Imports `qknee.ui.dashboard`/`analysis_app`/`landing_page` with the
-    process's CWD deliberately pointed somewhere other than the repo root
-    (a scratch temp dir), and asserts each module's own `_REPO_ROOT`/
-    `_ARTIFACTS_DIR` constants still resolve to the real repo root and a
-    real, existing `qknee/artifacts` directory. `streamlit run` (and every
-    cloud runtime's various ways of invoking it) doesn't guarantee CWD is
-    the repo root, so a bare relative `Path("qknee/artifacts/...")` would
+    """Imports `qknee.ui.dashboard`/`analysis_app` with the process's CWD
+    deliberately pointed somewhere other than the repo root (a scratch
+    temp dir), and asserts each module's own `_REPO_ROOT`/`_ARTIFACTS_DIR`
+    constants still resolve to the real repo root and a real, existing
+    `qknee/artifacts` directory. `streamlit run` (and every cloud
+    runtime's various ways of invoking it) doesn't guarantee CWD is the
+    repo root, so a bare relative `Path("qknee/artifacts/...")` would
     silently resolve to nothing in exactly the deployment scenario this
-    gate reproduces; these three modules instead anchor on
+    gate reproduces; these modules instead anchor on
     `Path(__file__).resolve().parents[2]`, which this gate confirms
     actually holds.
     """
@@ -321,7 +277,7 @@ def check_ui_path_resolution() -> str:
     import sys as _sys
     import tempfile
 
-    module_names = ["qknee.ui.dashboard", "qknee.ui.analysis_app", "qknee.ui.landing_page"]
+    module_names = ["qknee.ui.dashboard", "qknee.ui.analysis_app"]
     original_cwd = os.getcwd()
     checked = []
     scratch = tempfile.TemporaryDirectory()
@@ -357,87 +313,7 @@ def check_ui_path_resolution() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Gate 6: FastAPI cold-boot time (real subprocess, not just an in-process
-# import — Gate 5 already covers that) — matches Render's own readiness
-# signal ("Application startup complete") and the free-tier <3s/matplotlib-
-# stall requirement this repo is specifically hardened against.
-# --------------------------------------------------------------------------- #
-
-BOOT_TIME_LIMIT_SECONDS = 3.0
-_BOOT_OUTER_TIMEOUT_SECONDS = 20.0  # generous safety net so a genuinely hung boot fails fast instead of wedging the whole run
-
-
-def _find_free_port() -> int:
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def check_fastapi_boot_time() -> str:
-    """Launches `uvicorn qknee.api.server:app` in a real subprocess with
-    `$DATABASE_URL`/`$REDIS_URL` explicitly empty (the free-tier
-    single-node configuration), times how long it takes to print
-    "Application startup complete", and fails if that exceeds
-    `BOOT_TIME_LIMIT_SECONDS` or if matplotlib's font-cache-build message
-    (the multi-second stall `$MPLCONFIGDIR` is set specifically to avoid —
-    see `qknee.api.server`'s module docstring) ever appears in the boot
-    log.
-    """
-    import os
-    import subprocess
-
-    env = os.environ.copy()
-    env["DATABASE_URL"] = ""
-    env["REDIS_URL"] = ""
-    port = _find_free_port()
-
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "qknee.api.server:app", "--host", "127.0.0.1", "--port", str(port)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env, cwd=str(ROOT_DIR),
-    )
-    lines: List[str] = []
-    ready = False
-    elapsed = 0.0
-    try:
-        start = time.perf_counter()
-        deadline = start + _BOOT_OUTER_TIMEOUT_SECONDS
-        while time.perf_counter() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.02)
-                continue
-            lines.append(line)
-            if "Application startup complete" in line:
-                ready = True
-                break
-        elapsed = time.perf_counter() - start
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-    log = "".join(lines)
-    if not ready:
-        raise AssertionError(
-            f"server never printed 'Application startup complete' within "
-            f"{_BOOT_OUTER_TIMEOUT_SECONDS:.0f}s; boot log:\n{textwrap_indent(log[-2000:])}"
-        )
-    if "font cache" in log.lower():
-        raise AssertionError(f"matplotlib font-cache build detected during boot (MPLCONFIGDIR not effective):\n{textwrap_indent(log)}")
-    if elapsed > BOOT_TIME_LIMIT_SECONDS:
-        raise AssertionError(f"boot took {elapsed:.2f}s, exceeding the {BOOT_TIME_LIMIT_SECONDS:.0f}s limit")
-
-    return f"booted to 'Application startup complete' in {elapsed:.2f}s (limit {BOOT_TIME_LIMIT_SECONDS:.0f}s); no matplotlib font-cache stall"
-
-
-# --------------------------------------------------------------------------- #
-# Gate 7: repeated-inference memory stability (leak smoke test)
+# Gate 6: repeated-inference memory stability (leak smoke test)
 # --------------------------------------------------------------------------- #
 
 def check_inference_memory_stability() -> str:
@@ -515,9 +391,7 @@ GATES: List[tuple] = [
     ("Artifact directory integrity", check_artifact_assets),
     ("QKneePipeline inference pass", check_pipeline_inference),
     ("PDF report generation", check_pdf_generation),
-    ("FastAPI server import + route mount", check_fastapi_server),
     ("Streamlit UI path resolution (CWD-independent)", check_ui_path_resolution),
-    ("FastAPI cold-boot time (<3s, no matplotlib stall)", check_fastapi_boot_time),
     ("Repeated-inference memory stability", check_inference_memory_stability),
 ]
 

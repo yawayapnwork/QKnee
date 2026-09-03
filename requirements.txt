@@ -60,53 +60,12 @@ reportlab>=4.0.0
 nibabel>=5.1.0
 SimpleITK>=2.3.0
 
-# API-server-only (qknee/api/*) — unused by the Streamlit dashboard itself
-# (qknee/ui/dashboard.py, wrapped by streamlit_app.py, the app_file for
-# both cloud targets), but kept here since this file is shared with the
-# Docker Compose "api" service. All three are pure-Python/small wheels,
-# not a spin-up memory/timeout risk.
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-python-multipart>=0.0.9
-
-# qknee/api/auth.py — JWT signing/verification + password hashing.
-# Deliberately PyJWT + argon2-cffi (Argon2id), NOT python-jose[cryptography]
-# / passlib[bcrypt]:
-#   - passlib[bcrypt]: passlib 1.7.4's bcrypt backend reads a
-#     `bcrypt.__about__` attribute that bcrypt>=4.1 removed, breaking every
-#     hash()/verify() call outright (`AttributeError`) — verified against
-#     this project's actual pinned `bcrypt` transitive version, not a
-#     hypothetical. Argon2id is also the current OWASP-recommended default
-#     for new applications, not just a workaround.
-#   - python-jose[cryptography]: no compatibility issue, just redundant —
-#     PyJWT already covers this project's one JWT use case (HS256
-#     sign/verify), and this file's whole premise is minimizing free-tier
-#     footprint, so a second full JWT library sitting unused isn't added
-#     for its own sake.
-argon2-cffi>=23.1.0
-PyJWT>=2.8.0
-
-# PostgreSQL/Redis storage backends (qknee/api/auth.py's UserRepository,
-# qknee/api/server.py's CacheService). Neither actually *requires* a live
-# Postgres/Redis server: with $DATABASE_URL/$REDIS_URL unset (the default
-# on a single-node free-tier deployment), UserRepository falls back to a
-# local `sqlite:///./qknee_users.db` file and redis-py's client is never
-# connected (CacheService degrades to an in-process TTL cache instead).
-# `psycopg2-binary` is pinned unconditionally (rather than left for an
-# operator to install alongside a real `$DATABASE_URL=postgresql://...`)
-# so a Postgres-backed Render deployment works out of the box.
-SQLAlchemy>=2.0.25
-psycopg2-binary>=2.9.9
-sqlmodel>=0.0.16
-redis>=5.0.0
-
-# Safeguard only — qknee.api.auth deliberately does NOT use pydantic's
-# `EmailStr` (which requires this package to even import the module
-# declaring it; a missing/failed install previously crashed the whole API
-# at Render boot with `ImportError: email-validator is not installed`).
-# Email fields are plain `str` validated by a local regex `field_validator`
-# instead, so the app works identically whether or not this resolves.
-email-validator>=2.1.0
+# The FastAPI server (qknee/api/*, now quarantined to extras/api/ — see
+# extras/README.md) and its auth/storage stack (fastapi, uvicorn,
+# python-multipart, argon2-cffi, PyJWT, SQLAlchemy, psycopg2-binary,
+# sqlmodel, redis, email-validator) are no longer part of this package's
+# dependency surface. The PRD-scoped judged demo is the Streamlit
+# dashboard (qknee/ui/dashboard.py, wrapped by streamlit_app.py) only.
 
 # ONNX export/inference (scripts/export_onnx.py, --backend onnx paths) is
 # NOT installed here — onnx/onnxruntime have no prebuilt wheel for newer

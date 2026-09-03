@@ -1,10 +1,8 @@
 """
-Parameterized tests across the three VQC ansatz "topologies":
+Parameterized tests across the two VQC ansatz "topologies":
 
     - qknee.models.vqc.VQCClassifier                        ("basic")
     - qknee.models.vqc_data_reuploading.DataReuploadingVQC   ("data_reuploading")
-    - qknee.models.vqc_strongly_entangling.StronglyEntanglingVQCClassifier
-                                                               ("strongly_entangling")
 
 Covers:
     1. Measurement bounds: the raw Pauli-Z expectation value(s) each
@@ -46,8 +44,6 @@ from qknee.models.vqc import variational_block as basic_variational_block
 from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 from qknee.models.vqc_data_reuploading import reuploading_encoding
 from qknee.models.vqc_data_reuploading import variational_block as reupload_variational_block
-from qknee.models.vqc_strongly_entangling import StronglyEntanglingVQCClassifier
-from qknee.models.vqc_strongly_entangling import angle_encoding as se_angle_encoding
 
 _config = load_config()
 N_QUBITS = _config.quantum.n_qubits
@@ -89,19 +85,6 @@ def _probs_qnode_data_reuploading(n_qubits: int, n_layers: int):
     return circuit
 
 
-def _probs_qnode_strongly_entangling(n_qubits: int, n_layers: int):
-    device = qml.device(_config.quantum.device, wires=n_qubits)
-    wires = list(range(n_qubits))
-
-    @qml.qnode(device)
-    def circuit(inputs, weights):
-        se_angle_encoding(inputs, wires)
-        qml.StronglyEntanglingLayers(weights, wires=wires)
-        return qml.probs(wires=wires)
-
-    return circuit
-
-
 def _basic_weight_args(n_qubits: int, n_layers: int, rng: np.random.Generator) -> List[torch.Tensor]:
     return [torch.from_numpy(rng.uniform(0, 2 * np.pi, size=(n_layers, n_qubits, 3))).float()]
 
@@ -110,11 +93,6 @@ def _data_reuploading_weight_args(n_qubits: int, n_layers: int, rng: np.random.G
     enc = torch.from_numpy(rng.uniform(-1.0, 1.0, size=(n_layers, n_qubits, 4))).float()
     var = torch.from_numpy(rng.uniform(0, 2 * np.pi, size=(n_layers, n_qubits, 3))).float()
     return [enc, var]
-
-
-def _strongly_entangling_weight_args(n_qubits: int, n_layers: int, rng: np.random.Generator) -> List[torch.Tensor]:
-    shape = qml.StronglyEntanglingLayers.shape(n_layers=n_layers, n_wires=n_qubits)
-    return [torch.from_numpy(rng.uniform(0, 2 * np.pi, size=shape)).float()]
 
 
 @dataclass(frozen=True)
@@ -129,10 +107,8 @@ class TopologySpec:
 
     def raw_quantum_layer(self, model: torch.nn.Module):
         """Returns the bare `qml.qnn.TorchLayer` (pre-readout, pre-sigmoid)
-        for `model` — `StronglyEntanglingVQCClassifier` nests it one level
-        deeper (`.circuit.quantum_layer`) than the other two topologies
-        (`.quantum_layer` directly), since its wrapped `VQCModel` has no
-        classical readout of its own."""
+        for `model` — both topologies expose it as `.quantum_layer`
+        directly."""
         if hasattr(model, "quantum_layer"):
             return model.quantum_layer
         return model.circuit.quantum_layer
@@ -141,10 +117,6 @@ class TopologySpec:
 TOPOLOGIES = [
     TopologySpec("basic", VQCClassifier, _probs_qnode_basic, _basic_weight_args),
     TopologySpec("data_reuploading", DataReuploadingVQC, _probs_qnode_data_reuploading, _data_reuploading_weight_args),
-    TopologySpec(
-        "strongly_entangling", StronglyEntanglingVQCClassifier,
-        _probs_qnode_strongly_entangling, _strongly_entangling_weight_args,
-    ),
 ]
 TOPOLOGY_IDS = [t.name for t in TOPOLOGIES]
 
