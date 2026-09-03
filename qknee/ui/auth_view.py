@@ -409,7 +409,7 @@ def render_login_tab() -> None:
         email = st.text_input("Email", key="qknee_login_email")
         password = st.text_input("Password", type="password", key="qknee_login_password")
         submitted = st.form_submit_button(
-            "Authenticate Credentials", type="primary", disabled=locked, width="stretch",
+            "Authenticate Credentials", type="primary", disabled=locked, use_container_width=True,
         )
 
     if submitted and not locked:
@@ -420,7 +420,7 @@ def render_login_tab() -> None:
 
     st.divider()
     st.caption("Just exploring? Skip the form entirely:")
-    if st.button("Sign in with Demo Account", key="qknee_demo_login", width="stretch", disabled=locked):
+    if st.button("Sign in with Demo Account", key="qknee_demo_login", use_container_width=True, disabled=locked):
         _attempt_demo_login()
 
 
@@ -496,7 +496,7 @@ def render_signup_tab() -> None:
         )
         confirm_password = st.text_input("Confirm Password", type="password", key="qknee_register_confirm_password")
         role_label = st.selectbox("Clinical Role", UI_ROLES, key="qknee_register_role")
-        submitted = st.form_submit_button("Request Institutional Access", type="primary", width="stretch")
+        submitted = st.form_submit_button("Request Institutional Access", type="primary", use_container_width=True)
 
     if submitted:
         errors = _validate_register_fields(full_name, email, password, confirm_password)
@@ -620,7 +620,7 @@ def render_global_navbar() -> None:
             for pill_col, (label, view) in zip(pill_cols, nav_items):
                 with pill_col:
                     button_type = "primary" if label == active else "secondary"
-                    if st.button(label, key=f"qknee_nav_pill_{label}", width="stretch", type=button_type):
+                    if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
                         if view is not None:
                             _go_to_workspace_tab(view)
                         else:
@@ -642,11 +642,11 @@ def render_global_navbar() -> None:
                 display_name = user_info.get("full_name") or user_info.get("email", "User")
                 role_label = BACKEND_ROLE_TO_UI_LABEL.get(user_info.get("role"), user_info.get("role", "User"))
                 badge_text = f"Dr. {display_name} | {role_label}"
-                if st.button(_initials(display_name), key="qknee_nav_account", width="stretch",
+                if st.button(_initials(display_name), key="qknee_nav_account", use_container_width=True,
                              help=f"{badge_text} — Sign Out"):
                     _log_out()
             else:
-                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", width="stretch"):
+                if st.button("Clinician Portal", key="qknee_nav_signin", type="primary", use_container_width=True):
                     st.session_state[CURRENT_PAGE_KEY] = PAGE_LOGIN
                     st.rerun()
 

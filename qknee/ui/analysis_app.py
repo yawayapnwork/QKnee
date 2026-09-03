@@ -415,13 +415,13 @@ def render_fast_path_view(case: dict) -> None:
         if overlay is not None:
             snippet = case.get("clinical_text_snippet")
             caption = snippet.splitlines()[0] if snippet else None
-            st.image(overlay, channels="BGR", width="stretch", caption=caption)
+            st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
         else:
             st.warning("No cached attribution overlay available for this case.")
 
     with gauge_col:
         render_prediction_badge(result)
-        st.pyplot(render_risk_gauge(result.risk_score), width="stretch")
+        st.pyplot(render_risk_gauge(result.risk_score), use_container_width=True)
         st.metric("Quantum Circuit Latency (Cached)", format_latency_ms(result.quantum_latency_ms))
         st.caption(f"Backend: **{result.backend}**")
 
@@ -436,7 +436,7 @@ def render_fast_path_view(case: dict) -> None:
             render_condition_risk_badge("Medial Meniscus Tear", result.meniscus_risk)
         fig = render_quantum_attribution_panel(result.pauli_z_expectations)
         if fig is not None:
-            st.pyplot(fig, width="stretch")
+            st.pyplot(fig, use_container_width=True)
             st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩, precomputed offline for this case.")
 
 
@@ -492,7 +492,7 @@ def render_report_download(display_slice: np.ndarray, result: AnalysisResult) ->
         data=pdf_bytes,
         file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
-        width="stretch",
+        use_container_width=True,
         type="primary",
     )
 
@@ -504,7 +504,7 @@ def render_deck_figures_expander() -> None:
     if not figure_path.exists():
         return
     with st.expander("Quantum Circuit Diagram (Reference)"):
-        st.image(str(figure_path), width="stretch")
+        st.image(str(figure_path), use_container_width=True)
 
 
 def _mock_gradcam_heatmap(slice_2d: np.ndarray) -> np.ndarray:
@@ -1171,7 +1171,7 @@ def render_synchronized_tri_plane_view(volume: np.ndarray, contrast: float, slic
             plane_display = apply_contrast(normalize_uint8(plane_slice), contrast)
             plane_display = theme.draw_clinical_crosshair(plane_display)
             caption = theme.slice_depth_caption(plane, index, max_index, primary=is_primary)
-            st.image(plane_display, channels="BGR", width="stretch", clamp=True, caption=caption)
+            st.image(plane_display, channels="BGR", use_container_width=True, clamp=True, caption=caption)
 
 
 def main() -> None:
@@ -1210,7 +1210,7 @@ def main() -> None:
     vol_col1, vol_col2 = st.columns([1, 2])
     with vol_col1:
         run_volumetric_clicked = st.button(
-            "Execute Full-Volume Attribution Sweep", width="stretch",
+            "Execute Full-Volume Attribution Sweep", use_container_width=True,
             help=f"Runs Grad-CAM independently on every slice of the {plane} plane "
                  f"(subsampled to at most {MAX_VOLUMETRIC_SLICES} slices for a deep volume) "
                  "and ranks them by salience — enables instant heatmap scrubbing below.",
@@ -1256,7 +1256,7 @@ def main() -> None:
         st.markdown("##### Viewport A — Raw Ingestion Slice")
         oriented_slice = theme.draw_orientation_markers(display_slice, plane)
         st.image(
-            oriented_slice, channels="BGR", width="stretch",
+            oriented_slice, channels="BGR", use_container_width=True,
             caption=theme.slice_depth_caption(plane, slice_index, max_index, primary=True),
         )
 
@@ -1277,7 +1277,7 @@ def main() -> None:
 
         if volumetric_overlay is not None:
             st.image(
-                volumetric_overlay, channels="BGR", width="stretch",
+                volumetric_overlay, channels="BGR", use_container_width=True,
                 caption=f"Slice {slice_index + 1} — synced from full-volume sweep "
                         f"({colormap_name}, opacity={alpha * 100:.0f}%)",
             )
@@ -1285,12 +1285,12 @@ def main() -> None:
             from qknee.xai.gradcam import overlay_heatmap
 
             overlay = overlay_heatmap(result.gradcam_heatmap, display_slice, alpha=alpha, colormap=colormap_value)
-            st.image(overlay, channels="BGR", width="stretch", caption="Regions driving the predicted risk score")
+            st.image(overlay, channels="BGR", use_container_width=True, caption="Regions driving the predicted risk score")
         elif result is not None and result.gradcam_overlay is not None:
             st.image(
                 result.gradcam_overlay,
                 channels="BGR",
-                width="stretch",
+                use_container_width=True,
                 caption="Regions driving the predicted risk score",
             )
         else:
@@ -1299,7 +1299,7 @@ def main() -> None:
 
     with risk_col:
         st.markdown("##### Quantitative Risk Assessment")
-        run_clicked = st.button("Execute Diagnostic Inference", type="primary", width="stretch")
+        run_clicked = st.button("Execute Diagnostic Inference", type="primary", use_container_width=True)
 
         if run_clicked:
             with st.spinner("Executing radiological ingestion pipeline and quantum kernel..."):
@@ -1328,7 +1328,7 @@ def main() -> None:
         pauli_z = result.pauli_z_expectations if result is not None else None
         fig = render_quantum_attribution_panel(pauli_z)
         if fig is not None:
-            st.pyplot(fig, width="stretch")
+            st.pyplot(fig, use_container_width=True)
             st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩ ∈ [-1.0, 1.0], mapping Hilbert-space rotations "
                        "directly to feature impact, read before the classical readout layer.")
         else:
@@ -1338,7 +1338,7 @@ def main() -> None:
         st.markdown("##### Action Bar")
         if result is not None:
             render_report_download(display_slice, result)
-            st.button("Sign & Lock Study", width="stretch",
+            st.button("Sign & Lock Study", use_container_width=True,
                       help="Locks this study's diagnostic session under the reviewing radiologist's "
                            "attestation. Confirmatory over-read is required before clinical release.")
         else:

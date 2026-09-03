@@ -453,7 +453,7 @@ def render_navbar() -> None:
                     unsafe_allow_html=True,
                 )
             with btn_col:
-                if st.button("Launch Workstation →", key="qknee_orthoc_launch_nav", width="stretch"):
+                if st.button("Launch Workstation →", key="qknee_orthoc_launch_nav", use_container_width=True):
                     st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
                     st.rerun()
 
@@ -488,7 +488,7 @@ def render_hero() -> None:
         )
         btn_col, _ = st.columns([1, 2.2])
         with btn_col:
-            if st.button("Evaluate Scans Now", key="qknee_orthoc_hero_cta", width="stretch"):
+            if st.button("Evaluate Scans Now", key="qknee_orthoc_hero_cta", use_container_width=True):
                 st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
                 st.rerun()
 
@@ -580,7 +580,7 @@ entangling gates), then every qubit is measured in the Pauli-Z basis.
                 """
             )
             if CIRCUIT_DIAGRAM_PATH.exists():
-                st.image(str(CIRCUIT_DIAGRAM_PATH), caption="4-Qubit Variational Circuit — Q-Knee", width="stretch")
+                st.image(str(CIRCUIT_DIAGRAM_PATH), caption="4-Qubit Variational Circuit — Q-Knee", use_container_width=True)
             if latency_ms is not None:
                 st.caption(f"Measured VQC latency: {latency_ms:.1f} ms/sample (`scripts/run_benchmark.py`).")
         with step3_tab:
@@ -593,7 +593,7 @@ attribution breakdown; `qknee.xai.report_generator` compiles both into a downloa
             )
             if CLINICAL_CASE_WALKTHROUGH_PATH.exists():
                 st.image(str(CLINICAL_CASE_WALKTHROUGH_PATH), caption="Clinical Case Walkthrough — Slice to Diagnosis",
-                          width="stretch")
+                          use_container_width=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -707,13 +707,13 @@ def render_validation_cohort() -> None:
                 st.write("")
 
                 preview_key = f"_qknee_cohort_preview_{case_id}"
-                if st.button("Load & Inspect", key=f"qknee_cohort_btn_{case_id}", width="stretch"):
+                if st.button("Load & Inspect", key=f"qknee_cohort_btn_{case_id}", use_container_width=True):
                     st.session_state[preview_key] = True
 
                 if st.session_state.get(preview_key):
                     overlay_bgr = _decode_case_overlay(case)
                     if overlay_bgr is not None:
-                        st.image(overlay_bgr[:, :, ::-1], caption="Grad-CAM Saliency Overlay", width="stretch")
+                        st.image(overlay_bgr[:, :, ::-1], caption="Grad-CAM Saliency Overlay", use_container_width=True)
                     else:
                         st.warning("Attribution overlay unavailable for this case.")
 
@@ -727,7 +727,7 @@ def render_validation_cohort() -> None:
                     st.caption(_clinical_indication(case))
 
                     if st.button("Open in Diagnostic Workstation", key=f"qknee_cohort_launch_{case_id}",
-                                 width="stretch"):
+                                 use_container_width=True):
                         st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
                         st.rerun()
 

@@ -721,9 +721,9 @@ def render_gradcam_panel(display_slice: np.ndarray, result: InferenceResult) -> 
             result.gradcam_heatmap, display_slice,
             alpha=opacity_pct / 100.0, colormap=theme.CLINICAL_COLORMAPS[colormap_name],
         )
-        st.image(overlay, channels="BGR", width="stretch", caption=caption)
+        st.image(overlay, channels="BGR", use_container_width=True, caption=caption)
     elif result.gradcam_overlay is not None:
-        st.image(result.gradcam_overlay, channels="BGR", width="stretch", caption=caption)
+        st.image(result.gradcam_overlay, channels="BGR", use_container_width=True, caption=caption)
         st.caption("Overlay controls unavailable — this backend only returns a pre-rendered overlay.")
     else:
         st.info("Attribution overlay unavailable for this slice.")
@@ -763,7 +763,7 @@ def render_quantum_attribution_panel(pauli_z_expectations: Optional[np.ndarray])
         spine.set_color(theme.BORDER_GREY)
 
     fig.tight_layout()
-    st.pyplot(fig, width="stretch")
+    st.pyplot(fig, use_container_width=True)
     st.caption("Per-qubit Pauli-Z expectation ⟨Z⟩ (ACL circuit), read directly from the quantum "
                "circuit before the classical readout layer.")
 
@@ -1050,7 +1050,7 @@ def render_benchmark_tab() -> None:
     with roc_col:
         st.markdown("#### ROC-AUC Comparison")
         if BENCHMARK_ROC_PATH.exists():
-            st.image(str(BENCHMARK_ROC_PATH), width="stretch")
+            st.image(str(BENCHMARK_ROC_PATH), use_container_width=True)
         else:
             roc_df = pd.DataFrame({
                 "Model": [m["name"] for m in models],
@@ -1071,7 +1071,7 @@ def render_benchmark_tab() -> None:
     circuit_diagram_path = DECK_FIGURES_DIR / "circuit_diagram.png"
     if circuit_diagram_path.exists():
         with st.expander("Quantum Circuit Diagram (Reference)"):
-            st.image(str(circuit_diagram_path), width="stretch")
+            st.image(str(circuit_diagram_path), use_container_width=True)
 
     st.markdown("#### Full Metrics")
     metrics_df = pd.DataFrame([
@@ -1086,7 +1086,7 @@ def render_benchmark_tab() -> None:
         }
         for m in models
     ])
-    st.dataframe(metrics_df, width="stretch", hide_index=True)
+    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
 
 def render_report_download(display_slice: np.ndarray, result: InferenceResult) -> None:
@@ -1150,7 +1150,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
         data=pdf_bytes,
         file_name=f"qknee_diagnostic_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
         mime="application/pdf",
-        width="stretch",
+        use_container_width=True,
         type="primary",
     )
 
@@ -1293,7 +1293,7 @@ def render_diagnostic_tab() -> None:
             with col:
                 is_primary = plane_name == view
                 caption = theme.slice_depth_caption(plane_name, p_index, p_max, primary=is_primary)
-                st.image(p_display, channels="BGR", width="stretch", clamp=True, caption=caption)
+                st.image(p_display, channels="BGR", use_container_width=True, clamp=True, caption=caption)
         st.markdown("---")
 
     gradcam_col, results_col, attribution_col = st.columns([1, 1, 1])
@@ -1316,7 +1316,7 @@ def render_diagnostic_tab() -> None:
         st.markdown("---")
         if display_slice is not None:
             render_report_download(display_slice, result)
-            st.button("Sign & Lock Study", width="stretch", key="qknee_sign_lock_dashboard",
+            st.button("Sign & Lock Study", use_container_width=True, key="qknee_sign_lock_dashboard",
                       help="Locks this study's diagnostic session under the reviewing radiologist's "
                            "attestation. Confirmatory over-read is required before clinical release.")
 
@@ -1393,7 +1393,7 @@ def main() -> None:
         return
 
     st.sidebar.markdown("---")
-    if st.sidebar.button("Return to Institutional Landing", width="stretch"):
+    if st.sidebar.button("Return to Institutional Landing", use_container_width=True):
         st.session_state[VIEW_STATE_KEY] = VIEW_LANDING
         st.session_state[auth_view.CURRENT_PAGE_KEY] = auth_view.PAGE_LANDING
         st.rerun()
