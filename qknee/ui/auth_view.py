@@ -42,6 +42,7 @@ RESEARCH PROTOTYPE — not a certified medical device. Not for clinical use.
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -619,8 +620,10 @@ def render_global_navbar() -> None:
             ]
             for pill_col, (label, view) in zip(pill_cols, nav_items):
                 with pill_col:
-                    button_type = "primary" if label == active else "secondary"
-                    if st.button(label, key=f"qknee_nav_pill_{label}", use_container_width=True, type=button_type):
+                    label = str(label)
+                    btn_type = "primary" if label == active else "secondary"
+                    clean_key = f"qknee_nav_pill_{re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')}"
+                    if st.button(label, key=clean_key, use_container_width=True, type=btn_type):
                         if view is not None:
                             _go_to_workspace_tab(view)
                         else:
