@@ -42,7 +42,12 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from qknee.ui.dashboard import main
-from qknee.ui.landing_page import inject_orthoc_theme
+
+try:
+    from qknee.ui.landing_page import inject_orthoc_theme
+except ImportError:
+    def inject_orthoc_theme() -> None:
+        pass  # Graceful no-op fallback if landing_page.py is reorganized.
 
 if __name__ == "__main__":
     main()

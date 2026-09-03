@@ -110,6 +110,30 @@ entrypoint = "qknee.api.server:app"
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
+# `index-strategy = "first-index"` (uv's own default, pinned explicitly
+# here rather than relied upon) plus scoping the PyTorch CPU index to only
+# torch/torchvision via `explicit = true` + `[tool.uv.sources]` below is
+# the fix for the resolver failure this project actually hit on Streamlit
+# Community Cloud: a bare `--extra-index-url` line in requirements.txt
+# applies to EVERY package being resolved, not just torch/torchvision —
+# when uv's index-strategy isn't pinned to "first-index", it can end up
+# considering download.pytorch.org's index for unrelated packages like
+# `requests`/`streamlit` too and picking an incompatible/stale candidate
+# from it. Scoping the extra index to only the two packages that actually
+# need it removes the ambiguity entirely, while still keeping the ~150-200MB
+# CPU-only torch/torchvision wheels instead of PyPI's default 800MB-2GB+
+# CUDA-bundled build (see requirements.txt's own comment for why that
+# matters on a free-tier container).
+index-strategy = "first-index"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.pytest.ini_options]
 minversion = "7.0"

@@ -4,14 +4,21 @@
 # levers that actually matter at that scale are below; everything else in
 # this file is comparatively small (single-digit-to-low-double-digit MB).
 #
-#   1. CPU-only torch/torchvision wheels (`--extra-index-url` + the `+cpu`
-#      local version below) instead of PyPI's default CUDA build. This is
-#      the dominant win: PyPI's default `torch` wheel bundles the NVIDIA
-#      CUDA/cuDNN runtime and is 800MB-2GB+ depending on version, which
-#      alone can blow both the RAM budget and the build-time limit on a
-#      free-tier container that has no GPU to use it with anyway. The
-#      `+cpu` local-version pin forces pip to resolve against the PyTorch
-#      CPU index (~150-200MB total for both packages) instead.
+#   1. CPU-only torch/torchvision wheels instead of PyPI's default CUDA
+#      build. This is the dominant win: PyPI's default `torch` wheel
+#      bundles the NVIDIA CUDA/cuDNN runtime and is 800MB-2GB+ depending
+#      on version, which alone can blow both the RAM budget and the
+#      build-time limit on a free-tier container that has no GPU to use
+#      it with anyway. Routing is done via `pyproject.toml`'s
+#      `[tool.uv.sources]` (scoped ONLY to `torch`/`torchvision`) rather
+#      than a bare `--extra-index-url` line here — a top-level
+#      `--extra-index-url` in requirements.txt applies to every package
+#      `uv` resolves, not just these two, and was observed to cause `uv`
+#      on Streamlit Community Cloud to consider download.pytorch.org's
+#      index for unrelated packages (`requests`, `streamlit`) and pick an
+#      incompatible candidate from it — a real deploy crash, not a
+#      hypothetical. Scoping the extra index per-package in pyproject.toml
+#      keeps the same ~150-200MB CPU-only wheels without that ambiguity.
 #   2. `opencv-python-headless`, not `opencv-python` — ships without the
 #      Qt/GTK GUI toolchain a headless server container never uses, which
 #      is both a much smaller wheel and avoids missing-shared-library
@@ -24,18 +31,17 @@
 # backend exists for much larger qubit counts; pulling it in here would
 # add a native-extension wheel for no simulation-speed benefit at n=4, so
 # it's deliberately not listed.
---extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.2.0
 torchvision>=0.17.0
 
 pyyaml>=6.0.1
 pennylane>=0.35.0
-numpy>=1.26.0
+numpy>=1.26.0,<2.0.0
 opencv-python-headless>=4.8.0
 Pillow>=10.0.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
-streamlit>=1.30.0
+streamlit>=1.32.0,<1.40.0
 pydicom>=2.4.0
 matplotlib>=3.8.0
 seaborn>=0.13.0
