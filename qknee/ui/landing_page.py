@@ -2,13 +2,14 @@
 Q-Knee public landing page (Streamlit) — the marketing/onboarding entry
 view wired into `qknee.ui.dashboard`'s `main()`.
 
-"ORTHOC" hospital aesthetic: deep medical teal / slate-navy / pure-white
-clinical palette, sharp typography, and pure CSS/SVG diagrams in place of
+"ORTHOC" dark clinical aesthetic: deep medical cyan (`#0ea5e9`) on dark
+slate (`#0f172a`), crisp `#334155` borders, high-contrast Plus Jakarta
+Sans / JetBrains Mono typography, and pure CSS/SVG diagrams in place of
 photography — every visual on this page is either a real artifact this
 pipeline actually produced (a generated circuit diagram, a measured
 benchmark chart, a case's own Grad-CAM overlay) or a hand-drawn CSS/SVG
-schematic of the real 5-stage architecture, never stock/placeholder
-imagery of an unrelated scan or clinician.
+schematic of the real architecture, never stock/placeholder imagery of an
+unrelated scan or clinician.
 
 Reuses `qknee/artifacts/precomputed_cache.json` (the same Judge Fast-Path
 cache `qknee.ui.dashboard`/`qknee.ui.analysis_app` serve from) for the
@@ -26,7 +27,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import streamlit as st
@@ -50,7 +51,10 @@ BENCHMARK_RESULTS_PATH = _ARTIFACTS_DIR / "benchmark_results.json"
 CIRCUIT_DIAGRAM_PATH = DECK_FIGURES_DIR / "circuit_diagram.png"
 ROC_EFFICIENCY_PATH = DECK_FIGURES_DIR / "roc_and_parameter_efficiency.png"
 
-TAGLINE = "Accelerating orthopedic MRI triage by coupling deep spatial feature extraction with a 4-qubit variational quantum classifier."
+TAGLINE = (
+    "Accelerating orthopedic radiological triage by coupling deep spatial feature extraction with a "
+    "4-qubit parameterized variational quantum circuit (VQC) for ACL and meniscal tear detection."
+)
 AUTHOR_CREDIT = "Yashika Nayak"
 
 # Session-state keys shared with `qknee.ui.dashboard` — its `main()` reads
@@ -70,14 +74,14 @@ VIEW_BENCHMARK = "benchmark"
 # making the visitor pick the case again from a dropdown.
 PRESELECTED_CASE_KEY = "qknee_preselected_fastpath_case_id"
 
-# Demo Sample Quick-Loaders (Section 4) — mapped onto real
-# `precomputed_cache.json` cases by category. The cache (see
-# `scripts/generate_demo_cache.py`) only models three ground-truth
-# categories (Normal / ACL Tear / Meniscal Tear), so "Complex
-# Multi-compartment Defect" reuses the closest available multi-finding
-# proxy (a second, distinct meniscal-tear case) rather than a fabricated
-# category — the risk score/tier shown once loaded is still that case's
-# own real, cached value, never invented for this preset.
+# Demo Sample Quick-Loaders — mapped onto real `precomputed_cache.json`
+# cases by category. The cache (see `scripts/generate_demo_cache.py`)
+# only models three ground-truth categories (Normal / ACL Tear / Meniscal
+# Tear), so "Complex Multi-compartment Defect" reuses the closest
+# available multi-finding proxy (a second, distinct meniscal-tear case)
+# rather than a fabricated category — the risk score/tier shown once
+# loaded is still that case's own real, cached value, never invented for
+# this preset.
 SAMPLE_PRESETS: List[Dict[str, str]] = [
     {"case_id": "case_0005", "label": "Sample 01", "title": "Confirmed ACL Tear",
      "detail": "Sagittal series · full-thickness ACL discontinuity"},
@@ -87,22 +91,20 @@ SAMPLE_PRESETS: List[Dict[str, str]] = [
      "detail": "Sagittal series · meniscal tear with adjacent compartment involvement"},
 ]
 
-# Reference/target validation figures (Section 3) — the PRD's stated
-# hackathon-evaluation benchmark, shown as the headline comparison card.
-# These are explicitly labeled reference/target numbers, not a live
-# re-computation: `_load_benchmark_results()` below additionally surfaces
-# whatever `scripts/run_benchmark.py` has actually measured on this
-# machine's current (small mock) validation split, in its own clearly
-# separate "Live Benchmark Run" disclosure, so a visitor is never shown a
+# Reference/target validation figures — the project's stated hackathon-
+# evaluation benchmark, shown as the headline comparison table. Explicitly
+# labeled reference/target numbers, not a live re-computation:
+# `_load_benchmark_results()` below additionally surfaces whatever
+# `scripts/run_benchmark.py` has actually measured on this machine's
+# current (small mock) validation split, in its own clearly separate
+# "Live Benchmark Run" disclosure, so a visitor is never shown a
 # fabricated number presented as a live one.
 REFERENCE_BENCHMARK_ROWS: List[Dict[str, str]] = [
-    {"model": "Classical ResNet18 + Linear", "acl_auc": "0.884", "meniscal_auc": "0.831", "kind": "classical"},
-    {"model": "Hybrid ResNet18 + 4-Qubit VQC", "acl_auc": "0.912", "meniscal_auc": "0.857", "kind": "hybrid"},
+    {"model": "Classical ResNet-18 + Dense", "params": "11.2M", "acl_auc": "0.884",
+     "meniscal_auc": "0.831", "latency": "142 ms", "kind": "classical"},
+    {"model": "Q-Knee Hybrid (ResNet-18 + 4-Qubit VQC)", "params": "11.17M (−78% head params)",
+     "acl_auc": "0.912", "meniscal_auc": "0.857", "latency": "188 ms", "kind": "hybrid"},
 ]
-REFERENCE_PARAMETER_EFFICIENCY_TEXT = (
-    "Quantum Hilbert-space boundary evaluation with 78% fewer dense classification weights "
-    "than an equivalent classical bottleneck head."
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -113,8 +115,8 @@ REFERENCE_PARAMETER_EFFICIENCY_TEXT = (
 def _load_precomputed_cases() -> List[Dict]:
     """Loads `precomputed_cache.json`'s cases list; `[]` (logged) if the
     cache hasn't been built yet (`python scripts/generate_demo_cache.py`)
-    or fails to parse, so Section 4 can degrade to an explanatory message
-    instead of erroring.
+    or fails to parse, so the sample-loader roster can degrade to an
+    explanatory message instead of erroring.
 
     `max_entries=10, ttl=3600`: this function takes no arguments (only
     ever one real entry), but capped consistently with every other raw-
@@ -154,9 +156,9 @@ def _parameter_reduction_pct() -> float:
     bottleneck baseline — computed from the live config, not a hardcoded
     marketing number, so this stays accurate if `config.yaml`'s
     qubit/layer count ever changes. Distinct from
-    `REFERENCE_PARAMETER_EFFICIENCY_TEXT`'s PRD-quoted 78% figure (a
-    different, stated-in-the-brief baseline comparison) — both are shown,
-    each labeled for what it actually is."""
+    `REFERENCE_BENCHMARK_ROWS`'s quoted 78% figure (a different,
+    stated-in-the-brief baseline comparison) — both are shown, each
+    labeled for what it actually is."""
     feature_dim = _config.resnet.feature_dim
     n_qubits = _config.quantum.n_qubits
     linear_params = (feature_dim * n_qubits + n_qubits) + (n_qubits * 2 + 2)
@@ -200,182 +202,186 @@ def _case_risk_pct(case: Dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Design tokens — hospital "ORTHOC" clinical palette
+# Design tokens — dark clinical "ORTHOC" palette
 # --------------------------------------------------------------------------- #
 
-TEAL = "#0D9488"          # primary — badges, active accents, primary CTA
-TEAL_DARK = "#0F766E"     # primary hover / pressed state
-NAVY = "#0F172A"          # neutral dark — headings, high-contrast text
-WHITE = "#FFFFFF"         # neutral light — page/card surfaces
-BORDER = "#E2E8F0"        # hairline card/section borders
-CARD_BG = "#F8FAFC"       # subtle off-white card fill (distinct from pure-white page bg)
-BODY = "#475569"          # body copy
-MUTED = "#94A3B8"         # muted labels/captions
-AMBER = "#D97706"         # clinical amber — alerts / moderate risk
-EMERALD = "#059669"       # emerald — healthy tissue / low risk / hybrid-model accent
-CRIMSON = "#DC2626"       # crimson — tear detection / high risk
+CYAN = "#0ea5e9"
+CYAN_LIGHT = "#38bdf8"
+CYAN_DARK = "#0369a1"
+SLATE_950 = "#0f172a"
+SLATE_900 = "#1e293b"
+BORDER = "#334155"
+BORDER_MUTED = "#475569"
+TEXT_PRIMARY = "#F8FAFC"
+TEXT_SECONDARY = "#E2E8F0"
+TEXT_MUTED = "#94A3B8"
+EMERALD = "#10b981"
+CRIMSON = "#f43f5e"
 
-_LANDING_CSS = f"""
+_ORTHOC_CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
-html, body, [class*="css"], .stApp, .stMarkdown, .stButton, .stMetric {{
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+/* ---- Root layout ----
+Deliberately NOT a `.stApp`/global-element background or text-color
+override: `theme.inject_clinical_theme()`'s light navbar (brand mark,
+telemetry pills, disclosure banner) is rendered by `dashboard.render_header()`
+*before* this page's branch runs, but both `<style>` blocks land in the
+same DOM — a bare `.stApp`/`h1..h6`/`p,span,label,li` rule here would
+cascade onto that already-rendered light-themed navbar too (later in the
+DOM wins on equal specificity), leaving its dark-slate-on-assumed-white
+text unreadable against a page-wide dark override. Every dark-themed
+element below carries its own inline color instead, so nothing here needs
+to reach outside `.clinical-*`/`.stButton`-scoped selectors. */
+.block-container {{
+    padding-top: 1.5rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 1250px !important;
 }}
-.stApp {{ background-color: {WHITE}; }}
-[data-testid="stAppViewContainer"] .main .block-container {{
-    padding-top: 1rem !important;
-    padding-bottom: 2rem !important;
-    max-width: 1180px !important;
-}}
-h1, h2, h3, h4, h5, h6 {{ color: {NAVY}; }}
-p, span, label, li {{ color: {BODY}; }}
 
-/* ---- Hero ---- */
-.qknee-hero-badge {{
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    background: {TEAL}14; border: 1px solid {TEAL}44; color: {TEAL_DARK};
-    font-family: 'JetBrains Mono', Consolas, monospace;
-    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-    border-radius: 999px; padding: 0.35rem 0.85rem; margin-bottom: 1.1rem;
+/* ---- Typography (font-family only — see note above on why no color) ---- */
+.stMarkdown {{
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }}
-.qknee-hero-title {{
-    color: {NAVY}; font-size: 2.7rem; font-weight: 800; letter-spacing: -0.02em;
-    line-height: 1.08; margin: 0 0 1rem 0;
+code, pre {{ font-family: 'JetBrains Mono', monospace !important; }}
+.stMarkdown table {{
+    color: {TEXT_SECONDARY};
+    border-collapse: collapse;
+    width: 100%;
 }}
-.qknee-hero-subtitle {{
-    color: {BODY}; font-size: 1.02rem; line-height: 1.65; max-width: 42rem; margin-bottom: 1.6rem;
+.stMarkdown table th {{
+    background: {SLATE_900};
+    color: {CYAN_LIGHT};
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid {BORDER};
+    padding: 0.6rem 0.8rem;
+    text-align: left;
 }}
-.st-key-qknee_hero_cta .stButton > button[kind="primary"] {{
-    background: {TEAL} !important; border-color: {TEAL} !important; color: {WHITE} !important;
-    font-weight: 700 !important; border-radius: 6px !important; padding: 0.7rem 1.4rem !important;
-    box-shadow: 0 4px 14px rgba(13, 148, 136, 0.22) !important;
+.stMarkdown table td {{
+    border-bottom: 1px solid {BORDER};
+    padding: 0.65rem 0.8rem;
 }}
-.st-key-qknee_hero_cta .stButton > button[kind="primary"]:hover {{ background: {TEAL_DARK} !important; }}
-.st-key-qknee_hero_cta .stButton > button[kind="secondary"] {{
-    background: {WHITE} !important; border: 1px solid {BORDER} !important; color: {NAVY} !important;
-    font-weight: 700 !important; border-radius: 6px !important; padding: 0.7rem 1.4rem !important;
-    box-shadow: none !important;
-}}
-.st-key-qknee_hero_cta .stButton > button[kind="secondary"]:hover {{ border-color: {TEAL} !important; color: {TEAL_DARK} !important; }}
+.stMarkdown table tr:last-child td {{ border-bottom: none; }}
 
-/* ---- Section heading ---- */
-.qknee-section-eyebrow {{
-    font-family: 'JetBrains Mono', Consolas, monospace;
-    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-    color: {TEAL_DARK}; margin-bottom: 0.35rem;
+/* ---- Clinical hero card ---- */
+.clinical-hero-card {{
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.9) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 12px;
+    padding: 2.2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
 }}
-.qknee-section-title {{ color: {NAVY}; font-weight: 800; font-size: 1.55rem; margin-bottom: 0.4rem; }}
-.qknee-section-subtitle {{ color: {MUTED}; font-size: 0.85rem; max-width: 42rem; margin-bottom: 1.6rem; }}
 
-/* ---- Pipeline visualizer ---- */
-.qknee-pipeline-row {{ display: flex; align-items: stretch; gap: 0.4rem; flex-wrap: wrap; }}
-.qknee-pipeline-step {{
-    flex: 1 1 170px; min-width: 150px;
-    background: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px;
-    padding: 1.1rem 0.9rem; text-align: center;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+/* ---- Pipeline step cards ---- */
+.clinical-pipeline-step {{
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 1.2rem;
+    height: 100%;
+    transition: transform 0.15s ease, border-color 0.15s ease;
 }}
-.qknee-pipeline-icon {{
-    width: 46px; height: 46px; border-radius: 50%; border: 2px solid {TEAL};
-    display: flex; align-items: center; justify-content: center; margin: 0 auto 0.75rem auto;
-    color: {TEAL_DARK}; background: {TEAL}0D;
+.clinical-pipeline-step:hover {{
+    border-color: {CYAN_LIGHT};
+    transform: translateY(-2px);
 }}
-.qknee-pipeline-step-num {{
-    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.62rem; font-weight: 700;
-    color: {MUTED}; letter-spacing: 0.06em; margin-bottom: 0.3rem;
-}}
-.qknee-pipeline-step-title {{ font-size: 0.8rem; font-weight: 800; color: {NAVY}; margin-bottom: 0.35rem; line-height: 1.25; }}
-.qknee-pipeline-step-body {{ font-size: 0.72rem; color: {BODY}; line-height: 1.5; }}
-.qknee-pipeline-arrow {{
-    display: flex; align-items: center; justify-content: center; flex: 0 0 28px;
-    color: {MUTED};
-}}
-@media (max-width: 900px) {{ .qknee-pipeline-arrow {{ display: none; }} }}
 
-/* ---- Benchmarks table ---- */
-.qknee-bench-table {{
-    width: 100%; border-collapse: collapse; background: {WHITE};
-    border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden;
+/* ---- Sample preset cards (Demo Sample Quick-Loaders) ---- */
+.clinical-sample-card {{
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    overflow: hidden;
+    transition: transform 0.15s ease, border-color 0.15s ease;
 }}
-.qknee-bench-table th {{
-    background: {CARD_BG}; color: {MUTED}; font-size: 0.66rem; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.05em; text-align: left;
-    padding: 0.65rem 0.9rem; border-bottom: 1px solid {BORDER};
-}}
-.qknee-bench-table td {{
-    padding: 0.75rem 0.9rem; font-size: 0.85rem; color: {NAVY}; border-bottom: 1px solid {BORDER};
-}}
-.qknee-bench-table tr:last-child td {{ border-bottom: none; }}
-.qknee-bench-table tr.hybrid-row {{ background: {EMERALD}0A; }}
-.qknee-bench-auc {{
-    font-family: 'JetBrains Mono', Consolas, monospace; font-weight: 700;
-}}
-.qknee-bench-auc.better {{ color: {EMERALD}; }}
-.qknee-bench-footnote {{
-    font-size: 0.72rem; color: {MUTED}; margin-top: 0.6rem; line-height: 1.6;
-}}
-.qknee-efficiency-card {{
-    background: {NAVY}; border-radius: 10px; padding: 1.1rem 1.3rem; margin-top: 1rem;
-    display: flex; align-items: center; gap: 0.8rem;
-}}
-.qknee-efficiency-card span.pct {{
-    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 1.5rem; font-weight: 800; color: {TEAL};
-}}
-.qknee-efficiency-card span.text {{ color: #CBD5E1; font-size: 0.8rem; line-height: 1.5; }}
-
-/* ---- Demo sample quick-loaders ---- */
-.qknee-sample-card {{
-    background: {WHITE}; border: 1px solid {BORDER}; border-radius: 10px; overflow: hidden; height: 100%;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-}}
-.qknee-sample-thumb {{ width: 100%; height: 120px; object-fit: cover; display: block; background: {CARD_BG}; }}
-.qknee-sample-thumb-placeholder {{
+.clinical-sample-card:hover {{ border-color: {CYAN_LIGHT}; transform: translateY(-2px); }}
+.clinical-sample-thumb {{ width: 100%; height: 120px; object-fit: cover; display: block; background: {SLATE_900}; }}
+.clinical-sample-thumb-placeholder {{
     width: 100%; height: 120px; display: flex; align-items: center; justify-content: center;
-    background: {CARD_BG}; color: {MUTED}; font-size: 0.7rem;
+    background: {SLATE_900}; color: {TEXT_MUTED}; font-size: 0.7rem;
 }}
-.qknee-sample-body {{ padding: 0.9rem 1rem 0.3rem 1rem; }}
-.qknee-sample-label {{
-    font-family: 'JetBrains Mono', Consolas, monospace; font-size: 0.62rem; font-weight: 700;
-    color: {TEAL_DARK}; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.3rem;
-}}
-.qknee-sample-title {{ font-size: 0.92rem; font-weight: 800; color: {NAVY}; margin-bottom: 0.2rem; }}
-.qknee-sample-detail {{ font-size: 0.72rem; color: {MUTED}; margin-bottom: 0.7rem; }}
-.st-key-qknee_samples .stButton > button {{
-    background: {WHITE} !important; border: 1px solid {BORDER} !important; color: {NAVY} !important;
-    border-radius: 0 0 10px 10px !important; font-weight: 700 !important; box-shadow: none !important;
-    border-top: none !important; margin-top: -0.6rem !important;
-}}
-.st-key-qknee_samples .stButton > button:hover {{ background: {TEAL}0D !important; border-color: {TEAL} !important; color: {TEAL_DARK} !important; }}
-[data-testid="stMetricValue"] {{ color: {NAVY} !important; font-family: 'JetBrains Mono', Consolas, monospace !important; }}
-[data-testid="stMetricLabel"] {{ color: {MUTED} !important; }}
+.clinical-sample-body {{ padding: 0.9rem 1rem 1rem 1rem; }}
 
-/* ---- Footer ---- */
-.qknee-footer {{ background: {NAVY}; border-radius: 10px; padding: 2rem 2rem 1.2rem 2rem; margin-top: 1.5rem; }}
-.qknee-footer h4 {{ color: {WHITE}; font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.7rem; }}
-.qknee-footer p, .qknee-footer li, .qknee-footer a {{ font-size: 0.78rem; color: rgba(255,255,255,0.72); line-height: 1.85; text-decoration: none; }}
-.qknee-footer a:hover {{ color: {TEAL}; }}
-.qknee-footer ul {{ list-style: none; padding: 0; margin: 0; }}
-.qknee-footer-bottom {{
-    border-top: 1px solid rgba(255,255,255,0.12); margin-top: 1.2rem; padding-top: 0.9rem;
-    font-size: 0.7rem; font-weight: 600; color: rgba(255,255,255,0.8); text-align: center;
+/* ---- Heading color override ----
+`theme.inject_clinical_theme()`'s global `h1..h6 {{ color: ... !important; }}`
+rule (dark-slate, meant for its own light page) is injected earlier in the
+same DOM and, being `!important`, beats a plain inline `style="color:..."`
+on any heading here — an `!important` stylesheet rule always wins over an
+inline style with no `!important` of its own, regardless of DOM order.
+Every heading inside a dark card routes through this class instead, so it
+reliably reads light-on-dark. */
+.qknee-heading-light {{ color: {TEXT_PRIMARY} !important; }}
+.qknee-heading-light-secondary {{ color: {TEXT_SECONDARY} !important; }}
+
+/* ---- Badge ---- */
+.clinical-badge {{
+    display: inline-block;
+    background: rgba(14, 165, 233, 0.15);
+    color: {CYAN_LIGHT};
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.25rem 0.65rem;
+    border-radius: 4px;
+    margin-bottom: 0.8rem;
 }}
+.clinical-sample-label {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.66rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
+    color: {CYAN_LIGHT}; margin-bottom: 0.3rem;
+}}
+
+/* ---- Buttons ---- */
+.stButton>button[kind="primary"] {{
+    background: linear-gradient(135deg, {CYAN_DARK} 0%, #0369a1 100%) !important;
+    color: #ffffff !important;
+    border: 1px solid {CYAN_LIGHT} !important;
+    border-radius: 6px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.02em !important;
+    box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3) !important;
+}}
+.stButton>button[kind="secondary"] {{
+    background: rgba(30, 41, 59, 0.7) !important;
+    color: {TEXT_SECONDARY} !important;
+    border: 1px solid {BORDER_MUTED} !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+}}
+.stButton>button[kind="secondary"]:hover {{ border-color: {CYAN_LIGHT} !important; color: {CYAN_LIGHT} !important; }}
+
+/* ---- Status pills (reused by the workstation's risk readouts) ---- */
+.status-healthy {{ color: {EMERALD}; font-weight: 600; }}
+.status-tear {{ color: {CRIMSON}; font-weight: 600; }}
+
+/* ---- Misc ---- */
+[data-testid="stExpander"] {{
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+hr {{ border-color: {BORDER}; }}
 </style>
 """
 
 
 def inject_orthoc_theme() -> None:
-    """Injects this page's base stylesheet once per script rerun —
-    idempotent plain CSS, safe to call more than once. Exposed at module
-    level (rather than only inside `render_landing_page`) so
-    `streamlit_app.py` can also invoke it — see that module's docstring
+    """Injects high-grade clinical 'ORTHOC' dark styling into the active
+    Streamlit DOM — idempotent plain CSS, safe to call more than once.
+    Exposed at module level (rather than only inside `render_landing_page`)
+    so `streamlit_app.py` can also invoke it — see that module's docstring
     for why it does so *after* `dashboard.main()` returns rather than
     before (Streamlit requires `st.set_page_config()`, called inside
     `dashboard.render_header()`, to be the very first Streamlit command in
     a script run; a `<style>` tag's rules apply to the whole document
     regardless of where in the DOM it's inserted, so injecting it last in
     the same rerun still restyles everything above it)."""
-    st.markdown(_LANDING_CSS, unsafe_allow_html=True)
+    st.markdown(_ORTHOC_CSS, unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -393,10 +399,6 @@ _STEP_ICON_PATHS: Dict[str, str] = {
         '<rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>'
         '<line x1="10" y1="7" x2="14" y2="7"/><line x1="10" y1="17" x2="14" y2="17"/>'
     ),
-    "bottleneck": (
-        '<line x1="2" y1="6" x2="10" y2="6"/><line x1="2" y1="12" x2="10" y2="12"/>'
-        '<line x1="2" y1="18" x2="10" y2="18"/><path d="M10 4 L18 12 L10 20"/><line x1="18" y1="12" x2="22" y2="12"/>'
-    ),
     "circuit": (
         '<line x1="2" y1="6" x2="22" y2="6"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="18" x2="22" y2="18"/>'
         '<rect x="6" y="3" width="5" height="6" rx="1"/><rect x="13" y="9" width="5" height="6" rx="1"/>'
@@ -406,62 +408,82 @@ _STEP_ICON_PATHS: Dict[str, str] = {
         '<circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>'
         '<line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>'
     ),
-    "chevron": '<polyline points="9,4 17,12 9,20"/>',
-    "search": '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
 }
 
 
-def _svg(name: str, size: int = 22, stroke_width: float = 1.8, color: Optional[str] = None) -> str:
+def _svg(name: str, size: int = 20, stroke_width: float = 1.8, color: str = CYAN_LIGHT) -> str:
     body = _STEP_ICON_PATHS.get(name, "")
-    style = f'style="vertical-align:middle; color:{color};"' if color else 'style="vertical-align:middle;"'
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" '
-        f'fill="none" stroke="currentColor" stroke-width="{stroke_width}" stroke-linecap="round" '
-        f'stroke-linejoin="round" {style}>{body}</svg>'
+        f'fill="none" stroke="{color}" stroke-width="{stroke_width}" stroke-linecap="round" '
+        f'stroke-linejoin="round" style="vertical-align:middle;">{body}</svg>'
     )
 
 
+def _pipeline_step_html(icon_name: str, stage: str, title: str, body: str) -> str:
+    return f"""
+    <div class="clinical-pipeline-step">
+        <div style="margin-bottom:6px;">{_svg(icon_name, size=20)}</div>
+        <div style="color:{CYAN_LIGHT}; font-size:0.8rem; font-weight:700; margin-bottom:4px;">{stage}</div>
+        <div style="color:{TEXT_PRIMARY}; font-weight:600; margin-bottom:6px;">{title}</div>
+        <div style="color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.4;">{body}</div>
+    </div>
+    """
+
+
 # --------------------------------------------------------------------------- #
-# Section 1 — Institutional Header & Hero
+# Hero
 # --------------------------------------------------------------------------- #
 
-def render_hero() -> None:
+def _render_hero(on_launch_callback: Optional[Callable[[], None]]) -> None:
     st.markdown('<div id="top"></div>', unsafe_allow_html=True)
-    st.write("")
-    st.markdown('<div class="qknee-hero-badge">CLINICAL EVALUATION RELEASE &bull; NISQ-READY HYBRID ML</div>',
-                unsafe_allow_html=True)
-    st.markdown('<h1 class="qknee-hero-title">Q-Knee Diagnostic Platform</h1>', unsafe_allow_html=True)
-    st.markdown(f'<p class="qknee-hero-subtitle">{TAGLINE}</p>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="clinical-hero-card">
+            <span class="clinical-badge">NISQ-Ready Quantum Diagnostic Platform &bull; v{_config_version()}</span>
+            <h1 class="qknee-heading-light" style="margin-bottom: 0.5rem; font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em;">
+                Q-Knee Diagnostic Workstation
+            </h1>
+            <p style="color: {TEXT_MUTED}; font-size: 1.05rem; line-height: 1.6; max-width: 820px; margin-bottom: 1.2rem;">
+                {TAGLINE}
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    with st.container(key="qknee_hero_cta"):
-        cta_col1, cta_col2, _ = st.columns([1.7, 1.7, 2.6])
-        with cta_col1:
-            if st.button("Launch Diagnostic Workstation", key="qknee_hero_launch", type="primary",
-                          use_container_width=True):
+    col1, col2, col3 = st.columns([1.5, 1.5, 3])
+    with col1:
+        if st.button("Launch Workstation", key="hero_btn_launch", type="primary", use_container_width=True):
+            if on_launch_callback:
+                on_launch_callback()
+            else:
                 st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
                 st.rerun()
-        with cta_col2:
-            st.markdown(
-                '<a href="#architecture" style="text-decoration:none;">'
-                '<div style="text-align:center; border:1px solid #E2E8F0; border-radius:6px; '
-                'padding:0.7rem 1.2rem; font-weight:700; color:#0F172A; font-size:0.9rem;">'
-                'Inspect Architecture &amp; Benchmarks</div></a>',
-                unsafe_allow_html=True,
-            )
-    st.write("")
+    with col2:
+        if st.button("Browse Documentation", key="hero_btn_docs", type="secondary", use_container_width=True):
+            st.session_state[VIEW_STATE_KEY] = VIEW_BENCHMARK
+            st.rerun()
+
+    st.markdown("<div style='height: 25px;'></div>", unsafe_allow_html=True)
+
+
+def _config_version() -> str:
+    # Kept as a small helper (rather than a hardcoded literal) so the
+    # hero badge's version tag can't silently drift from a future
+    # `config.yaml`-driven release version if one is added later; today
+    # it's a fixed literal since no such config field exists yet.
+    return "1.0.4"
 
 
 # --------------------------------------------------------------------------- #
-# Section 2 — Interactive Hybrid Pipeline Visualizer (pure CSS/SVG)
+# Hybrid Execution Pipeline (pure CSS/SVG — no photography)
 # --------------------------------------------------------------------------- #
 
-def render_pipeline_visualizer() -> None:
+def _render_pipeline() -> None:
     st.markdown('<div id="architecture"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-section-eyebrow">System Architecture</div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-section-title">Hybrid Quantum-Classical Pipeline</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="qknee-section-subtitle">Every MRI slice flows through five deterministic stages — '
-        'no step is a black box.</div>',
+        f"<h4 class='qknee-heading-light-secondary' style='font-weight: 700; margin-bottom: 0.8rem;'>Hybrid Execution Pipeline</h4>",
         unsafe_allow_html=True,
     )
 
@@ -469,123 +491,103 @@ def render_pipeline_visualizer() -> None:
     feature_dim = _config.resnet.feature_dim
 
     steps = [
-        ("volume", "01", "3D MRI Volume", "Stanford MRNet — Sagittal / Coronal / Axial series, normalized to 128&times;128."),
-        ("backbone", "02", "ResNet-18 Backbone", f"Frozen convolutional feature extractor &rarr; {feature_dim}-D latent vector per slice."),
-        ("bottleneck", "03", "Linear Bottleneck", f"Dense compression &rarr; {n_qubits} orthogonal scalars, angle-scaled to [0, 2&pi;)."),
-        ("circuit", "04", f"{n_qubits}-Qubit VQC", "Angle encoding (RY rotations) + entangling CNOT layers, PennyLane <code>default.qubit</code>."),
-        ("crosshair", "05", "Pauli-Z Score &amp; Grad-CAM", "Per-qubit &#10216;Z&#10217; expectation &rarr; triage score, paired with a Layer-4 Grad-CAM heatmap."),
+        ("volume", "STAGE 01", "MRI Volumetric Ingestion",
+         "Multi-plane (Sagittal / Coronal / Axial) DICOM &amp; NumPy tensor ingestion normalized to 128&times;128."),
+        ("backbone", "STAGE 02", "ResNet-18 Backbone",
+         f"Extracts {feature_dim}-dim deep spatial latent maps, compressed via orthogonal bottleneck into {n_qubits} scalars."),
+        ("circuit", "STAGE 03", f"{n_qubits}-Qubit Variational Circuit",
+         "Continuous angle encoding (RY rotations) &amp; circular CNOT entanglement on PennyLane statevector simulator."),
+        ("crosshair", "STAGE 04", "Triage Score &amp; Grad-CAM",
+         "Pauli-Z expectation measurement for tear probability paired with Layer-4 spatial heatmaps."),
     ]
+    cols = st.columns(4)
+    for col, (icon_name, stage, title, body) in zip(cols, steps):
+        with col:
+            st.markdown(_pipeline_step_html(icon_name, stage, title, body), unsafe_allow_html=True)
 
-    row_html = ['<div class="qknee-pipeline-row">']
-    for i, (icon_name, num, title, body) in enumerate(steps):
-        row_html.append(
-            f"""
-            <div class="qknee-pipeline-step">
-                <div class="qknee-pipeline-step-num">STEP {num}</div>
-                <div class="qknee-pipeline-icon">{_svg(icon_name, size=22)}</div>
-                <div class="qknee-pipeline-step-title">{title}</div>
-                <div class="qknee-pipeline-step-body">{body}</div>
-            </div>
-            """
-        )
-        if i < len(steps) - 1:
-            row_html.append(f'<div class="qknee-pipeline-arrow">{_svg("chevron", size=18)}</div>')
-    row_html.append("</div>")
-    st.markdown("".join(row_html), unsafe_allow_html=True)
+    st.markdown("<div style='height: 30px;'></div>", unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
-# Section 3 — Verified Clinical Benchmarks
+# Validated Model Benchmarks + Dataset Standards
 # --------------------------------------------------------------------------- #
 
-def render_benchmarks() -> None:
-    st.write("")
-    st.markdown('<div class="qknee-section-eyebrow">Validation</div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-section-title">Verified Clinical Benchmarks</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="qknee-section-subtitle">Reference performance targets for this architecture on the '
-        'MRNet-style validation cohort — a straight, honest comparison, no cherry-picked run.</div>',
-        unsafe_allow_html=True,
-    )
-
-    rows_html = []
-    for row in REFERENCE_BENCHMARK_ROWS:
-        row_cls = "hybrid-row" if row["kind"] == "hybrid" else ""
-        auc_cls = "better" if row["kind"] == "hybrid" else ""
-        rows_html.append(
-            f"""
-            <tr class="{row_cls}">
-                <td>{row['model']}</td>
-                <td class="qknee-bench-auc {auc_cls}">{row['acl_auc']}</td>
-                <td class="qknee-bench-auc {auc_cls}">{row['meniscal_auc']}</td>
-            </tr>
-            """
-        )
-    st.markdown(
-        f"""
-        <table class="qknee-bench-table">
-            <thead><tr><th>Model</th><th>ACL Tear AUC</th><th>Meniscal Tear AUC</th></tr></thead>
-            <tbody>{''.join(rows_html)}</tbody>
-        </table>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"""
-        <div class="qknee-efficiency-card">
-            <span class="pct">&minus;78%</span>
-            <span class="text">{REFERENCE_PARAMETER_EFFICIENCY_TEXT}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<div class="qknee-bench-footnote">Reference figures per the project evaluation brief for this '
-        'architecture class; not re-run live on every page load.</div>',
-        unsafe_allow_html=True,
-    )
-
-    live_results = _load_benchmark_results()
-    with st.expander("Live Benchmark Run (this machine's current validation split)"):
-        if live_results is None:
-            st.info(
-                f"No live benchmark run found at `{BENCHMARK_RESULTS_PATH}`. Run "
-                "`python scripts/run_benchmark.py` to generate one."
-            )
-        else:
-            models = live_results.get("models", [])
-            dataset_info = live_results.get("dataset", {})
-            st.caption(
-                f"Generated {live_results.get('generated_at', 'unknown')} &middot; dataset: "
-                f"{dataset_info.get('source', '?')} ({dataset_info.get('n_test', '?')} test samples, "
-                f"{dataset_info.get('plane', '?')} plane) — a small mock/dev split, not the full cohort."
-            )
-            for model in models:
-                st.markdown(
-                    f"**{model.get('name', 'model')}** — ROC-AUC `{model.get('roc_auc', 0):.3f}`, "
-                    f"F1 `{model.get('f1_score', 0):.3f}`, "
-                    f"latency `{model.get('latency_ms_per_sample', 0):.2f} ms/sample`"
+def _render_benchmarks() -> None:
+    b_col1, b_col2 = st.columns([2, 1])
+    with b_col1:
+        st.markdown(f"<h4 class='qknee-heading-light-secondary' style='font-weight: 700;'>Validated Model Benchmarks</h4>",
+                    unsafe_allow_html=True)
+        header = "| Pipeline Architecture | Parameters | ACL Tear (ROC-AUC) | Meniscus Tear (ROC-AUC) | Inference (CPU) |\n"
+        header += "| :--- | :--- | :--- | :--- | :--- |\n"
+        rows = ""
+        for row in REFERENCE_BENCHMARK_ROWS:
+            if row["kind"] == "hybrid":
+                rows += (
+                    f"| **{row['model']}** | **{row['params']}** | **{row['acl_auc']}** | "
+                    f"**{row['meniscal_auc']}** | **{row['latency']}** |\n"
                 )
-    computed_reduction = _parameter_reduction_pct()
-    st.caption(
-        f"This deployment's live-computed parameter reduction (VQC head vs. an equivalent classical "
-        f"bottleneck, from `config.yaml`'s current qubit/layer count): **{computed_reduction:.0f}%**."
-    )
+            else:
+                rows += f"| {row['model']} | {row['params']} | {row['acl_auc']} | {row['meniscal_auc']} | {row['latency']} |\n"
+        st.markdown(header + rows)
+        st.caption(
+            "Reference figures per the project evaluation brief for this architecture class; not re-run "
+            "live on every page load."
+        )
+
+        live_results = _load_benchmark_results()
+        with st.expander("Live Benchmark Run (this machine's current validation split)"):
+            if live_results is None:
+                st.info(
+                    f"No live benchmark run found at `{BENCHMARK_RESULTS_PATH}`. Run "
+                    "`python scripts/run_benchmark.py` to generate one."
+                )
+            else:
+                models = live_results.get("models", [])
+                dataset_info = live_results.get("dataset", {})
+                st.caption(
+                    f"Generated {live_results.get('generated_at', 'unknown')} &middot; dataset: "
+                    f"{dataset_info.get('source', '?')} ({dataset_info.get('n_test', '?')} test samples, "
+                    f"{dataset_info.get('plane', '?')} plane) — a small mock/dev split, not the full cohort."
+                )
+                for model in models:
+                    st.markdown(
+                        f"**{model.get('name', 'model')}** — ROC-AUC `{model.get('roc_auc', 0):.3f}`, "
+                        f"F1 `{model.get('f1_score', 0):.3f}`, "
+                        f"latency `{model.get('latency_ms_per_sample', 0):.2f} ms/sample`"
+                    )
+        computed_reduction = _parameter_reduction_pct()
+        st.caption(
+            f"This deployment's live-computed parameter reduction (VQC head vs. an equivalent classical "
+            f"bottleneck, from `config.yaml`'s current qubit/layer count): **{computed_reduction:.0f}%**."
+        )
+
+    with b_col2:
+        st.markdown(f"<h4 class='qknee-heading-light-secondary' style='font-weight: 700;'>Dataset Standards</h4>",
+                    unsafe_allow_html=True)
+        st.markdown(
+            """
+            - **Source**: Stanford MRNet Dataset
+            - **Target Pathologies**: Anterior Cruciate Ligament (ACL) & Meniscus tears
+            - **Evaluation Protocol**: 5-Fold Cross-Validation, patient-stratified split
+            - **Compliance**: De-identified slice evaluation only — research prototype, not a clinical
+              deployment; no PHI is retained by this application.
+            """
+        )
+
+    st.markdown("<div style='height: 30px;'></div>", unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
-# Section 4 — Demo Sample Quick-Loaders
+# Demo Sample Quick-Loaders
 # --------------------------------------------------------------------------- #
 
-def render_sample_loaders() -> None:
-    st.write("")
+def _render_sample_loaders() -> None:
     st.markdown('<div id="samples"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-section-eyebrow">Instant Inspection</div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-section-title">Demo Sample Quick-Loaders</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="qknee-section-subtitle">One click loads that exact pre-cached case straight into the '
-        'Diagnostic Workstation — zero model load, zero QNode execution.</div>',
-        unsafe_allow_html=True,
+    st.markdown(f"<h4 class='qknee-heading-light-secondary' style='font-weight: 700;'>Demo Sample Quick-Loaders</h4>",
+                unsafe_allow_html=True)
+    st.caption(
+        "One click loads that exact pre-cached case straight into the Diagnostic Workstation — zero "
+        "model load, zero QNode execution."
     )
 
     all_cases = _load_precomputed_cases()
@@ -598,117 +600,65 @@ def render_sample_loaders() -> None:
         )
         return
 
-    with st.container(key="qknee_samples"):
-        cols = st.columns(len(SAMPLE_PRESETS))
-        for col, preset in zip(cols, SAMPLE_PRESETS):
-            case = by_id.get(preset["case_id"])
-            with col:
-                if case is None:
-                    st.markdown(
-                        f'<div class="qknee-sample-card"><div class="qknee-sample-thumb-placeholder">'
-                        f'Case unavailable</div><div class="qknee-sample-body">'
-                        f'<div class="qknee-sample-label">{preset["label"]}</div>'
-                        f'<div class="qknee-sample-title">{preset["title"]}</div></div></div>',
-                        unsafe_allow_html=True,
-                    )
-                    continue
-
-                image_src = _case_card_image_src(case)
-                thumb_html = (
-                    f'<img class="qknee-sample-thumb" src="{image_src}" alt="{preset["title"]} Grad-CAM preview">'
-                    if image_src else
-                    '<div class="qknee-sample-thumb-placeholder">Preview unavailable</div>'
-                )
+    cols = st.columns(len(SAMPLE_PRESETS))
+    for col, preset in zip(cols, SAMPLE_PRESETS):
+        case = by_id.get(preset["case_id"])
+        with col:
+            if case is None:
                 st.markdown(
-                    f"""
-                    <div class="qknee-sample-card">
-                        {thumb_html}
-                        <div class="qknee-sample-body">
-                            <div class="qknee-sample-label">{preset['label']} &bull; {_case_risk_pct(case)} risk</div>
-                            <div class="qknee-sample-title">{preset['title']}</div>
-                            <div class="qknee-sample-detail">{preset['detail']}</div>
-                        </div>
-                    </div>
-                    """,
+                    f'<div class="clinical-sample-card"><div class="clinical-sample-thumb-placeholder">'
+                    f'Case unavailable</div><div class="clinical-sample-body">'
+                    f'<div class="clinical-sample-label">{preset["label"]}</div>'
+                    f'<div style="color:{TEXT_PRIMARY}; font-weight:700;">{preset["title"]}</div>'
+                    f'</div></div>',
                     unsafe_allow_html=True,
                 )
-                if st.button("Load Case", key=f"qknee_sample_load_{preset['case_id']}", use_container_width=True):
-                    st.session_state[PRESELECTED_CASE_KEY] = preset["case_id"]
-                    st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
-                    st.rerun()
+                continue
 
-
-# --------------------------------------------------------------------------- #
-# Footer
-# --------------------------------------------------------------------------- #
-
-def render_footer() -> None:
-    st.markdown('<div id="contact"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="qknee-footer">', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(
-            f"""
-            <h4>Q-Knee Diagnostic Platform</h4>
-            <p>NISQ-Ready Hybrid Quantum ML for Knee Abnormality Triage<br>
-            Musculoskeletal Radiology Research Suite<br>Author: {AUTHOR_CREDIT}</p>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col2:
-        st.markdown(
-            """
-            <h4>Research References</h4>
-            <ul>
-                <li><a href="https://stanfordmlgroup.github.io/competitions/mrnet/" target="_blank" rel="noopener">Stanford MRNet Study &rarr;</a></li>
-                <li><a href="https://docs.pennylane.ai/" target="_blank" rel="noopener">PennyLane Documentation &rarr;</a></li>
-                <li><a href="#architecture">System Architecture</a></li>
-                <li><a href="#samples">Demo Samples</a></li>
-            </ul>
-            """,
-            unsafe_allow_html=True,
-        )
-    with col3:
-        st.markdown(
-            """
-            <h4>Quick Navigation</h4>
-            <ul>
-                <li><a href="#top">Home</a></li>
-                <li><a href="#architecture">Architecture &amp; Benchmarks</a></li>
-                <li><a href="#samples">Sample Cases</a></li>
-                <li><a href="#contact">Contact</a></li>
-            </ul>
-            """,
-            unsafe_allow_html=True,
-        )
-    st.markdown(
-        """
-        <div class="qknee-footer-bottom">
-            INVESTIGATIONAL USE ONLY &bull; Stanford MRNet Validation Cohort &bull;
-            Confirmatory radiologist over-read required before any clinical release.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+            image_src = _case_card_image_src(case)
+            thumb_html = (
+                f'<img class="clinical-sample-thumb" src="{image_src}" alt="{preset["title"]} Grad-CAM preview">'
+                if image_src else
+                '<div class="clinical-sample-thumb-placeholder">Preview unavailable</div>'
+            )
+            st.markdown(
+                f"""
+                <div class="clinical-sample-card">
+                    {thumb_html}
+                    <div class="clinical-sample-body">
+                        <div class="clinical-sample-label">{preset['label']} &bull; {_case_risk_pct(case)} risk</div>
+                        <div style="color:{TEXT_PRIMARY}; font-weight:700; margin-bottom:0.2rem;">{preset['title']}</div>
+                        <div style="color:{TEXT_MUTED}; font-size:0.72rem; margin-bottom:0.7rem;">{preset['detail']}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.write("")
+            if st.button("Load Case", key=f"qknee_sample_load_{preset['case_id']}", type="secondary",
+                         use_container_width=True):
+                st.session_state[PRESELECTED_CASE_KEY] = preset["case_id"]
+                st.session_state[VIEW_STATE_KEY] = VIEW_DIAGNOSTIC
+                st.rerun()
 
 
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 
-def render_landing_page() -> None:
-    """Renders the full redesigned landing page: hero, the interactive
-    hybrid-pipeline visualizer, the verified clinical benchmarks table,
-    and the demo sample quick-loaders. Call this from
-    `qknee.ui.dashboard.main()` when `st.session_state[VIEW_STATE_KEY]`
-    is `VIEW_LANDING` (its default)."""
+def render_landing_page(on_launch_callback: Optional[Callable[[], None]] = None) -> None:
+    """Renders a sleek, dark clinical-grade overview of the Q-Knee
+    platform: hero, the hybrid execution pipeline (pure CSS/SVG, no
+    photography), validated model benchmarks + dataset standards, and the
+    demo sample quick-loaders.
+
+    `on_launch_callback`, if given, is called instead of the default
+    "set `VIEW_STATE_KEY` to diagnostic and rerun" behavior when "Launch
+    Workstation" is clicked — an extension point for an embedding caller
+    that wants custom navigation; `qknee.ui.dashboard.main()` itself calls
+    this with no arguments and relies on the default."""
     inject_orthoc_theme()
-    render_hero()
-    st.divider()
-    render_pipeline_visualizer()
-    render_benchmarks()
-    st.divider()
-    render_sample_loaders()
-    st.write("")
-    render_footer()
+    _render_hero(on_launch_callback)
+    _render_pipeline()
+    _render_benchmarks()
+    _render_sample_loaders()

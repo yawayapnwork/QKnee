@@ -618,9 +618,16 @@ def render_header() -> None:
     the workstation/benchmark tabs still carry `theme.NOT_A_DEVICE_FOOTNOTE`
     in their own page-bottom captions."""
     st.set_page_config(
-        page_title="Q-Knee Diagnostic Workstation",
-        page_icon=theme.CLINICAL_GLYPH,
+        page_title="Q-Knee Workstation",
+        page_icon="🔬",
         layout="wide",
+        # Deliberately "expanded", not "collapsed": the sidebar carries
+        # this app's only controls for the NISQ Acceleration Cache toggle,
+        # Cached Case Replay toggle, and the DICOM/NPY/NIfTI file
+        # uploader — collapsing it by default on every page (including
+        # the workstation, since `set_page_config` is process-wide, not
+        # per-page) would hide those on first load rather than just
+        # trimming the landing page's chrome.
         initial_sidebar_state="expanded",
     )
     theme.inject_clinical_theme()
