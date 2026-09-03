@@ -67,3 +67,6 @@ deck_assets/
 *.nii
 *.nii.gz
 *.dcm
+*.db
+*.sqlite3
+qknee_users.db
