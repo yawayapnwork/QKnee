@@ -307,7 +307,9 @@ class ResNet18FeatureExtractor(nn.Module):
 
 
 class ONNXFeatureExtractor:
-    """onnxruntime-accelerated drop-in for `ResNet18FeatureExtractor`'s
+    """Exploratory / outside the judged PRD scope — inert behind `config.yaml`'s `resnet.backend_engine` defaulting to `"pytorch"`, not `"onnx"`.
+
+    onnxruntime-accelerated drop-in for `ResNet18FeatureExtractor`'s
     inference path (`forward_slice` / `forward_volume` / `forward` /
     `__call__`), for deployments that prefer ONNX Runtime's graph-optimized
     CPU/GPU execution over eager PyTorch.

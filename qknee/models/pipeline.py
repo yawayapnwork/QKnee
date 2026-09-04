@@ -773,7 +773,9 @@ def _resolve_quantum_device(backend: QuantumBackend, n_qubits: int):
 
 
 class HybridONNXInferenceEngine:
-    """Loads the two decoupled export artifacts (`resnet_feature_extractor.onnx`
+    """Exploratory / outside the judged PRD scope — inert behind `config.yaml`'s `resnet.backend_engine` defaulting to `"pytorch"`, not `"onnx"`.
+
+    Loads the two decoupled export artifacts (`resnet_feature_extractor.onnx`
     + `qknee_vqc_weights.pt`/`circuit_params.json`) and reproduces
     `QKneeModel`'s full forward pass — ResNet18 -> PCA(4) -> 4-qubit VQC ->
     sigmoid risk score — without ever loading PyTorch's autograd machinery

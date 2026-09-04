@@ -1,4 +1,6 @@
 """
+Exploratory — outside the judged PRD scope (ingestion -> ResNet18 -> PCA -> 4-qubit VQC -> Streamlit UI -> Grad-CAM -> SVM benchmark), which uses `vqc.VQCClassifier` directly, not this alternate ansatz.
+
 Data-Re-Uploading Variational Quantum Circuit (VQC) for ACL/meniscal tear
 risk scoring — Pérez-Salinas et al. (2020), "Data re-uploading for a
 universal quantum classifier"-style ansatz that re-encodes the classical

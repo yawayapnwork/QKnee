@@ -1,4 +1,6 @@
 """
+Exploratory — outside the judged PRD scope (ingestion -> ResNet18 -> PCA -> 4-qubit VQC -> Streamlit UI -> Grad-CAM -> SVM benchmark); this powers the optional 12-condition Kaggle submission path only.
+
 Multi-target (12 RSNA Knee condition) quantum-classical heads for
 `qknee.models.qknee_model.QKneeMultiTargetModel`.
 

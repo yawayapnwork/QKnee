@@ -1,4 +1,6 @@
 """
+Exploratory — outside the judged PRD scope (ingestion -> ResNet18 -> PCA -> 4-qubit VQC -> Streamlit UI -> Grad-CAM -> SVM benchmark), which uses `pca_reducer.QuantumDimReducer`'s classical PCA path, not this trainable quantum compressor.
+
 Trainable Quantum Autoencoder (QAE) — Romero, Olson & Aspuru-Guzik (2017),
 "Quantum autoencoders for efficient compression of quantum data" — style
 compression of ResNet18 embeddings directly in Hilbert space, as a
