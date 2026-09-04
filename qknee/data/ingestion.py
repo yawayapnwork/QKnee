@@ -35,9 +35,11 @@ from typing import Iterator, List, Literal, Optional, Sequence, Union
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 
+from qknee.config.loader import load_config
 from qknee.data.dataset import IMAGE_EXTENSIONS, VOLUME_EXTENSIONS, build_transforms
 
 logger = logging.getLogger(__name__)
+_config = load_config()
 
 InputType = Union[str, Path, np.ndarray, Image.Image]
 DicomSeriesInput = Sequence[Union[str, Path, object]]  # paths, or file-like uploads with .name/.read()
@@ -72,10 +74,22 @@ class DataIngestion:
         train: Whether to apply the training-time augmentation pipeline
             (see `qknee.data.dataset.build_transforms`). Inference call sites
             should leave this False.
+        dicom_backend: Which `load_dicom_series` backend
+            (`"pydicom"`/`"sitk"`/`"monai"`) this instance's own directory/
+            in-memory-list auto-dispatch (inside `load_volume_array`) uses
+            by default — mirrors `config.resnet.backend_engine`'s
+            "config picks the implementation" pattern. Defaults to
+            `config.yaml`'s `ingestion.backend` (itself defaulting to
+            `"pydicom"`) when omitted; pass an explicit value to override
+            config for one instance without touching `config.yaml`. This
+            only sets the *default* — calling `load_dicom_series(...,
+            backend=...)` directly still overrides it per-call, same as
+            before.
     """
 
-    def __init__(self, train: bool = False) -> None:
+    def __init__(self, train: bool = False, dicom_backend: Optional[DicomSeriesBackend] = None) -> None:
         self.transform = build_transforms(train=train)
+        self.dicom_backend: DicomSeriesBackend = dicom_backend or _config.ingestion.backend
 
     def load_slices_as_pil(self, source: InputType) -> List[Image.Image]:
         """Normalizes any accepted input type into a list of grayscale PIL
@@ -108,12 +122,19 @@ class DataIngestion:
               series, stacked the same way as the directory case)
             - a path to a .nii/.nii.gz NIfTI volume (requires `nibabel`)
 
+        A directory-path DICOM series uses this instance's `self.dicom_backend`
+        (from `config.yaml`'s `ingestion.backend`, or the constructor's
+        `dicom_backend` override — see `DataIngestion.__init__`) — an
+        in-memory list/tuple always uses `"pydicom"` regardless, since that's
+        the only backend that accepts anything other than a real directory
+        on disk.
+
         Raises:
             IngestionError: on a missing/corrupt/unsupported input, with a
                 message naming the offending file and format.
         """
         if isinstance(source, (list, tuple)):
-            return self.load_dicom_series(source)
+            return self.load_dicom_series(source, backend="pydicom")
 
         if isinstance(source, np.ndarray):
             return np.asarray(source)
@@ -125,7 +146,7 @@ class DataIngestion:
             path = Path(source)
 
             if path.is_dir():
-                return self.load_dicom_series(path)
+                return self.load_dicom_series(path, backend=self.dicom_backend)
 
             if not path.exists():
                 raise IngestionError(f"Input file does not exist: {path}")

@@ -35,6 +35,7 @@ import yaml
 BackendEngine = Literal["pytorch", "onnx"]
 MultiTargetHeadType = Literal["multi_observable", "ensemble"]
 VolumetricAggregation = Literal["mean", "attention", "topk_max"]
+DicomBackend = Literal["pydicom", "sitk", "monai"]
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
@@ -97,6 +98,15 @@ class DataConfig:
     batch_size: int
     num_workers: int
     train_augmentation: AugmentationConfig
+
+
+@dataclass(frozen=True)
+class IngestionConfig:
+    # Defaults to "pydicom" directly (not via _build_config) so a bare
+    # IngestionConfig()/QKneeConfig's own default_factory below stays valid
+    # even for a config.yaml/override dict that omits the whole `ingestion:`
+    # section — same optional-section treatment as StorageConfig.
+    backend: DicomBackend = "pydicom"  # "pydicom" (default) -> pydicom, per-file; "sitk" -> SimpleITK; "monai" -> monai.transforms.LoadImage — see qknee.data.ingestion.DataIngestion
 
 
 @dataclass(frozen=True)
@@ -204,6 +214,7 @@ class QKneeConfig:
     evaluation: EvaluationConfig
     api: APIConfig
     logging: LoggingConfig
+    ingestion: IngestionConfig = field(default_factory=IngestionConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     device: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -319,6 +330,13 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             local_users_path=Path(storage_raw.get("local_users_path", "qknee/artifacts/users.json")),
             cache_ttl_seconds=int(storage_raw.get("cache_ttl_seconds", 3600)),
         )
+
+        # Optional section, same treatment as `storage` above: absent
+        # entirely from a config.yaml predating this field still builds a
+        # fully-defaulted IngestionConfig (backend="pydicom") rather than
+        # raising.
+        ingestion_raw = raw.get("ingestion") or {}
+        ingestion = IngestionConfig(backend=ingestion_raw.get("backend", "pydicom"))
     except (KeyError, TypeError) as exc:
         raise ConfigError(f"Malformed config.yaml section: {exc}") from exc
 
@@ -330,6 +348,10 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
     if resnet.backend_engine not in ("pytorch", "onnx"):
         raise ConfigError(
             f"resnet.backend_engine must be 'pytorch' or 'onnx', got {resnet.backend_engine!r}"
+        )
+    if ingestion.backend not in ("pydicom", "sitk", "monai"):
+        raise ConfigError(
+            f"ingestion.backend must be 'pydicom', 'sitk', or 'monai', got {ingestion.backend!r}"
         )
     if resnet.volumetric_aggregation not in ("mean", "attention", "topk_max"):
         raise ConfigError(
@@ -354,6 +376,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         evaluation=evaluation,
         api=api,
         logging=logging_cfg,
+        ingestion=ingestion,
         storage=storage,
         device=raw.get("device"),
         raw=raw,

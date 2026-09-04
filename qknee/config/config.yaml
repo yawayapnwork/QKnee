@@ -30,6 +30,9 @@ data:
     horizontal_flip_prob: 0.5
     gaussian_noise_std: 0.02
 
+ingestion:
+  backend: "pydicom"  # "pydicom" (default, only one that accepts an in-memory upload list) | "sitk" | "monai" — see qknee.data.ingestion.DataIngestion.load_dicom_series; "sitk"/"monai" require a real directory on disk
+
 resnet:
   feature_dim: 512
   freeze_backbone: true

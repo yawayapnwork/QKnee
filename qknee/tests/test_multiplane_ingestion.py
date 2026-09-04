@@ -122,6 +122,44 @@ class TestDicomSeriesBackends:
         assert volume.shape == (6, 24, 32)
 
 
+class TestDicomBackendConfig:
+    """`DataIngestion.dicom_backend` — config.yaml's `ingestion.backend`
+    (default "pydicom") drives the directory-path auto-dispatch backend
+    inside `load_volume_array`; a constructor override beats config."""
+
+    @pytest.fixture
+    def series_dir(self, tmp_path: Path) -> Path:
+        return generate_mock_dicom_series(tmp_path / "series", num_slices=4, rows=16, columns=20, seed=7)
+
+    def test_defaults_to_configured_backend(self):
+        from qknee.config.loader import load_config
+
+        assert DataIngestion().dicom_backend == load_config().ingestion.backend
+
+    def test_constructor_override_beats_config_default(self):
+        assert DataIngestion(dicom_backend="sitk").dicom_backend == "sitk"
+        assert DataIngestion(dicom_backend="monai").dicom_backend == "monai"
+
+    def test_directory_dispatch_actually_uses_the_configured_backend(self, series_dir: Path):
+        """Proves the configured/overridden backend reaches the loader, not
+        just that the attribute is set — constructs with an explicit
+        non-default backend and confirms `load_volume_array` (the
+        no-backend-arg auto-dispatch path) produces the same result as
+        calling `load_dicom_series(..., backend="monai")` directly."""
+        via_config_default = DataIngestion(dicom_backend="monai").load_volume_array(series_dir)
+        via_explicit_backend = DataIngestion().load_dicom_series(series_dir, backend="monai")
+        assert np.array_equal(via_config_default.astype(np.float64), via_explicit_backend.astype(np.float64))
+
+    def test_in_memory_list_always_uses_pydicom_regardless_of_configured_backend(self, series_dir: Path):
+        """A configured/overridden backend of "monai" or "sitk" must not
+        break in-memory-upload-list loading — only "pydicom" supports that
+        input shape, so `load_volume_array`'s list dispatch hardcodes it
+        rather than routing through `self.dicom_backend`."""
+        files = sorted(series_dir.glob("*.dcm"))
+        volume = DataIngestion(dicom_backend="monai").load_volume_array(files)
+        assert volume.shape == (4, 16, 20)
+
+
 class TestCorruptedDicomHandling:
     def test_pydicom_backend_raises_ingestion_error_on_corrupt_file(self, tmp_path: Path):
         bad_dir = tmp_path / "bad"
