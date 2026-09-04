@@ -2,11 +2,13 @@
 Tests for the multi-plane DICOM/MRNet-style ingestion additions:
 
     - `generate_mock_dicom_series` / `DataIngestion.load_dicom_series`
-      (both the `pydicom` and `sitk` backends), including corrupted-header
-      handling.
+      (the `pydicom`, `sitk`, and `monai` backends), including
+      corrupted-header handling and (for `monai`, whose ITK-backed reader
+      returns axes in the opposite order) a pixel-for-pixel cross-backend
+      parity check that would catch a wrong/dropped axis transpose.
     - `MultiPlaneViewSelector` (Axial/Coronal/Sagittal slicing).
     - `standardize_slice`/`zscore_normalize` (resize to (3, 128, 128) +
-      per-slice z-score normalization).
+      per-slice z-score normalization, via `monai.transforms.NormalizeIntensity`).
     - `generate_mock_mrnet_dataset` (the Stanford-MRNet-shaped on-disk mock
       the whole suite here runs against, so no real MRNet download is
       required).
@@ -89,6 +91,30 @@ class TestDicomSeriesBackends:
         with pytest.raises(IngestionError, match="requires a directory path"):
             DataIngestion().load_dicom_series(files, backend="sitk")
 
+    def test_monai_backend_shape(self, series_dir: Path):
+        volume = DataIngestion().load_dicom_series(series_dir, backend="monai")
+        assert volume.shape == (6, 24, 32)
+
+    def test_monai_backend_matches_pydicom_pixel_for_pixel(self, series_dir: Path):
+        """`monai.transforms.LoadImage` returns ITK's native (W, H, D) axis
+        order, the reverse of this module's (D, H, W) contract — this is the
+        one test that would catch a dropped/wrong axis transpose in
+        `_load_dicom_series_monai` silently swapping the depth and width
+        axes instead of erroring (mismatched-shape checks alone wouldn't
+        catch a swap between two axes that happen to be reconcilable in
+        shape, e.g. this fixture's non-square 24x32 slices specifically
+        guard against that: a wrong (H, W)<->(W, H)-only transpose would
+        still shape-mismatch loudly, but this pixel-value check is the
+        actual proof the transpose is correct, not just shaped correctly)."""
+        vol_pydicom = DataIngestion().load_dicom_series(series_dir, backend="pydicom")
+        vol_monai = DataIngestion().load_dicom_series(series_dir, backend="monai")
+        assert np.array_equal(vol_pydicom.astype(np.float64), vol_monai.astype(np.float64))
+
+    def test_monai_backend_rejects_in_memory_file_list(self, series_dir: Path):
+        files = sorted(series_dir.glob("*.dcm"))
+        with pytest.raises(IngestionError, match="requires a directory path"):
+            DataIngestion().load_dicom_series(files, backend="monai")
+
     def test_directory_auto_dispatch_uses_pydicom_backend_by_default(self, series_dir: Path):
         """`load_volume_array` on a bare directory path (no explicit
         `backend=`) should still work end-to-end via the default backend."""
@@ -110,6 +136,23 @@ class TestCorruptedDicomHandling:
         (bad_dir / "corrupt.dcm").write_bytes(b"this is not a valid dicom file")
         with pytest.raises(IngestionError):
             DataIngestion().load_dicom_series(bad_dir, backend="sitk")
+
+    def test_monai_backend_raises_ingestion_error_on_corrupt_file(self, tmp_path: Path):
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        (bad_dir / "corrupt.dcm").write_bytes(b"this is not a valid dicom file")
+        with pytest.raises(IngestionError):
+            DataIngestion().load_dicom_series(bad_dir, backend="monai")
+
+    def test_monai_backend_raises_ingestion_error_on_empty_directory(self, tmp_path: Path):
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with pytest.raises(IngestionError):
+            DataIngestion().load_dicom_series(empty_dir, backend="monai")
+
+    def test_monai_backend_raises_ingestion_error_on_missing_directory(self, tmp_path: Path):
+        with pytest.raises(IngestionError, match="is not a directory"):
+            DataIngestion().load_dicom_series(tmp_path / "does_not_exist", backend="monai")
 
     def test_empty_directory_raises_ingestion_error(self, tmp_path: Path):
         empty_dir = tmp_path / "empty"

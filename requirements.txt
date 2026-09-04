@@ -59,6 +59,14 @@ requests>=2.31.0
 reportlab>=4.0.0
 nibabel>=5.1.0
 SimpleITK>=2.3.0
+# Upper-bounded at <1.5.0 deliberately: monai 1.5.0+ requires torch>=2.4.1,
+# which conflicts with this file's own torch<2.4.0 pin (see the CPU-wheel-size
+# rationale at the top of this file) — monai<1.5.0 only needs torch>=1.9, so
+# it stays compatible without loosening the torch pin. Used by
+# qknee.data.ingestion.DataIngestion.load_dicom_series(backend="monai") and
+# qknee.data.dataset.zscore_normalize (monai.transforms.LoadImage /
+# NormalizeIntensity).
+monai>=1.3.0,<1.5.0
 
 # The FastAPI server (qknee/api/*, now quarantined to extras/api/ — see
 # extras/README.md) and its auth/storage stack (fastapi, uvicorn,

@@ -130,6 +130,15 @@ def zscore_normalize(slice_2d: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     cleanly to another. Per-slice normalization is the standard choice for
     MRNet-style multi-plane pipelines for exactly this reason.
 
+    The actual `(x - subtrahend) / divisor` arithmetic is delegated to
+    `monai.transforms.NormalizeIntensity` — this function still computes
+    `mean`/`std` itself (rather than MONAI's own auto-computed stats) purely
+    so the `eps` guard against a zero-variance slice stays honored exactly
+    as documented, bit-for-bit identical to this function's pre-MONAI
+    hand-rolled version (verified: `NormalizeIntensity(subtrahend=mean,
+    divisor=std+eps)` reproduces `(x - mean) / (std + eps)` exactly,
+    including the constant-slice/zero-std case).
+
     Args:
         slice_2d: A 2D array of any real dtype.
         eps: Added to the standard deviation to avoid a divide-by-zero on a
@@ -139,9 +148,17 @@ def zscore_normalize(slice_2d: np.ndarray, eps: float = 1e-6) -> np.ndarray:
         `float32` array of the same shape, zero mean / unit variance
         (before `eps`).
     """
-    array = np.asarray(slice_2d, dtype=np.float32)
+    from monai.transforms import NormalizeIntensity
+
+    # np.array(..., copy always) rather than np.asarray: NormalizeIntensity
+    # converts its input to a torch tensor internally, which raises/warns on
+    # a non-writable array (e.g. a read-only view straight off a PIL
+    # buffer) — np.asarray would silently pass such a view through
+    # unchanged whenever the dtype already matched.
+    array = np.array(slice_2d, dtype=np.float32)
     mean, std = float(array.mean()), float(array.std())
-    return (array - mean) / (std + eps)
+    normalizer = NormalizeIntensity(subtrahend=mean, divisor=std + eps)
+    return np.asarray(normalizer(array), dtype=np.float32)
 
 
 def standardize_slice(

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 InputType = Union[str, Path, np.ndarray, Image.Image]
 DicomSeriesInput = Sequence[Union[str, Path, object]]  # paths, or file-like uploads with .name/.read()
-DicomSeriesBackend = Literal["pydicom", "sitk"]
+DicomSeriesBackend = Literal["pydicom", "sitk", "monai"]
 
 DICOM_EXTENSIONS = {".dcm", ".dicom"}
 
@@ -263,6 +263,14 @@ class DataIngestion:
                 one folder, non-integer `ImagePositionPatient` ordering)
                 at the cost of requiring a real directory on disk (GDCM
                 reads files by path, not from an in-memory upload).
+                `"monai"` delegates the same way to
+                `monai.transforms.LoadImage` (ITK-backed DICOM series
+                reader under the hood) — same directory-only restriction as
+                `"sitk"`, offered as an alternative for callers already
+                standardized on MONAI elsewhere in their pipeline. Verified
+                pixel-identical to `"pydicom"`/`"sitk"` on a round-tripped
+                identity-Modality-LUT series (see
+                `TestDicomSeriesBackends.test_monai_backend_matches_pydicom_pixel_for_pixel`).
 
         Returns:
             `(D, H, W)` array, one calibrated slice per input file.
@@ -271,8 +279,17 @@ class DataIngestion:
             IngestionError: if a directory path has no `.dcm`/`.dicom`
                 files, the file list is empty, a file fails to read/decode,
                 the series' slices don't share a common `(H, W)` shape, or
-                (`backend="sitk"`) the input isn't a directory path.
+                (`backend="sitk"`/`"monai"`) the input isn't a directory path.
         """
+        if backend == "monai":
+            if not isinstance(directory_path_or_files, (str, Path)):
+                raise IngestionError(
+                    "backend='monai' requires a directory path on disk (monai.transforms."
+                    "LoadImage reads a DICOM series by path, not from an in-memory upload "
+                    "list); pass backend='pydicom' for an in-memory list of uploads."
+                )
+            return self._load_dicom_series_monai(Path(directory_path_or_files))
+
         if backend == "sitk":
             if not isinstance(directory_path_or_files, (str, Path)):
                 raise IngestionError(
@@ -366,6 +383,65 @@ class DataIngestion:
                 f"Expected a 3D DICOM series volume (D, H, W) from {directory}, got shape {volume.shape}"
             )
         return np.asarray(volume)
+
+    @staticmethod
+    def _load_dicom_series_monai(directory: Path) -> np.ndarray:
+        """Reads a DICOM series directory via `monai.transforms.LoadImage` —
+        an alternative to `_read_and_stack_dicom_series` (pydicom) and
+        `_load_dicom_series_sitk` (raw SimpleITK), for callers already
+        standardized on MONAI elsewhere in their pipeline. MONAI's default
+        DICOM reader is itself ITK-backed (same GDCM series discovery,
+        Modality LUT rescaling, and MONOCHROME1/2 resolution as the `sitk`
+        backend), so this shares `sitk`'s directory-only restriction and its
+        "no further calibration needed" property — no `_normalize_dicom_dataset`
+        call here either.
+
+        `LoadImage` returns ITK's native `(W, H, D)` axis order (confirmed
+        empirically against this module's own `pydicom` backend on a
+        round-tripped identity-Modality-LUT mock series — see
+        `TestDicomSeriesBackends.test_monai_backend_matches_pydicom_pixel_for_pixel`),
+        the reverse of every other volume format in this module — the
+        `np.transpose(..., (2, 1, 0))` below is what actually enforces the
+        `(D, H, W)` contract the rest of the pipeline expects; dropping it
+        would silently swap the depth and width axes without erroring.
+
+        Raises:
+            IngestionError: if `directory` isn't a directory, contains no
+                readable DICOM series, or `monai`/its DICOM reader fails to
+                read it (corrupted headers, unreadable transfer syntax, a
+                directory with slices of mismatched shape, etc).
+        """
+        try:
+            from monai.transforms import LoadImage
+        except ImportError as exc:
+            raise IngestionError(
+                "Reading a DICOM series via backend='monai' requires the optional 'monai' "
+                "dependency (pip install monai) — not installed in a lightweight/serverless "
+                "deployment. Use the default pydicom-based series reader instead."
+            ) from exc
+
+        if not directory.is_dir():
+            raise IngestionError(f"'{directory}' is not a directory.")
+
+        loader = LoadImage(image_only=True, ensure_channel_first=False)
+        try:
+            image = loader(str(directory))
+        except Exception as exc:  # noqa: BLE001 - MONAI raises a mix of concrete
+            # exception types here (IndexError on an empty/all-unreadable
+            # directory, ValueError on mismatched slice shapes, FileNotFoundError
+            # on a missing path, plus reader-internal errors) rather than one
+            # dedicated exception class, so every failure mode is normalized
+            # into IngestionError the same way the pydicom/sitk backends do.
+            raise IngestionError(
+                f"monai.transforms.LoadImage failed to read a DICOM series from {directory}: {exc}"
+            ) from exc
+
+        volume = np.transpose(np.asarray(image), (2, 1, 0))  # ITK (W, H, D) -> (D, H, W)
+        if volume.ndim != 3:
+            raise IngestionError(
+                f"Expected a 3D DICOM series volume (D, H, W) from {directory}, got shape {volume.shape}"
+            )
+        return volume
 
     def _read_and_stack_dicom_series(self, file_items: DicomSeriesInput) -> np.ndarray:
         """Reads + sorts + stacks an already-resolved list of DICOM
@@ -617,12 +693,12 @@ def generate_mock_dicom_series(
     modality: str = "MR",
 ) -> Path:
     """Writes a synthetic, structurally valid multi-file DICOM series to
-    `output_dir` (one `.dcm` per slice) — readable by both
-    `DataIngestion.load_dicom_series(..., backend="pydicom")` and
-    `backend="sitk"`, and by any real DICOM viewer/toolkit, without
-    requiring network access or the real (multi-GB, credentialed) Stanford
-    MRNet raw dataset. Deterministic given `seed`, so tests built on top of
-    it are reproducible.
+    `output_dir` (one `.dcm` per slice) — readable by
+    `DataIngestion.load_dicom_series(..., backend="pydicom")`,
+    `backend="sitk"`, and `backend="monai"` alike, and by any real DICOM
+    viewer/toolkit, without requiring network access or the real (multi-GB,
+    credentialed) Stanford MRNet raw dataset. Deterministic given `seed`,
+    so tests built on top of it are reproducible.
 
     Each slice carries a real `SOPInstanceUID`/`SeriesInstanceUID`,
     incrementing `InstanceNumber` and `SliceLocation` (so both sort keys
