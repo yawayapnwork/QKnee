@@ -452,6 +452,7 @@ def build_dataloaders(
 
 RSNA_UID_COLUMN = "StudyInstanceUID"
 RSNA_PLANE_COLUMN = "Anatomical_Plane"
+RSNA_SERIES_UID_COLUMN = "SeriesInstanceUID"
 RSNA_PLANES: Tuple[str, str, str] = ("Sagittal", "Coronal", "Axial")
 
 # The 12 standard RSNA Knee abnormality target columns, in the exact order
@@ -571,29 +572,77 @@ def load_rsna_labels_csv(
     return df.reset_index(drop=True)
 
 
+def load_rsna_series_csv(csv_path: Union[str, Path]) -> pd.DataFrame:
+    """Loads an RSNA-Knee-format `train_series.csv`/`test_series.csv` — one
+    row per DICOM series, mapping each `SeriesInstanceUID` to its parent
+    `StudyInstanceUID` and `Anatomical_Plane` (Sagittal/Coronal/Axial).
+
+    This mapping is required to resolve which on-disk series directory
+    belongs to which plane: the real competition's DICOM layout nests by
+    `SeriesInstanceUID` — an opaque identifier bearing no relation to the
+    plane name — never by a literal `Sagittal`/`Coronal`/`Axial` folder.
+    See `RSNAKneeDataset`'s docstring.
+
+    Raises:
+        FileNotFoundError: if `csv_path` doesn't exist.
+        ValueError: if any of `StudyInstanceUID`/`SeriesInstanceUID`/
+            `Anatomical_Plane` is missing from the file.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"RSNA series CSV not found: {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    required = (RSNA_UID_COLUMN, RSNA_SERIES_UID_COLUMN, RSNA_PLANE_COLUMN)
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{csv_path} is missing required column(s) {missing}. Found columns: {list(df.columns)}"
+        )
+
+    df[RSNA_UID_COLUMN] = df[RSNA_UID_COLUMN].astype(str).str.strip()
+    df[RSNA_SERIES_UID_COLUMN] = df[RSNA_SERIES_UID_COLUMN].astype(str).str.strip()
+    return df
+
+
 def discover_rsna_plane_series(
     series_dir: Union[str, Path],
     study_instance_uid: str,
+    series_to_plane: Dict[str, str],
     planes: Sequence[str] = RSNA_PLANES,
-) -> Dict[str, Path]:
-    """Resolves `<series_dir>/<study_instance_uid>/<plane>/` for each of
-    `planes`, returning only the ones that exist AND contain at least one
-    `.dcm`/`.dicom` file. A study missing a plane (common — not every exam
-    includes all three) simply isn't a key in the returned dict; this
-    never raises for a missing/incomplete study."""
+) -> Dict[str, List[Path]]:
+    """Resolves every DICOM series directory actually on disk under
+    `<series_dir>/<study_instance_uid>/<SeriesInstanceUID>/`, grouped by
+    anatomical plane via `series_to_plane` (built from
+    `train_series.csv`/`test_series.csv` — see `load_rsna_series_csv`).
+
+    Two real-data properties this must account for (neither holds for a
+    literal-plane-name-folder layout):
+        - The plane is series-level *metadata*, not the folder name — a
+          series subdirectory is named by its opaque `SeriesInstanceUID`.
+        - A study can carry more than one series for the same plane (e.g.
+          distinct fluid-sensitive/fat-suppressed sequences), so this
+          returns `{plane: [series_dir, ...]}` — a list per plane, not a
+          single path.
+
+    A series subdirectory not present in `series_to_plane`, or whose plane
+    isn't in `planes`, is skipped. A study missing a plane entirely (or
+    missing from disk altogether) simply isn't a key in the returned
+    dict; this never raises for a missing/incomplete study.
+    """
     from qknee.data.ingestion import DICOM_EXTENSIONS
 
     study_dir = Path(series_dir) / study_instance_uid
-    found: Dict[str, Path] = {}
+    found: Dict[str, List[Path]] = {}
     if not study_dir.is_dir():
         return found
 
-    for plane in planes:
-        plane_dir = study_dir / plane
-        if plane_dir.is_dir() and any(
-            p.is_file() and p.suffix.lower() in DICOM_EXTENSIONS for p in plane_dir.iterdir()
-        ):
-            found[plane] = plane_dir
+    for series_subdir in sorted(p for p in study_dir.iterdir() if p.is_dir()):
+        plane = series_to_plane.get(series_subdir.name)
+        if plane is None or plane not in planes:
+            continue
+        if any(p.is_file() and p.suffix.lower() in DICOM_EXTENSIONS for p in series_subdir.iterdir()):
+            found.setdefault(plane, []).append(series_subdir)
     return found
 
 
@@ -603,15 +652,19 @@ class RSNAStudyRecord:
     its per-plane DICOM series directories actually exist on disk."""
 
     study_instance_uid: str
-    plane_series_dirs: Dict[str, Path]                # {"Sagittal": Path(...), ...} — only planes found on disk
+    plane_series_dirs: Dict[str, List[Path]]           # {"Sagittal": [Path(...), ...], ...} — only planes found on disk
     targets: Optional[Dict[str, Optional[float]]]      # None for a test-set record; else {column: float | None}
 
 
 class RSNAKneeDataset:
     """Parses an RSNA-Knee-format `train.csv`/`test.csv` (`StudyInstanceUID`
     + the 12 `RSNA_TARGET_COLUMNS` abnormality labels) and pairs every row
-    with whichever per-plane DICOM series directories exist under
-    `series_dir/<StudyInstanceUID>/<Sagittal|Coronal|Axial>/`.
+    with whichever DICOM series directories exist under
+    `series_dir/<StudyInstanceUID>/<SeriesInstanceUID>/`, resolving each
+    series's anatomical plane via the companion `train_series.csv`/
+    `test_series.csv` (see `load_rsna_series_csv`) — the real competition
+    layout nests by `SeriesInstanceUID`, never by a literal plane-name
+    folder, and a study can carry multiple series per plane.
 
     Every CSV row becomes exactly one `RSNAStudyRecord`, even if none of
     its plane directories exist on disk (`plane_series_dirs` is then an
@@ -626,7 +679,12 @@ class RSNAKneeDataset:
         csv_path: Path to `train.csv` or `test.csv`.
         series_dir: Root directory containing one subdirectory per
             `StudyInstanceUID`.
-        planes: Which `Anatomical_Plane` subdirectory names to look for.
+        series_csv_path: Path to the companion `train_series.csv`/
+            `test_series.csv` (`StudyInstanceUID`, `SeriesInstanceUID`,
+            `Anatomical_Plane` columns). Defaults to `<csv_path's stem>_series
+            <csv_path's suffix>` alongside `csv_path` (i.e. `train.csv` ->
+            `train_series.csv`), matching the real competition's naming.
+        planes: Which `Anatomical_Plane` values to keep.
         require_targets: If `True`, raise if any of the 12 target columns
             is entirely absent from the CSV — set this for `train.csv`.
     """
@@ -635,6 +693,7 @@ class RSNAKneeDataset:
         self,
         csv_path: Union[str, Path],
         series_dir: Union[str, Path],
+        series_csv_path: Optional[Union[str, Path]] = None,
         planes: Sequence[str] = RSNA_PLANES,
         require_targets: bool = False,
     ) -> None:
@@ -642,6 +701,11 @@ class RSNAKneeDataset:
         self.series_dir = Path(series_dir)
         self.planes = tuple(planes)
         self._has_targets = require_targets or self._csv_has_any_target_columns()
+
+        if series_csv_path is None:
+            series_csv_path = self.csv_path.with_name(f"{self.csv_path.stem}_series{self.csv_path.suffix}")
+        self.series_csv_path = Path(series_csv_path)
+        self._series_to_plane = self._load_series_to_plane_map()
 
         self.frame = load_rsna_labels_csv(self.csv_path, require_targets=require_targets)
         self._records = self._build_records()
@@ -652,6 +716,10 @@ class RSNAKneeDataset:
                 "%d/%d studies from %s have no DICOM series found under %s.",
                 n_missing_series, len(self._records), self.csv_path, self.series_dir,
             )
+
+    def _load_series_to_plane_map(self) -> Dict[str, str]:
+        series_frame = load_rsna_series_csv(self.series_csv_path)
+        return dict(zip(series_frame[RSNA_SERIES_UID_COLUMN], series_frame[RSNA_PLANE_COLUMN]))
 
     def _csv_has_any_target_columns(self) -> bool:
         try:
@@ -664,7 +732,7 @@ class RSNAKneeDataset:
         records: List[RSNAStudyRecord] = []
         for _, row in self.frame.iterrows():
             uid = row[RSNA_UID_COLUMN]
-            plane_dirs = discover_rsna_plane_series(self.series_dir, uid, self.planes)
+            plane_dirs = discover_rsna_plane_series(self.series_dir, uid, self._series_to_plane, self.planes)
 
             targets: Optional[Dict[str, Optional[float]]] = None
             if self._has_targets:

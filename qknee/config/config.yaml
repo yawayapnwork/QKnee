@@ -15,6 +15,7 @@ paths:
   eval_output_dir: "eval_outputs"
   deck_output_dir: "deck_assets"
   checkpoint_dir: "qknee/artifacts/checkpoints"  # periodic + best-model checkpoints from scripts/train.py
+  rsna_series_dir: null  # env: RSNA_SERIES_DIR — real train_series/ DICOM root for qknee.data.dataset.RSNAKneeDataset; unset by default, set via env var on a machine that has the data
 
 data:
   image_size: [224, 224]

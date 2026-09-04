@@ -259,15 +259,22 @@ class RSNAInferenceDataset(Dataset):
             # built in the main process across the fork boundary.
             self._ingestion = DataIngestion(train=False)
 
-        planes: Dict[str, torch.Tensor] = {}
-        for plane_name, plane_dir in record.plane_series_dirs.items():
-            try:
-                planes[plane_name] = self._ingestion.preprocess(plane_dir).squeeze(0)  # (S, 3, 224, 224)
-            except IngestionError as exc:
-                logger.warning(
-                    "Study %s, plane %s: failed to load/preprocess series at %s: %s",
-                    record.study_instance_uid, plane_name, plane_dir, exc,
-                )
+        # A plane can now map to more than one series directory (e.g.
+        # distinct fluid-sensitive/fat-sat sagittal sequences) — see
+        # qknee.data.dataset.discover_rsna_plane_series — so each plane
+        # holds a list of preprocessed series tensors, not one.
+        planes: Dict[str, List[torch.Tensor]] = {}
+        for plane_name, plane_dirs in record.plane_series_dirs.items():
+            for plane_dir in plane_dirs:
+                try:
+                    tensor = self._ingestion.preprocess(plane_dir).squeeze(0)  # (S, 3, 224, 224)
+                except IngestionError as exc:
+                    logger.warning(
+                        "Study %s, plane %s: failed to load/preprocess series at %s: %s",
+                        record.study_instance_uid, plane_name, plane_dir, exc,
+                    )
+                    continue
+                planes.setdefault(plane_name, []).append(tensor)
         return {"study_instance_uid": record.study_instance_uid, "planes": planes}
 
 
@@ -342,17 +349,18 @@ def score_study_from_item(
     model-covered column when the study has zero usable plane series, or
     when every plane fails inference for that column's head)."""
     uid = item["study_instance_uid"]
-    planes: Dict[str, torch.Tensor] = item["planes"]  # type: ignore[assignment]
+    planes: Dict[str, List[torch.Tensor]] = item["planes"]  # type: ignore[assignment]
     row: Dict[str, float] = dict(class_priors)
 
     if not planes:
         logger.warning("Study %s: no usable plane series; all columns fall back to class priors.", uid)
         return row
 
+    series_tensors = [tensor for tensors in planes.values() for tensor in tensors]
     for head_name in set(MODEL_COVERED_COLUMNS.values()):
         vqc_head = vqc_heads[head_name]
         plane_scores = [
-            score for plane_tensor in planes.values()
+            score for plane_tensor in series_tensors
             if (score := score_plane_tensor(angles_backend, plane_tensor, vqc_head, device)) is not None
         ]
         aggregated = aggregate_scores(plane_scores, aggregation)

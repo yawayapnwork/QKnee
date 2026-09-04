@@ -74,3 +74,10 @@ deck_assets/
 *.db
 *.sqlite3
 qknee_users.db
+
+train.csv
+train_series.csv
+train_series/
+
+rsna_*.log
+rsna_labeled_fetch_checkpoint.json

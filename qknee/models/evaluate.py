@@ -247,9 +247,26 @@ def train_quantum_vqc(
     X_train, y_train, X_test,
     n_epochs: int = _config.training.n_epochs,
     lr: float = _config.training.learning_rate,
+    early_stopping_patience: Optional[int] = None,
+    early_stopping_min_delta: float = _config.training.early_stopping_min_delta,
+    log_label: str = "",
 ) -> np.ndarray:
     """StandardScaler -> PCA(n_qubits) -> [0, 2*pi] -> n-qubit VQC, trained
-    with a standard PyTorch optimizer loop."""
+    with a standard PyTorch optimizer loop.
+
+    `n_epochs` is a ceiling, not a fixed budget, when `early_stopping_patience`
+    is set: training stops early once the training-loss hasn't improved by
+    more than `early_stopping_min_delta` for `early_stopping_patience`
+    consecutive epochs — the same plateau contract `scripts/train.py` uses
+    (`config.training.early_stopping_patience`/`early_stopping_min_delta`),
+    reused here since the VQC has no separate validation split to early-stop
+    against; this loop tracks the training loss itself. Every epoch's loss is
+    printed (no `epoch % 20` gap), so the actual convergence shape is visible
+    in the log, not just two sampled points.
+
+    `log_label` is prefixed to each printed line (e.g. a condition name) so a
+    multi-condition caller's interleaved log stays attributable.
+    """
     reducer = QuantumDimReducer(use_incremental_pca=_config.pca.use_incremental_pca)
     quantum_train = reducer.fit_transform(X_train)
     quantum_test = reducer.transform(X_test)
@@ -261,6 +278,11 @@ def train_quantum_vqc(
     X_train_t = torch.from_numpy(quantum_train).float()
     y_train_t = torch.from_numpy(y_train).float().unsqueeze(1)
 
+    prefix = f"[VQC{' ' + log_label if log_label else ''}]"
+    best_loss = float("inf")
+    epochs_without_improvement = 0
+    stopped_epoch = n_epochs - 1
+
     model.train()
     for epoch in range(n_epochs):
         optimizer.zero_grad()
@@ -268,8 +290,28 @@ def train_quantum_vqc(
         loss = loss_fn(predictions, y_train_t)
         loss.backward()
         optimizer.step()
-        if epoch % 20 == 0 or epoch == n_epochs - 1:
-            print(f"    [VQC] epoch {epoch:3d} | loss = {loss.item():.4f}")
+        loss_value = loss.item()
+        print(f"    {prefix} epoch {epoch:3d} | loss = {loss_value:.4f}")
+
+        if early_stopping_patience is not None:
+            if loss_value < best_loss - early_stopping_min_delta:
+                best_loss = loss_value
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if epochs_without_improvement >= early_stopping_patience:
+                stopped_epoch = epoch
+                print(
+                    f"    {prefix} early-stopped at epoch {epoch} "
+                    f"(no improvement > {early_stopping_min_delta} for {early_stopping_patience} epochs; "
+                    f"best_loss={best_loss:.4f})"
+                )
+                break
+        else:
+            stopped_epoch = epoch
+
+    if early_stopping_patience is not None and stopped_epoch == n_epochs - 1 and epochs_without_improvement < early_stopping_patience:
+        print(f"    {prefix} reached epoch ceiling ({n_epochs}) without plateauing (loss still improving)")
 
     model.eval()
     with torch.no_grad():
@@ -680,6 +722,125 @@ def generate_multilabel_synthetic_dataset(
     return features, labels
 
 
+def build_rsna_feature_dataset(
+    csv_path: Union[str, Path],
+    series_dir: Union[str, Path],
+    series_csv_path: Optional[Union[str, Path]] = None,
+    resnet_extractor: Optional["ResNet18FeatureExtractor"] = None,  # noqa: F821 - see local import below
+    condition_names: Sequence[str] = RSNA_TARGET_COLUMNS,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], List[str]]:
+    """Builds a real `(N, 512)` ResNet18-embedding dataset (plus one binary
+    label array per `condition_names`) from a real, on-disk
+    `qknee.data.dataset.RSNAKneeDataset` — the RSNA-competition analogue of
+    `build_mrnet_validation_subset`, feeding `run_kaggle_macro_auc_benchmark`
+    real data instead of `generate_multilabel_synthetic_dataset`.
+
+    Only studies with every one of `condition_names` labeled (non-NaN) are
+    kept — the real competition labels only a small minority of studies
+    (see `RSNAKneeDataset`'s docstring) — so all 12 conditions share one
+    consistent set of rows/train-test split, matching
+    `run_kaggle_macro_auc_benchmark`'s "same split for every architecture"
+    contract.
+
+    For each kept study, every available plane's DICOM series directory is
+    preprocessed via `DataIngestion.preprocess` — the whole directory of
+    real slices, the same pattern `extras/scripts/generate_kaggle_submission.py`'s
+    `RSNAInferenceDataset` already uses — then passed to `resnet_extractor`
+    as its native `(1, S, 3, 224, 224)` shape so `ResNet18FeatureExtractor.
+    forward()` dispatches to `forward_volume` (mean-pools over the S real
+    slices into one `(1, 512)` embedding); squeezing the slice dimension
+    away first would misdispatch to `forward_slice` and silently return S
+    *unpooled* per-slice embeddings instead. Every series' embedding for a
+    study is then mean-pooled into one 512-D study-level feature vector.
+
+    This deliberately does NOT go through `MultiPlaneViewSelector` — that
+    class's axis-based plane selection is built for one canonical `(D,H,W)`
+    volume, and is the source of the bug flagged in
+    `build_mrnet_validation_subset` (see that function's docstring); it
+    doesn't apply to, and must not be introduced into, RSNA's
+    directory-of-real-slices series format.
+
+    Args:
+        csv_path: Path to `train.csv` (or a subset of it).
+        series_dir: Root directory containing one subdirectory per
+            `StudyInstanceUID` (each holding `SeriesInstanceUID`
+            subdirectories of `.dcm` files) — see `RSNAKneeDataset`.
+        series_csv_path: Path to the companion `train_series.csv`;
+            defaults per `RSNAKneeDataset`'s own convention.
+        resnet_extractor: A frozen `ResNet18FeatureExtractor` to reuse;
+            built fresh if omitted.
+        condition_names: Which of the 12 `RSNA_TARGET_COLUMNS` to require
+            labels for and build a label array for.
+
+    Returns:
+        `(features, labels, kept_study_uids)`: `features` is `(N, 512)`
+        float32; `labels` is `{condition: (N,) int64 array}`;
+        `kept_study_uids` is the `StudyInstanceUID` for each row, in order.
+
+    Raises:
+        RuntimeError: if zero studies have both full label coverage for
+            `condition_names` and at least one usable DICOM series on disk.
+    """
+    from qknee.data.dataset import RSNAKneeDataset
+    from qknee.data.ingestion import DataIngestion
+    from qknee.models.resnet_extractor import ResNet18FeatureExtractor
+
+    dataset = RSNAKneeDataset(csv_path, series_dir, series_csv_path=series_csv_path, require_targets=True)
+
+    if resnet_extractor is None:
+        resnet_extractor = ResNet18FeatureExtractor(freeze_backbone=True)
+    resnet_extractor.eval()
+    ingestion = DataIngestion(train=False)
+
+    features: List[np.ndarray] = []
+    labels: Dict[str, List[int]] = {condition: [] for condition in condition_names}
+    kept_uids: List[str] = []
+
+    with torch.no_grad():
+        for record in dataset:
+            if record.targets is None or any(record.targets.get(condition) is None for condition in condition_names):
+                continue  # unlabeled (or partially labeled) study — skip
+
+            series_dirs = [d for dirs in record.plane_series_dirs.values() for d in dirs]
+            if not series_dirs:
+                logger.warning(
+                    "Study %s: labeled but no usable DICOM series on disk; skipping.",
+                    record.study_instance_uid,
+                )
+                continue
+
+            series_features: List[np.ndarray] = []
+            for series_path in series_dirs:
+                try:
+                    batch = ingestion.preprocess(series_path)      # (1, S, 3, 224, 224) — S real slices
+                    feature_vector = resnet_extractor(batch)       # (1, 512) — forward_volume mean-pools over S
+                except Exception as exc:  # noqa: BLE001 - one bad series must not drop the whole study
+                    logger.warning(
+                        "Study %s: failed to load/embed series at %s: %s",
+                        record.study_instance_uid, series_path, exc,
+                    )
+                    continue
+                series_features.append(feature_vector.squeeze(0).numpy())
+
+            if not series_features:
+                continue
+
+            features.append(np.mean(series_features, axis=0).astype(np.float32))
+            for condition in condition_names:
+                labels[condition].append(int(record.targets[condition]))
+            kept_uids.append(record.study_instance_uid)
+
+    if not features:
+        raise RuntimeError(
+            "build_rsna_feature_dataset: zero labeled studies had a usable DICOM series on disk — "
+            f"checked {len(dataset)} studies from {csv_path} against {series_dir}."
+        )
+
+    features_arr = np.stack(features).astype(np.float32)
+    labels_arr = {condition: np.array(values, dtype=np.int64) for condition, values in labels.items()}
+    return features_arr, labels_arr, kept_uids
+
+
 def compute_macro_auc(
     y_true: Dict[str, np.ndarray],
     y_prob: Dict[str, np.ndarray],
@@ -746,6 +907,86 @@ def compute_macro_auc(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Known ground-truth label-quality issues in the 58 real labeled RSNA studies.
+#
+# Not a code defect — a property of the source labels themselves, confirmed by
+# a manual audit of all 58 studies' report text against their assigned label
+# (see rsna_effusion_audit_context.txt / rsna_effusion_audit_input.csv in the
+# repo root). Recorded here so `compute_macro_auc_excluding` can attach a
+# reason automatically instead of a caller re-deriving/re-typing it, and so
+# the reason travels with any exported summary that uses it.
+# --------------------------------------------------------------------------- #
+
+KNOWN_LABEL_ISSUES: Dict[str, str] = {
+    "Effusion": (
+        "Ground-truth Effusion labels were audited against report text for all 58 "
+        "labeled RSNA studies. ~43% (25/58) show the same mild/small/trace-severity "
+        "wording mapped to opposite labels elsewhere in the set, including 5 cases of "
+        "verbatim-identical phrasing (e.g. 'Small joint effusion', 'Leve derrame "
+        "articular', 'Geringer Gelenkerguss') labeled both 0 and 1 in different "
+        "studies. A macro-AUC computed with Effusion included is therefore partly "
+        "scoring against label noise, not just model quality."
+    ),
+}
+
+
+def compute_macro_auc_excluding(
+    per_condition_auc: Dict[str, Optional[float]],
+    exclude: Sequence[str],
+    core_subset: Sequence[str] = RSNA_CORE_SUBSET,
+    known_issues: Dict[str, str] = KNOWN_LABEL_ISSUES,
+) -> Dict[str, Any]:
+    """Recomputes a macro-AUC *view* from an ALREADY-COMPUTED `per_condition_auc`
+    dict (e.g. `compute_macro_auc`'s output) with `exclude` additionally dropped
+    from the average — no retraining or re-scoring, just a different aggregation
+    over the same per-condition scores already computed. This is a sensitivity
+    check to be reported *alongside* the original full-condition view, not a
+    replacement for it — see `export_kaggle_benchmark_summary`'s `alternate_views`.
+
+    Args:
+        per_condition_auc: `{condition: auc | None}`, as returned inside
+            `compute_macro_auc`'s result dict.
+        exclude: Conditions to drop from this view's average (in addition to
+            any already `None` from `compute_macro_auc`, e.g. single-class
+            test folds).
+        core_subset: Same core-subset conditions `compute_macro_auc` reports
+            on; any of these in `exclude` is dropped from this view's core
+            subset too.
+        known_issues: `{condition: reason}` — a reason string is attached
+            per excluded condition when present here (see `KNOWN_LABEL_ISSUES`);
+            an excluded condition absent from this dict gets no reason text,
+            not an error, since not every exclusion is label-quality-driven.
+
+    Returns:
+        `{"excluded_conditions": [...], "exclusion_reasons": {condition: reason},
+          "final_score": float | None, "n_conditions_scored": int,
+          "core_subset": {"conditions": [...], "mean_auc": float | None}}`
+    """
+    exclude_set = set(exclude)
+    kept = {
+        condition: score
+        for condition, score in per_condition_auc.items()
+        if score is not None and condition not in exclude_set
+    }
+    final_score = float(np.mean(list(kept.values()))) if kept else None
+
+    kept_core = [c for c in core_subset if c not in exclude_set]
+    core_scores = [per_condition_auc[c] for c in kept_core if per_condition_auc.get(c) is not None]
+    core_mean = float(np.mean(core_scores)) if core_scores else None
+
+    return {
+        "excluded_conditions": list(exclude),
+        "exclusion_reasons": {c: known_issues[c] for c in exclude if c in known_issues},
+        "final_score": final_score,
+        "n_conditions_scored": len(kept),
+        "core_subset": {
+            "conditions": kept_core,
+            "mean_auc": core_mean,
+        },
+    }
+
+
 # Which callable implements each named architecture for the comparative
 # analysis below — reuses this module's three *original* baseline
 # functions (each trained directly on the full 512-D embedding, no 4-D
@@ -764,35 +1005,70 @@ def run_kaggle_macro_auc_benchmark(
     seed: int = _config.evaluation.random_seed,
     condition_names: Sequence[str] = RSNA_TARGET_COLUMNS,
     architectures: Optional[Dict[str, Callable]] = None,
+    rsna_csv_path: Optional[Union[str, Path]] = None,
+    rsna_series_dir: Optional[Union[str, Path]] = None,
+    rsna_series_csv_path: Optional[Union[str, Path]] = None,
+    vqc_early_stopping_patience: Optional[int] = None,
+    vqc_early_stopping_min_delta: float = _config.training.early_stopping_min_delta,
 ) -> Dict[str, Any]:
-    """Trains each named architecture once per RSNA target condition on
-    one shared synthetic multi-label dataset
-    (`generate_multilabel_synthetic_dataset`) and computes each
-    architecture's macro-averaged ROC-AUC (`compute_macro_auc`) — the
-    comparative analysis `export_kaggle_benchmark_summary` serializes.
+    """Trains each named architecture once per RSNA target condition and
+    computes each architecture's macro-averaged ROC-AUC (`compute_macro_auc`)
+    — the comparative analysis `export_kaggle_benchmark_summary` serializes.
+
+    Data source: synthetic by default (`generate_multilabel_synthetic_dataset`,
+    `n_samples` rows). Pass `rsna_csv_path` + `rsna_series_dir` (real
+    `train.csv` + the `train_series/` DICOM root — see
+    `qknee.data.dataset.RSNAKneeDataset`) to instead pull real, ResNet18-
+    embedded studies via `build_rsna_feature_dataset` — `n_samples` is then
+    ignored; the row count is however many real studies have both full
+    label coverage for `condition_names` and a usable DICOM series on disk
+    (the real competition labels only a small minority of studies, so this
+    is typically far smaller than the synthetic default).
 
     All three architectures share the exact same train/test row split and
     the exact same per-condition labels, so the comparison isolates "which
     architecture" rather than confounding it with different data.
 
     Args:
-        n_samples: Synthetic dataset size.
+        n_samples: Synthetic dataset size (ignored when `rsna_csv_path` is given).
         n_epochs: Training epochs for the VQC architecture (the two
             classical baselines below don't use gradient-descent epochs).
-        seed: RNG seed for both the synthetic dataset and the train/test split.
+        seed: RNG seed for the synthetic dataset (when used) and the train/test split.
         condition_names: Which of the 12 RSNA conditions to score.
         architectures: `{name: train_fn}` overriding the default trio
             (`_KAGGLE_BENCHMARK_ARCHITECTURES`) — `train_fn` must have the
             signature `(X_train, y_train, X_test) -> (n_test,) probability array`.
+        rsna_csv_path: Real `train.csv` path — switches to real data when given.
+        rsna_series_dir: Real `train_series/` DICOM root — required with `rsna_csv_path`.
+        rsna_series_csv_path: Real `train_series.csv` path; defaults per
+            `RSNAKneeDataset`'s own convention if omitted.
+        vqc_early_stopping_patience: If set, `n_epochs` becomes a ceiling and
+            the VQC's per-condition training loop stops once its training
+            loss hasn't improved by `vqc_early_stopping_min_delta` for this
+            many consecutive epochs — see `train_quantum_vqc`. `None`
+            (default) preserves the old fixed-`n_epochs` behavior.
+        vqc_early_stopping_min_delta: Minimum training-loss decrease counted
+            as an improvement, when `vqc_early_stopping_patience` is set.
 
     Returns:
         `{architecture_name: compute_macro_auc(...)-shaped dict}`.
     """
     architectures = architectures or _KAGGLE_BENCHMARK_ARCHITECTURES
 
-    features, labels = generate_multilabel_synthetic_dataset(
-        n_samples=n_samples, condition_names=condition_names, seed=seed,
-    )
+    if rsna_csv_path is not None:
+        if rsna_series_dir is None:
+            raise ValueError("rsna_series_dir is required when rsna_csv_path is given.")
+        features, labels, kept_uids = build_rsna_feature_dataset(
+            rsna_csv_path, rsna_series_dir, series_csv_path=rsna_series_csv_path,
+            condition_names=condition_names,
+        )
+        n_samples = len(kept_uids)
+        logger.info("run_kaggle_macro_auc_benchmark: using %d real labeled RSNA studies from %s", n_samples, rsna_csv_path)
+    else:
+        features, labels = generate_multilabel_synthetic_dataset(
+            n_samples=n_samples, condition_names=condition_names, seed=seed,
+        )
+
     train_idx, test_idx = train_test_split(
         np.arange(n_samples), test_size=_config.evaluation.test_size, random_state=seed,
     )
@@ -808,7 +1084,12 @@ def run_kaggle_macro_auc_benchmark(
             y_train = labels[condition][train_idx]
             y_test = labels[condition][test_idx]
             if train_fn is train_quantum_vqc:
-                probs = train_fn(X_train, y_train, X_test, n_epochs=n_epochs)
+                probs = train_fn(
+                    X_train, y_train, X_test, n_epochs=n_epochs,
+                    early_stopping_patience=vqc_early_stopping_patience,
+                    early_stopping_min_delta=vqc_early_stopping_min_delta,
+                    log_label=condition,
+                )
             else:
                 probs = train_fn(X_train, y_train, X_test)
             y_true_test[condition] = y_test
@@ -825,6 +1106,7 @@ def export_kaggle_benchmark_summary(
     comparative_results: Dict[str, Any],
     output_path: Union[str, Path] = DEFAULT_ARTIFACTS_DIR / KAGGLE_BENCHMARK_FILENAME,
     dataset_info: Optional[Dict[str, Any]] = None,
+    alternate_views: Optional[Dict[str, Sequence[str]]] = None,
 ) -> Path:
     """Serializes the RSNA Knee macro-AUC comparative-analysis results
     (from `run_kaggle_macro_auc_benchmark`) to a structured JSON file, for
@@ -838,6 +1120,15 @@ def export_kaggle_benchmark_summary(
         dataset_info: Optional free-form dict describing the evaluation
             dataset (e.g. `{"source": "synthetic", "n_train": ..., "n_test": ...}`),
             recorded alongside the results for provenance.
+        alternate_views: Optional `{view_name: conditions_to_exclude}` — for
+            each entry, every model additionally gets an `alternate_scores.
+            {view_name}` block (via `compute_macro_auc_excluding`, no
+            retraining/re-scoring involved) alongside its original full-
+            condition `per_condition_auc`/`final_score`/`core_subset`, which
+            are left completely untouched. Use this for a sensitivity check
+            (e.g. dropping a condition whose ground-truth labels were audited
+            and found inconsistent — see `KNOWN_LABEL_ISSUES`) that should be
+            reported *next to*, not instead of, the original numbers.
 
     Returns:
         `output_path`.
@@ -845,13 +1136,23 @@ def export_kaggle_benchmark_summary(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    models_payload: Dict[str, Any] = {}
+    for arch_name, result in comparative_results.items():
+        model_entry = dict(result)  # shallow copy — never mutate the caller's dict
+        if alternate_views:
+            model_entry["alternate_scores"] = {
+                view_name: compute_macro_auc_excluding(result["per_condition_auc"], exclude=excluded)
+                for view_name, excluded in alternate_views.items()
+            }
+        models_payload[arch_name] = model_entry
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "metric": "RSNA Knee macro-averaged ROC-AUC (Final Score = mean of 12 per-condition AUCs)",
         "condition_names": list(RSNA_TARGET_COLUMNS),
         "core_subset": list(RSNA_CORE_SUBSET),
         "dataset": dataset_info or {},
-        "models": comparative_results,
+        "models": models_payload,
     }
 
     with output_path.open("w", encoding="utf-8") as handle:
@@ -935,6 +1236,51 @@ def print_benchmark_table(results: list[ModelMetrics]) -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    arg_parser = argparse.ArgumentParser(
+        description="Q-Knee evaluation: single-condition SVM/ResNet/VQC comparison + "
+                     "12-condition RSNA Knee macro-AUC benchmark."
+    )
+    arg_parser.add_argument(
+        "--rsna-csv", type=str, default=None,
+        help="Real RSNA train.csv path — switches the 12-condition macro-AUC benchmark "
+             "from synthetic data (generate_multilabel_synthetic_dataset) to real labeled "
+             "studies (build_rsna_feature_dataset). Requires --rsna-series-dir.",
+    )
+    arg_parser.add_argument(
+        "--rsna-series-dir", type=str,
+        default=str(_config.paths.rsna_series_dir) if _config.paths.rsna_series_dir else None,
+        help="Real train_series/ DICOM root (StudyInstanceUID/SeriesInstanceUID/*.dcm). "
+             "Defaults to config.yaml's paths.rsna_series_dir if set.",
+    )
+    arg_parser.add_argument(
+        "--rsna-series-csv", type=str, default=None,
+        help="Real train_series.csv path; defaults to alongside --rsna-csv if omitted.",
+    )
+    arg_parser.add_argument(
+        "--kaggle-n-epochs", type=int, default=20,
+        help="Epoch ceiling for the Hybrid Q-Knee VQC in the 12-condition RSNA "
+             "macro-AUC benchmark (run_kaggle_macro_auc_benchmark). The two classical "
+             "baselines are epoch-independent, so this only affects the VQC. Acts as a "
+             "hard cap (not a fixed budget) when --kaggle-vqc-early-stopping-patience is set.",
+    )
+    arg_parser.add_argument(
+        "--kaggle-vqc-early-stopping-patience", type=int, default=None,
+        help="If set, the VQC's per-condition training loop stops once its training loss "
+             "hasn't improved by --kaggle-vqc-early-stopping-min-delta for this many "
+             "consecutive epochs, instead of always running --kaggle-n-epochs. Omit to keep "
+             "the old fixed-epoch behavior.",
+    )
+    arg_parser.add_argument(
+        "--kaggle-vqc-early-stopping-min-delta", type=float,
+        default=_config.training.early_stopping_min_delta,
+        help="Minimum training-loss decrease counted as an improvement for "
+             "--kaggle-vqc-early-stopping-patience. Defaults to config.yaml's "
+             "training.early_stopping_min_delta.",
+    )
+    cli_args = arg_parser.parse_args()
+
     torch.manual_seed(_config.evaluation.random_seed)
     np.random.seed(_config.evaluation.random_seed)
 
@@ -977,19 +1323,47 @@ if __name__ == "__main__":
     print(f"Saved ROC curves to {roc_path.resolve()}")
 
     print("\n=== RSNA Knee macro-averaged ROC-AUC (12-condition Kaggle benchmark) ===")
-    kaggle_results = run_kaggle_macro_auc_benchmark(seed=_config.evaluation.random_seed)
+    if cli_args.rsna_csv:
+        print(f"Using REAL RSNA data: {cli_args.rsna_csv} / {cli_args.rsna_series_dir}")
+    kaggle_results = run_kaggle_macro_auc_benchmark(
+        seed=_config.evaluation.random_seed,
+        n_epochs=cli_args.kaggle_n_epochs,
+        rsna_csv_path=cli_args.rsna_csv,
+        rsna_series_dir=cli_args.rsna_series_dir,
+        rsna_series_csv_path=cli_args.rsna_series_csv,
+        vqc_early_stopping_patience=cli_args.kaggle_vqc_early_stopping_patience,
+        vqc_early_stopping_min_delta=cli_args.kaggle_vqc_early_stopping_min_delta,
+    )
     for arch_name, arch_result in kaggle_results.items():
         print(
             f"{arch_name}: Final Score = {arch_result['final_score']:.4f} "
             f"(core ACL/MCL/Medial-Meniscus subset = {arch_result['core_subset']['mean_auc']:.4f})"
         )
-    kaggle_summary_path = export_kaggle_benchmark_summary(
-        kaggle_results,
-        dataset_info={
+    if cli_args.rsna_csv:
+        kaggle_dataset_info = {
+            "source": "real",
+            "rsna_csv_path": cli_args.rsna_csv,
+            "rsna_series_dir": cli_args.rsna_series_dir,
+            "note": "Real labeled RSNA Knee studies via qknee.data.dataset.RSNAKneeDataset "
+                    "(build_rsna_feature_dataset) — n_samples is however many studies had full "
+                    "12-condition label coverage and a usable DICOM series on disk.",
+        }
+    else:
+        kaggle_dataset_info = {
             "source": "synthetic",
             "n_samples": _config.evaluation.synthetic_n_samples,
-            "note": "No real labeled RSNA Knee dataset ships with this repo; see "
+            "note": "No --rsna-csv/--rsna-series-dir given; see "
                     "qknee.data.dataset.RSNAKneeDataset for the real-data parser.",
-        },
+        }
+    kaggle_summary_path = export_kaggle_benchmark_summary(
+        kaggle_results,
+        dataset_info=kaggle_dataset_info,
+        # Effusion's ground-truth labels were manually audited (see
+        # KNOWN_LABEL_ISSUES above) and found internally inconsistent on the
+        # exact same report wording in ~43% of the 58 labeled studies, so its
+        # macro-AUC contribution is partly noise, not model quality. Always
+        # export the 9-condition view alongside the full 12-condition one
+        # rather than silently dropping Effusion from the primary numbers.
+        alternate_views={"excl_effusion": ["Effusion"]},
     )
     print(f"Saved Kaggle benchmark summary to {kaggle_summary_path.resolve()}")

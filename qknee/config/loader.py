@@ -48,6 +48,7 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "paths.model_checkpoint": "MODEL_CHECKPOINT_PATH",
     "paths.acl_checkpoint": "ACL_CHECKPOINT_PATH",
     "paths.meniscus_checkpoint": "MENISCUS_CHECKPOINT_PATH",
+    "paths.rsna_series_dir": "RSNA_SERIES_DIR",
     "api.jwt_secret_key": "QKNEE_JWT_SECRET_KEY",
     # Optional PostgreSQL/Redis connection strings for `qknee.api.auth`'s
     # user repository and `qknee.api.server`'s CacheService, respectively.
@@ -76,6 +77,7 @@ class PathsConfig:
     eval_output_dir: Path
     deck_output_dir: Path
     checkpoint_dir: Path
+    rsna_series_dir: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +269,7 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
             eval_output_dir=Path(_require(paths_raw, "eval_output_dir", "paths")),
             deck_output_dir=Path(_require(paths_raw, "deck_output_dir", "paths")),
             checkpoint_dir=Path(_require(paths_raw, "checkpoint_dir", "paths")),
+            rsna_series_dir=Path(paths_raw["rsna_series_dir"]) if paths_raw.get("rsna_series_dir") else None,
         )
 
         data_raw = raw["data"]

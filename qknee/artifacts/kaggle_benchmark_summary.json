@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-30T08:49:24.129511+00:00",
+  "generated_at": "2026-09-04T09:31:24.753829+00:00",
   "metric": "RSNA Knee macro-averaged ROC-AUC (Final Score = mean of 12 per-condition AUCs)",
   "condition_names": [
     "ACL",
@@ -21,28 +21,29 @@
     "Medial Meniscus"
   ],
   "dataset": {
-    "source": "synthetic",
-    "n_samples": 800,
-    "note": "No real labeled RSNA Knee dataset ships with this repo; see qknee.data.dataset.RSNAKneeDataset for the real-data parser."
+    "source": "real",
+    "rsna_csv_path": "train.csv",
+    "rsna_series_dir": "C:/Dev/rsna-knee/train_series",
+    "note": "Real labeled RSNA Knee studies via qknee.data.dataset.RSNAKneeDataset (build_rsna_feature_dataset) \u2014 n_samples is however many studies had full 12-condition label coverage and a usable DICOM series on disk."
   },
   "models": {
     "Baseline Classical ResNet18": {
       "per_condition_auc": {
-        "ACL": 0.8237179487179487,
-        "MCL": 0.7744774477447746,
-        "Medial Meniscus": 0.7869987598181066,
-        "Lateral Meniscus": 0.7192894419911683,
-        "Medial OA": 0.508703481392557,
-        "Lateral OA": 0.6119447779111645,
-        "PF OA": 0.8785878587858785,
-        "Effusion": 0.7674747474747474,
-        "Synovitis": 0.9112200980882795,
-        "Baker's": 0.6609172077922078,
-        "Contusion": 0.7926535527900441,
-        "Fracture": 0.7620050125313284
+        "ACL": 0.6607142857142857,
+        "MCL": 0.75,
+        "Medial Meniscus": 0.8333333333333333,
+        "Lateral Meniscus": 0.1111111111111111,
+        "Medial OA": 1.0,
+        "Lateral OA": null,
+        "PF OA": 0.7272727272727273,
+        "Effusion": 0.8148148148148149,
+        "Synovitis": 0.5535714285714286,
+        "Baker's": null,
+        "Contusion": 0.7407407407407407,
+        "Fracture": 0.54
       },
-      "final_score": 0.7498325279198506,
-      "n_conditions_scored": 12,
+      "final_score": 0.6731558441558442,
+      "n_conditions_scored": 10,
       "n_conditions_total": 12,
       "core_subset": {
         "conditions": [
@@ -50,26 +51,46 @@
           "MCL",
           "Medial Meniscus"
         ],
-        "mean_auc": 0.7950647187602766
+        "mean_auc": 0.7480158730158729
+      },
+      "alternate_scores": {
+        "excl_effusion": {
+          "excluded_conditions": [
+            "Effusion"
+          ],
+          "exclusion_reasons": {
+            "Effusion": "Ground-truth Effusion labels were audited against report text for all 58 labeled RSNA studies. ~43% (25/58) show the same mild/small/trace-severity wording mapped to opposite labels elsewhere in the set, including 5 cases of verbatim-identical phrasing (e.g. 'Small joint effusion', 'Leve derrame articular', 'Geringer Gelenkerguss') labeled both 0 and 1 in different studies. A macro-AUC computed with Effusion included is therefore partly scoring against label noise, not just model quality."
+          },
+          "final_score": 0.6574159585270697,
+          "n_conditions_scored": 9,
+          "core_subset": {
+            "conditions": [
+              "ACL",
+              "MCL",
+              "Medial Meniscus"
+            ],
+            "mean_auc": 0.7480158730158729
+          }
+        }
       }
     },
     "Classical ResNet18 + RBF SVM": {
       "per_condition_auc": {
-        "ACL": 0.8864182692307693,
-        "MCL": 0.8357835783578359,
-        "Medial Meniscus": 0.878668871434477,
-        "Lateral Meniscus": 0.7829185066238458,
-        "Medial OA": 0.6007402961184475,
-        "Lateral OA": 0.7160864345738296,
-        "PF OA": 0.896989698969897,
-        "Effusion": 0.8579797979797981,
-        "Synovitis": 0.9412471224101692,
-        "Baker's": 0.7593344155844156,
-        "Contusion": 0.8126254516258532,
-        "Fracture": 0.8649624060150376
+        "ACL": 0.5892857142857143,
+        "MCL": 0.5227272727272727,
+        "Medial Meniscus": 0.7592592592592592,
+        "Lateral Meniscus": 0.11111111111111113,
+        "Medial OA": 0.9615384615384616,
+        "Lateral OA": null,
+        "PF OA": 0.6136363636363636,
+        "Effusion": 0.9074074074074074,
+        "Synovitis": 0.5357142857142858,
+        "Baker's": null,
+        "Contusion": 0.4629629629629629,
+        "Fracture": 0.48
       },
-      "final_score": 0.8194795707436979,
-      "n_conditions_scored": 12,
+      "final_score": 0.5943642838642837,
+      "n_conditions_scored": 10,
       "n_conditions_total": 12,
       "core_subset": {
         "conditions": [
@@ -77,26 +98,46 @@
           "MCL",
           "Medial Meniscus"
         ],
-        "mean_auc": 0.8669569063410275
+        "mean_auc": 0.623757415424082
+      },
+      "alternate_scores": {
+        "excl_effusion": {
+          "excluded_conditions": [
+            "Effusion"
+          ],
+          "exclusion_reasons": {
+            "Effusion": "Ground-truth Effusion labels were audited against report text for all 58 labeled RSNA studies. ~43% (25/58) show the same mild/small/trace-severity wording mapped to opposite labels elsewhere in the set, including 5 cases of verbatim-identical phrasing (e.g. 'Small joint effusion', 'Leve derrame articular', 'Geringer Gelenkerguss') labeled both 0 and 1 in different studies. A macro-AUC computed with Effusion included is therefore partly scoring against label noise, not just model quality."
+          },
+          "final_score": 0.5595817145817146,
+          "n_conditions_scored": 9,
+          "core_subset": {
+            "conditions": [
+              "ACL",
+              "MCL",
+              "Medial Meniscus"
+            ],
+            "mean_auc": 0.623757415424082
+          }
+        }
       }
     },
     "Hybrid Q-Knee VQC": {
       "per_condition_auc": {
-        "ACL": 0.7517027243589742,
-        "MCL": 0.6294629462946294,
-        "Medial Meniscus": 0.7477263331955354,
-        "Lateral Meniscus": 0.661882778000803,
-        "Medial OA": 0.5917366946778712,
-        "Lateral OA": 0.607843137254902,
-        "PF OA": 0.6894689468946895,
-        "Effusion": 0.6912121212121212,
-        "Synovitis": 0.7497747973175859,
-        "Baker's": 0.6748173701298701,
-        "Contusion": 0.6759333600963469,
-        "Fracture": 0.7962907268170426
+        "ACL": 0.5535714285714285,
+        "MCL": 0.5681818181818181,
+        "Medial Meniscus": 0.5,
+        "Lateral Meniscus": 0.38888888888888895,
+        "Medial OA": 0.9230769230769231,
+        "Lateral OA": null,
+        "PF OA": 0.7272727272727273,
+        "Effusion": 0.611111111111111,
+        "Synovitis": 0.6785714285714286,
+        "Baker's": null,
+        "Contusion": 0.4814814814814815,
+        "Fracture": 0.19999999999999996
       },
-      "final_score": 0.6889876613541976,
-      "n_conditions_scored": 12,
+      "final_score": 0.5632155807155808,
+      "n_conditions_scored": 10,
       "n_conditions_total": 12,
       "core_subset": {
         "conditions": [
@@ -104,7 +145,27 @@
           "MCL",
           "Medial Meniscus"
         ],
-        "mean_auc": 0.709630667949713
+        "mean_auc": 0.5405844155844156
+      },
+      "alternate_scores": {
+        "excl_effusion": {
+          "excluded_conditions": [
+            "Effusion"
+          ],
+          "exclusion_reasons": {
+            "Effusion": "Ground-truth Effusion labels were audited against report text for all 58 labeled RSNA studies. ~43% (25/58) show the same mild/small/trace-severity wording mapped to opposite labels elsewhere in the set, including 5 cases of verbatim-identical phrasing (e.g. 'Small joint effusion', 'Leve derrame articular', 'Geringer Gelenkerguss') labeled both 0 and 1 in different studies. A macro-AUC computed with Effusion included is therefore partly scoring against label noise, not just model quality."
+          },
+          "final_score": 0.5578938551160774,
+          "n_conditions_scored": 9,
+          "core_subset": {
+            "conditions": [
+              "ACL",
+              "MCL",
+              "Medial Meniscus"
+            ],
+            "mean_auc": 0.5405844155844156
+          }
+        }
       }
     }
   }
