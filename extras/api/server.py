@@ -67,8 +67,12 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from qknee.api.auth import INFERENCE_ROLES, UserResponse, require_role
+from qknee.api.auth import limiter as auth_limiter
 from qknee.api.auth import router as auth_router
 from qknee.api.auth import user_store
 from qknee.config.loader import load_config, redact_connection_string
@@ -841,6 +845,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limits on `/api/v1/auth/{register,login}` are declared as
+# `@limiter.limit(...)` on the route functions themselves in
+# `qknee.api.auth` — this is the plumbing that makes those decorators
+# actually enforce anything: the shared `Limiter` instance on
+# `app.state`, the 429 exception handler, and the middleware that stamps
+# rate-limit headers/handles the `Request.state` bookkeeping slowapi needs.
+app.state.limiter = auth_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.include_router(auth_router)
 

@@ -14,7 +14,8 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
-  const [role, setRole] = useState<Role>("radiologist");
+  const [role, setRole] = useState<Role>("researcher");
+  const [inviteCode, setInviteCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +29,13 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
       const result =
         mode === "login"
           ? await loginClinician({ username: email, password })
-          : await registerClinician({ email, password, full_name: fullName, role });
+          : await registerClinician({
+              email,
+              password,
+              full_name: fullName,
+              role,
+              invite_code: role === "radiologist" ? inviteCode : undefined,
+            });
       signIn(result.access_token, result.user);
       onClose();
     } catch (err) {
@@ -113,10 +120,23 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
                 onChange={(e) => setRole(e.target.value as Role)}
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-teal-500"
               >
-                <option value="radiologist">Radiologist (full diagnostic access)</option>
                 <option value="researcher">Researcher (view-only)</option>
                 <option value="clinical_auditor">Clinical Auditor (view-only)</option>
+                <option value="radiologist">Radiologist (full diagnostic access — requires invite code)</option>
               </select>
+            </div>
+          )}
+
+          {mode === "register" && role === "radiologist" && (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-slate-400">Radiologist Invite Code</label>
+              <input
+                required
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value)}
+                placeholder="Provided by your institution"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-teal-500"
+              />
             </div>
           )}
 

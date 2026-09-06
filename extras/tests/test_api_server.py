@@ -54,11 +54,19 @@ def _authenticated_as_radiologist(client: TestClient, tmp_path: Path, monkeypatc
     session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     test_store = auth_module.UserRepository(session_factory=session_factory)
     monkeypatch.setattr(auth_module, "user_store", test_store)
+    # `auth_module.limiter`'s hit-counters are a process-wide singleton, not
+    # reset per test — with 22 tests in this module each registering a
+    # fresh account, real wall-clock rate limits would flake intermittently.
+    monkeypatch.setattr(auth_module.limiter, "enabled", False)
 
+    # role="radiologist" is downgraded to DEFAULT_ROLE by `create_user`
+    # unless a matching $QKNEE_RADIOLOGIST_INVITE_CODE is also supplied.
+    invite_code = "test-invite-code"
+    monkeypatch.setenv("QKNEE_RADIOLOGIST_INVITE_CODE", invite_code)
     stored = test_store.create_user(
         auth_module.UserCreate(
             email="test_radiologist@hospital.org", password="test_password_123!",
-            full_name="Test Radiologist", role="radiologist",
+            full_name="Test Radiologist", role="radiologist", invite_code=invite_code,
         )
     )
     token = auth_module.create_access_token(data={"sub": stored.email, "user_id": stored.id, "role": stored.role})

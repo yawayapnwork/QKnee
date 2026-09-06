@@ -52,6 +52,12 @@ import qknee.api.server as server_module
 
 pytestmark = [pytest.mark.slow]
 
+# `/register` downgrades role="radiologist" to DEFAULT_ROLE unless a
+# matching $QKNEE_RADIOLOGIST_INVITE_CODE is also supplied (see
+# `qknee.api.auth.UserRepository.create_user`). The `client` fixture sets
+# this env var and `_register` passes it back automatically.
+TEST_RADIOLOGIST_INVITE_CODE = "test-invite-code"
+
 
 def _isolated_user_repository() -> auth_module.UserRepository:
     engine = create_engine(
@@ -69,13 +75,20 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     SQLite repository so no test in this module reads/writes the real
     `qknee_users.db`."""
     monkeypatch.setattr(auth_module, "user_store", _isolated_user_repository())
+    monkeypatch.setenv("QKNEE_RADIOLOGIST_INVITE_CODE", TEST_RADIOLOGIST_INVITE_CODE)
+    # `auth_module.limiter`'s hit-counters are a process-wide singleton, not
+    # reset per test, and this suite alone registers/logs in far more than
+    # 5-10 times/minute — disable enforcement rather than racing real
+    # wall-clock rate-limit windows.
+    monkeypatch.setattr(auth_module.limiter, "enabled", False)
     return TestClient(server_module.app)
 
 
 def _register(client: TestClient, email: str, password: str = "correct-password-123!", role: str = "radiologist", full_name: str = "Dr. Jane Doe"):
-    return client.post(
-        "/api/v1/auth/register", json={"email": email, "password": password, "full_name": full_name, "role": role},
-    )
+    payload = {"email": email, "password": password, "full_name": full_name, "role": role}
+    if role == "radiologist":
+        payload["invite_code"] = TEST_RADIOLOGIST_INVITE_CODE
+    return client.post("/api/v1/auth/register", json=payload)
 
 
 def _login(client: TestClient, email: str, password: str = "correct-password-123!"):

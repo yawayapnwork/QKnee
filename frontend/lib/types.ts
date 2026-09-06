@@ -27,6 +27,7 @@ export interface RegisterPayload {
   password: string;
   full_name: string;
   role?: Role;
+  invite_code?: string;
 }
 
 export interface PredictionResponse {

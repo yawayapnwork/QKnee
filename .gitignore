@@ -25,6 +25,7 @@ htmlcov/
 # Environment / secrets
 .env
 .env.*
+!frontend/.env.local.example
 
 # Runtime user store (qknee/api/auth.py) — created on first use; holds
 # whatever accounts get signed up on a given deployment (Argon2 hashes, not

@@ -38,12 +38,13 @@ User store:
     pre-seeded: the store starts empty and is populated only via
     `POST /api/v1/auth/register`.
 
-    PRODUCTION CAVEAT: `/register` currently lets a caller self-assign any
-    role, including `radiologist` — acceptable for this research-
-    prototype/hackathon demo (every diagnostic response elsewhere in this
-    codebase already carries a "not for clinical use" disclaimer), but a
-    real clinical deployment must gate `radiologist` issuance behind admin
-    approval or an invite token rather than open self-service registration.
+    `radiologist` issuance is gated: `/register` silently downgrades a
+    requested `role="radiologist"` to `DEFAULT_ROLE` unless the request also
+    supplies a valid `invite_code` matching `$QKNEE_RADIOLOGIST_INVITE_CODE`.
+    `researcher`/`clinical_auditor` remain open self-service (both are
+    read-only, non-inference roles). This is a lightweight stand-in for a
+    real admin-approval flow, not a replacement for one — see
+    `_RADIOLOGIST_INVITE_CODE` below.
 
 Route protection:
     `get_current_user` extracts and validates the `Authorization: Bearer
@@ -65,9 +66,11 @@ from typing import Callable, Optional, Sequence
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy import Boolean, DateTime, String, create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -140,6 +143,11 @@ class UserCreate(BaseModel):
     role: str = Field(
         default=DEFAULT_ROLE,
         description=f"One of {ROLES}; defaults to '{DEFAULT_ROLE}' if omitted.",
+    )
+    invite_code: Optional[str] = Field(
+        default=None,
+        description="Required only when requesting role='radiologist'; must match "
+        "$QKNEE_RADIOLOGIST_INVITE_CODE. Ignored for other roles.",
     )
 
     @field_validator("email")
@@ -251,6 +259,23 @@ if _SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:
         "Set the $QKNEE_JWT_SECRET_KEY (or $SECRET_KEY) environment variable before "
         "deploying anywhere reachable outside a local dev machine — tokens signed with "
         "the default key are forgeable by anyone who has read this source file."
+    )
+
+# Gates self-service `role="radiologist"` registration (the only role
+# permitted to run diagnostic inference — see `INFERENCE_ROLES`). Unset by
+# default, which means radiologist self-registration is BLOCKED entirely
+# (every request downgrades to `DEFAULT_ROLE`) until an operator explicitly
+# opts in by setting this — a lightweight stand-in for real admin approval,
+# not a substitute for it. Distribute the value out-of-band (not committed,
+# not in this file) to whoever should be able to self-elevate to radiologist.
+_RADIOLOGIST_INVITE_CODE = os.getenv("QKNEE_RADIOLOGIST_INVITE_CODE")
+
+if not _RADIOLOGIST_INVITE_CODE:
+    logger.warning(
+        "$QKNEE_RADIOLOGIST_INVITE_CODE is unset — self-service registration as "
+        "'radiologist' is disabled; every such request will be downgraded to "
+        "'%s'. Set the env var to re-enable it (invite-code-gated).",
+        DEFAULT_ROLE,
     )
 
 
@@ -368,6 +393,13 @@ def _build_engine(database_url: str):
     return engine
 
 
+# Escape hatch ONLY for local dev/CI, where a wiped-on-restart user store is
+# expected and fine. Real deployments must NOT set this — the in-memory
+# fallback silently "forgetting everyone" on every restart is a correctness
+# and security regression, not a graceful degradation, once accounts are
+# real users rather than a demo quarantine.
+_ALLOW_INMEMORY_DB = os.getenv("QKNEE_ALLOW_INMEMORY_DB", "").lower() in ("1", "true", "yes")
+
 try:
     _engine = _build_engine(_RAW_DATABASE_URL)
     DATABASE_URL = _RAW_DATABASE_URL
@@ -381,10 +413,21 @@ except Exception as exc:  # noqa: BLE001 - any driver/connectivity/syntax failur
         _engine = _build_engine(_SQLITE_FALLBACK_URL)
         DATABASE_URL = _SQLITE_FALLBACK_URL
     except Exception as exc2:  # noqa: BLE001 - e.g. a read-only container filesystem
-        logger.error(
-            "Local SQLite file store at %s is also unavailable (%s); falling back to an "
-            "in-memory SQLite database so the API can still boot. User accounts will NOT "
-            "persist across restarts until a working $DATABASE_URL is configured.",
+        if not _ALLOW_INMEMORY_DB:
+            raise RuntimeError(
+                f"qknee.api.auth cannot reach a persistent user store: $DATABASE_URL is unset/"
+                f"unreachable and the local SQLite file at {_SQLITE_FALLBACK_URL!r} is also "
+                f"unavailable ({exc2!r}). Refusing to start on an in-memory user store, which "
+                f"would silently discard every account on the next restart. Fix $DATABASE_URL "
+                f"or the local filesystem, or set $QKNEE_ALLOW_INMEMORY_DB=1 to explicitly "
+                f"accept a wiped-on-restart store (local dev/CI only — never in a real "
+                f"deployment)."
+            ) from exc2
+        logger.critical(
+            "Neither $DATABASE_URL nor the local SQLite file at %s is usable (%s); "
+            "$QKNEE_ALLOW_INMEMORY_DB is set, so qknee.api.auth is starting on an IN-MEMORY "
+            "user store. Every registered account will be permanently lost the moment this "
+            "process restarts. This must never be set in a real deployment.",
             _SQLITE_FALLBACK_URL, exc2,
         )
         DATABASE_URL = _SQLITE_MEMORY_URL
@@ -417,6 +460,18 @@ class UserRepository:
         role = user_create.role or DEFAULT_ROLE
         if role not in ROLES:
             raise ValueError(f"role must be one of {ROLES}, got {role!r}")
+
+        if role == "radiologist":
+            # Read fresh (not the import-time snapshot) so tests can
+            # monkeypatch the env var per-case without reloading this module.
+            current_invite_code = os.getenv("QKNEE_RADIOLOGIST_INVITE_CODE")
+            if not current_invite_code or user_create.invite_code != current_invite_code:
+                logger.warning(
+                    "Registration for %r requested role='radiologist' without a valid invite "
+                    "code; downgrading to '%s'.",
+                    user_create.email, DEFAULT_ROLE,
+                )
+                role = DEFAULT_ROLE
 
         user = User(
             email=user_create.email.strip().lower(),
@@ -511,9 +566,26 @@ def require_role(required_roles: Sequence[str]) -> Callable[[UserResponse], User
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
+# Per-client-IP throttle on the two unauthenticated, credential-handling
+# routes (`/register`, `/login`) — the two endpoints an attacker can hit
+# without a token at all, so they're the ones exposed to credential
+# stuffing / brute force / mass fake-account creation. `get_remote_address`
+# keys on `request.client.host`; behind a reverse proxy that must forward
+# the real client IP (e.g. `X-Forwarded-For`) for this to key correctly
+# rather than rate-limiting the proxy itself. Limits are intentionally
+# loose (not a CAPTCHA/WAF replacement) and overridable via env vars so a
+# deployment can tune them without a code change; `wired up in
+# `qknee.api.server` (`app.state.limiter` + the exception handler +
+# `SlowAPIMiddleware`) is what actually makes `@limiter.limit(...)` enforce
+# anything — importing this module alone does not.
+limiter = Limiter(key_func=get_remote_address)
+REGISTER_RATE_LIMIT = os.getenv("QKNEE_REGISTER_RATE_LIMIT", "5/minute")
+LOGIN_RATE_LIMIT = os.getenv("QKNEE_LOGIN_RATE_LIMIT", "10/minute")
+
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(user_create: UserCreate) -> UserResponse:
+@limiter.limit(REGISTER_RATE_LIMIT)
+def register(request: Request, user_create: UserCreate) -> UserResponse:
     """Registers a new user: hashes the password (Argon2id) and stores the
     account with the requested role (defaulting to `researcher` if
     omitted). 409s if the email is already registered."""
@@ -530,7 +602,8 @@ def register(user_create: UserCreate) -> UserResponse:
 
 
 @router.post("/login", response_model=Token)
-def login(credentials: UserLogin) -> Token:
+@limiter.limit(LOGIN_RATE_LIMIT)
+def login(request: Request, credentials: UserLogin) -> Token:
     """Authenticates `username` (email)/`password` and returns a signed JWT
     bearer token (expiring after `ACCESS_TOKEN_EXPIRE_MINUTES`) alongside
     the user's profile metadata."""

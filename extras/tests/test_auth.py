@@ -45,6 +45,12 @@ from qknee.api.auth import (
 
 pytestmark = [pytest.mark.slow]
 
+# `create_user`/`/register` downgrade role="radiologist" to DEFAULT_ROLE
+# unless a matching $QKNEE_RADIOLOGIST_INVITE_CODE is also supplied. Tests
+# that need an actual radiologist account set this env var (via monkeypatch)
+# and pass it back as `invite_code`.
+TEST_RADIOLOGIST_INVITE_CODE = "test-invite-code"
+
 
 def _make_isolated_repository() -> UserRepository:
     engine = create_engine(
@@ -62,11 +68,14 @@ def isolated_store(monkeypatch: pytest.MonkeyPatch) -> UserRepository:
     `auth_module.user_store` directly (`get_current_user`) see it too."""
     store = _make_isolated_repository()
     monkeypatch.setattr(auth_module, "user_store", store)
+    monkeypatch.setenv("QKNEE_RADIOLOGIST_INVITE_CODE", TEST_RADIOLOGIST_INVITE_CODE)
     return store
 
 
 def _make_user_create(email: str = "alice@hospital.org", password: str = "hunter2R0cks!", **kwargs) -> UserCreate:
     kwargs.setdefault("full_name", "Alice Smith")
+    if kwargs.get("role") == "radiologist":
+        kwargs.setdefault("invite_code", TEST_RADIOLOGIST_INVITE_CODE)
     return UserCreate(email=email, password=password, **kwargs)
 
 
@@ -347,12 +356,22 @@ class TestAuthEndpointsAndRouteProtection:
         import qknee.api.server as server_module
 
         monkeypatch.setattr(auth_module, "user_store", _make_isolated_repository())
+        monkeypatch.setenv("QKNEE_RADIOLOGIST_INVITE_CODE", TEST_RADIOLOGIST_INVITE_CODE)
+        # `auth_module.limiter` is a process-wide singleton (its in-memory
+        # hit-counters aren't reset between tests), and this class alone
+        # registers/logs in far more than 5-10 times/minute — disable
+        # enforcement here rather than trying to outrun real wall-clock
+        # rate-limit windows.
+        monkeypatch.setattr(auth_module.limiter, "enabled", False)
         return TestClient(server_module.app)
 
     def test_register_returns_201_and_never_leaks_the_password(self, client):
         response = client.post(
             "/api/v1/auth/register",
-            json={"email": "ivy@hospital.org", "password": "password123!", "full_name": "Ivy Nguyen", "role": "radiologist"},
+            json={
+                "email": "ivy@hospital.org", "password": "password123!", "full_name": "Ivy Nguyen",
+                "role": "radiologist", "invite_code": TEST_RADIOLOGIST_INVITE_CODE,
+            },
         )
         assert response.status_code == 201
         body = response.json()
@@ -360,6 +379,25 @@ class TestAuthEndpointsAndRouteProtection:
         assert body["role"] == "radiologist"
         assert "password" not in body
         assert "hashed_password" not in body
+
+    def test_register_radiologist_without_invite_code_downgrades_to_default_role(self, client):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={"email": "eve@hospital.org", "password": "password123!", "full_name": "Eve", "role": "radiologist"},
+        )
+        assert response.status_code == 201
+        assert response.json()["role"] == DEFAULT_ROLE
+
+    def test_register_radiologist_with_wrong_invite_code_downgrades_to_default_role(self, client):
+        response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "mallory@hospital.org", "password": "password123!", "full_name": "Mallory",
+                "role": "radiologist", "invite_code": "not-the-real-code",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["role"] == DEFAULT_ROLE
 
     def test_register_duplicate_email_returns_409(self, client):
         payload = {"email": "jack@hospital.org", "password": "password123!", "full_name": "Jack"}
@@ -407,7 +445,10 @@ class TestAuthEndpointsAndRouteProtection:
     def test_me_returns_the_authenticated_profile(self, client):
         client.post(
             "/api/v1/auth/register",
-            json={"email": "nina@hospital.org", "password": "password123!", "full_name": "Nina", "role": "radiologist"},
+            json={
+                "email": "nina@hospital.org", "password": "password123!", "full_name": "Nina",
+                "role": "radiologist", "invite_code": TEST_RADIOLOGIST_INVITE_CODE,
+            },
         )
         token = client.post(
             "/api/v1/auth/login", json={"username": "nina@hospital.org", "password": "password123!"},
@@ -463,7 +504,10 @@ class TestAuthEndpointsAndRouteProtection:
         passed before file parsing ran."""
         client.post(
             "/api/v1/auth/register",
-            json={"email": "user_radiologist@hospital.org", "password": "password123!", "full_name": "Rad", "role": "radiologist"},
+            json={
+                "email": "user_radiologist@hospital.org", "password": "password123!", "full_name": "Rad",
+                "role": "radiologist", "invite_code": TEST_RADIOLOGIST_INVITE_CODE,
+            },
         )
         token = client.post(
             "/api/v1/auth/login", json={"username": "user_radiologist@hospital.org", "password": "password123!"},
@@ -474,3 +518,21 @@ class TestAuthEndpointsAndRouteProtection:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code not in (401, 403)
+
+    def test_register_is_rate_limited_per_ip(self, client, monkeypatch):
+        """The `client` fixture disables `auth_module.limiter` (every other
+        test in this class needs that to avoid flaking on a shared,
+        never-reset hit counter); this test re-enables it just for itself to
+        prove the throttle actually fires once its limit is exceeded."""
+        monkeypatch.setattr(auth_module.limiter, "enabled", True)
+
+        limit = int(auth_module.REGISTER_RATE_LIMIT.split("/")[0])
+        responses = [
+            client.post(
+                "/api/v1/auth/register",
+                json={"email": f"rate{i}@hospital.org", "password": "password123!", "full_name": "Rate"},
+            )
+            for i in range(limit + 1)
+        ]
+        assert [r.status_code for r in responses[:limit]] == [201] * limit
+        assert responses[limit].status_code == 429
