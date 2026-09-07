@@ -113,6 +113,17 @@ class ResNet18FeatureExtractor(nn.Module):
         topk_k: Slices averaged per channel when
             `volumetric_aggregation == "topk_max"`. Defaults to
             `config.yaml`'s `resnet.topk_k`.
+        pretrained_backbone_path: Optional path to a backbone `state_dict`
+            saved by `qknee.models.ssl_pretrain.save_ssl_backbone` — a
+            ResNet18 backbone further pretrained (rotation prediction, by
+            default) on real, unlabeled knee MRI slices, on top of the
+            same ImageNet init. When given, this state dict is loaded into
+            `self.backbone` immediately after the ImageNet-initialized
+            backbone is built, *before* `freeze_backbone` takes effect —
+            so freezing/eval-mode behavior is identical to the
+            ImageNet-only case, only the underlying weights differ. `None`
+            (default) leaves the backbone at plain ImageNet-pretrained
+            weights, matching every existing call site.
     """
 
     FEATURE_DIM = _config.resnet.feature_dim
@@ -122,6 +133,7 @@ class ResNet18FeatureExtractor(nn.Module):
         freeze_backbone: bool = _config.resnet.freeze_backbone,
         volumetric_aggregation: str = _config.resnet.volumetric_aggregation,
         topk_k: int = _config.resnet.topk_k,
+        pretrained_backbone_path: Optional[Union[str, Path]] = None,
     ):
         super().__init__()
 
@@ -139,6 +151,12 @@ class ResNet18FeatureExtractor(nn.Module):
         # avgpool. children() order for torchvision resnet18 is:
         # conv1, bn1, relu, maxpool, layer1-4, avgpool, fc
         self.backbone = nn.Sequential(*list(backbone.children())[:-1])
+
+        self.pretrained_backbone_path = Path(pretrained_backbone_path) if pretrained_backbone_path else None
+        if self.pretrained_backbone_path is not None:
+            state_dict = torch.load(self.pretrained_backbone_path, map_location="cpu")
+            self.backbone.load_state_dict(state_dict)
+            logger.info("Loaded self-supervised pretrained backbone from %s", self.pretrained_backbone_path)
 
         # `channels_last` (NHWC) memory format lets modern CPU BLAS/MKL-DNN
         # kernels (and cuDNN on GPU) use their vectorized/AVX-512 conv
