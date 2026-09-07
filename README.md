@@ -264,6 +264,78 @@ pytest.ini                          # slow/benchmark markers, testpaths=qknee/te
 
 ---
 
+## Reproducing the SSL-pretrained backbone
+
+`qknee/artifacts/resnet18_ssl_backbone.pt` (the rotation-prediction self-supervised
+ResNet18 checkpoint compared against plain ImageNet weights in
+`ssl_vs_imagenet_kfold_summary.json`) is **gitignored** — it's a ~42.7 MiB
+(44,783,859-byte) binary, matched by the `*.pt` rule in `.gitignore`, and is not
+committed to the repo. Anyone who wants to verify the SSL-vs-ImageNet comparison
+independently (rather than trusting the committed JSON summary) needs to
+regenerate it locally:
+
+**1. Get the unlabeled pretraining pool.** The backbone is pretrained on real,
+unlabeled RSNA Knee MRI slices — specifically knee studies from the competition
+that are *not* among the 58 fully-labeled studies used for the downstream
+PCA→VQC evaluation (those 58 are held out so the two stages never see the same
+data). `scripts/_fetch_rsna_pretrain_pool.py` pulls these via the Kaggle API,
+writing DICOMs into `train_series/` and progress into
+`rsna_pretrain_pool_manifest.json` / `rsna_pretrain_pool_checkpoint.json` (the
+latter lets a re-run resume instead of re-paging from the start). It takes no
+CLI flags — tune it via env vars if needed:
+
+```bash
+# requires a working Kaggle API token (~/.kaggle/kaggle.json)
+python scripts/_fetch_rsna_pretrain_pool.py
+# optional: FETCH_TARGET_NEW_STUDIES=2000 FETCH_MAX_RUNTIME_SECONDS=2400 (defaults)
+```
+
+The checkpoint actually used for `resnet18_ssl_backbone.pt` was built from
+**145 unlabeled studies (1,145 DICOM slices)** on disk at pretraining time
+(see `qknee/artifacts/resnet18_ssl_backbone.json`'s `n_slices`/`n_studies`
+fields) — run the fetch script (repeatedly, if needed — it resumes) until
+`train_series/` (plus a sibling `../rsna-knee/train_series/`, if present) holds
+a comparable unlabeled pool.
+
+**2. Run the SSL pretraining.**
+
+```bash
+PYTHONPATH=. python scripts/pretrain_ssl_backbone.py \
+    --n-epochs 15 --batch-size 32 --max-minutes 65
+```
+
+(`--batch-size 32`, `--lr 1e-4`, `--seed 0` reproduce the exact hyperparameters
+recorded in `resnet18_ssl_backbone.json`; `--n-epochs` just needs to be an
+upper bound — the run below stopped on the wall-clock budget, not the epoch
+count.) This is the **real, measured** wall-clock cost, taken directly from
+the timestamped log of the run that produced the committed checkpoint
+(`scripts/_ssl_pretrain_run.log`, re-verified live in a fresh 5-epoch re-run
+that matched the original's per-epoch timings within run-to-run noise):
+
+| Epoch | Cumulative elapsed |
+|------:|--------------------:|
+| 0     | 294.5s |
+| 1     | 589.0s |
+| 5     | 2003.7s |
+| 10    | 4035.3s |
+
+The run self-terminated after **11 epochs** when it hit its 3900s (65 min)
+wall-clock budget (`ssl_pretrain.py`'s `max_minutes` cutoff), logging
+`wall-clock budget (3900s) reached after epoch 10 — stopping.` Total wall time:
+**~67 minutes** on the machine this was run on (CPU; no GPU used) — plan for
+that ballpark when reproducing, not for however many epochs `--n-epochs`
+nominally requests.
+
+**3. Regenerate the comparison.** Once `resnet18_ssl_backbone.pt` exists,
+`scripts/run_ssl_vs_imagenet_kfold.py --ssl-checkpoint qknee/artifacts/resnet18_ssl_backbone.pt`
+rebuilds `rsna58_features_ssl.npz` and `ssl_vs_imagenet_kfold_summary.json`
+from scratch — `build_or_load_features()` fingerprints the checkpoint
+(path + size + mtime) and automatically discards any cached `.npz` that was
+built from a different checkpoint, so a stale feature cache can't silently
+feed an old backbone's numbers into a new comparison.
+
+---
+
 ## Appendix: synthetic pipeline sanity check (not a real benchmark)
 
 > ⚠️ These numbers are **not** measured on real patient data and should not be quoted as model performance — they exist only to confirm the 5-stage pipeline runs end-to-end and produces sane, well-separated outputs. For actual measured performance, see [Key metrics](#key-metrics) above, which uses real RSNA Knee ground truth.
