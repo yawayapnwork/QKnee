@@ -266,10 +266,22 @@ pytest.ini                          # slow/benchmark markers, testpaths=qknee/te
 
 ## Reproducing the SSL-pretrained backbone
 
-`qknee/artifacts/resnet18_ssl_backbone.pt` (the rotation-prediction self-supervised
+> **Note:** an earlier run of this comparison (previously committed as
+> `resnet18_ssl_backbone.json` / `ssl_vs_imagenet_kfold_summary.json`) has been
+> retracted — its rotation-prediction pretext task used a plain `Resize`
+> preprocessing step, which let the model learn a trivial shortcut (predicting
+> rotation from the fixed position of black background at the image edges
+> rather than real anatomy); see the comment on `RotationSliceDataset` in
+> [`qknee/models/ssl_pretrain.py`](qknee/models/ssl_pretrain.py). Those files
+> are kept only as `_RETRACTED_original_unseeded_run.*` for reference. The
+> corrected run (`RandomResizedCrop` preprocessing) is recorded in
+> `qknee/artifacts/resnet18_ssl_backbone_fixed.json` and
+> `qknee/artifacts/ssl_vs_imagenet_kfold_summary_fixed.json`.
+
+`qknee/artifacts/resnet18_ssl_backbone_fixed.pt` (the rotation-prediction self-supervised
 ResNet18 checkpoint compared against plain ImageNet weights in
-`ssl_vs_imagenet_kfold_summary.json`) is **gitignored** — it's a ~42.7 MiB
-(44,783,859-byte) binary, matched by the `*.pt` rule in `.gitignore`, and is not
+`ssl_vs_imagenet_kfold_summary_fixed.json`) is **gitignored** — it's a ~42.7 MiB
+binary, matched by the `*.pt` rule in `.gitignore`, and is not
 committed to the repo. Anyone who wants to verify the SSL-vs-ImageNet comparison
 independently (rather than trusting the committed JSON summary) needs to
 regenerate it locally:
@@ -290,9 +302,9 @@ python scripts/_fetch_rsna_pretrain_pool.py
 # optional: FETCH_TARGET_NEW_STUDIES=2000 FETCH_MAX_RUNTIME_SECONDS=2400 (defaults)
 ```
 
-The checkpoint actually used for `resnet18_ssl_backbone.pt` was built from
-**145 unlabeled studies (1,145 DICOM slices)** on disk at pretraining time
-(see `qknee/artifacts/resnet18_ssl_backbone.json`'s `n_slices`/`n_studies`
+The checkpoint actually used for `resnet18_ssl_backbone_fixed.pt` was built from
+**149 unlabeled studies (1,159 DICOM slices)** on disk at pretraining time
+(see `qknee/artifacts/resnet18_ssl_backbone_fixed.json`'s `n_slices`/`n_studies`
 fields) — run the fetch script (repeatedly, if needed — it resumes) until
 `train_series/` (plus a sibling `../rsna-knee/train_series/`, if present) holds
 a comparable unlabeled pool.
@@ -305,30 +317,15 @@ PYTHONPATH=. python scripts/pretrain_ssl_backbone.py \
 ```
 
 (`--batch-size 32`, `--lr 1e-4`, `--seed 0` reproduce the exact hyperparameters
-recorded in `resnet18_ssl_backbone.json`; `--n-epochs` just needs to be an
-upper bound — the run below stopped on the wall-clock budget, not the epoch
-count.) This is the **real, measured** wall-clock cost, taken directly from
-the timestamped log of the run that produced the committed checkpoint
-(`scripts/_ssl_pretrain_run.log`, re-verified live in a fresh 5-epoch re-run
-that matched the original's per-epoch timings within run-to-run noise):
-
-| Epoch | Cumulative elapsed |
-|------:|--------------------:|
-| 0     | 294.5s |
-| 1     | 589.0s |
-| 5     | 2003.7s |
-| 10    | 4035.3s |
-
-The run self-terminated after **11 epochs** when it hit its 3900s (65 min)
-wall-clock budget (`ssl_pretrain.py`'s `max_minutes` cutoff), logging
-`wall-clock budget (3900s) reached after epoch 10 — stopping.` Total wall time:
-**~67 minutes** on the machine this was run on (CPU; no GPU used) — plan for
+recorded in `resnet18_ssl_backbone_fixed.json`; `--n-epochs` just needs to be an
+upper bound. The corrected run self-terminated after **12 epochs** on its
+wall-clock budget, taking **~67 minutes** total (CPU; no GPU used) — plan for
 that ballpark when reproducing, not for however many epochs `--n-epochs`
 nominally requests.
 
-**3. Regenerate the comparison.** Once `resnet18_ssl_backbone.pt` exists,
-`scripts/run_ssl_vs_imagenet_kfold.py --ssl-checkpoint qknee/artifacts/resnet18_ssl_backbone.pt`
-rebuilds `rsna58_features_ssl.npz` and `ssl_vs_imagenet_kfold_summary.json`
+**3. Regenerate the comparison.** Once `resnet18_ssl_backbone_fixed.pt` exists,
+`scripts/run_ssl_vs_imagenet_kfold.py --ssl-checkpoint qknee/artifacts/resnet18_ssl_backbone_fixed.pt`
+rebuilds `rsna58_features_ssl.npz` and `ssl_vs_imagenet_kfold_summary_fixed.json`
 from scratch — `build_or_load_features()` fingerprints the checkpoint
 (path + size + mtime) and automatically discards any cached `.npz` that was
 built from a different checkpoint, so a stale feature cache can't silently

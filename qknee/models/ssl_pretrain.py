@@ -111,8 +111,20 @@ class RotationSliceDataset(Dataset):
         self.paths = list(dicom_paths)
         if not self.paths:
             raise RuntimeError("RotationSliceDataset: no DICOM slices provided.")
+        # RandomResizedCrop (not a plain Resize) is deliberate here: these
+        # knee MRI slices have a landscape-oriented FOV with real black
+        # background concentrated on the left/right edges (measured ~86-90%
+        # near-black there vs. ~46-62% top/bottom, pooled over a 60-slice
+        # sample) -- a fixed, dataset-wide asymmetry that let the rotation
+        # head learn "which axis is mostly black" instead of real anatomy
+        # (rotation-accuracy saturated at 99%+ within 2 epochs, the
+        # signature of a trivial shortcut). Cropping a randomly placed,
+        # randomly scaled sub-region *before* rotation means the black
+        # border's position/extent relative to the crop varies independently
+        # of the applied rotation from sample to sample and epoch to epoch,
+        # so that axis-asymmetry cue no longer reliably predicts the label.
         self._prepare = transforms.Compose([
-            transforms.Resize(TARGET_SIZE),
+            transforms.RandomResizedCrop(TARGET_SIZE, scale=(0.4, 0.8), ratio=(0.9, 1.1)),
             transforms.Grayscale(num_output_channels=3),
             transforms.ToTensor(),  # [0, 1], (3, H, W)
         ])
