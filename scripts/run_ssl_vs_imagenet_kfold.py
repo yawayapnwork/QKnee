@@ -99,10 +99,17 @@ def build_or_load_features(
 def train_vqc_with_curve(
     X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray,
     n_epochs: int, lr: float, n_qubits: int, n_layers: int, use_incremental_pca: bool,
+    init_seed: int,
 ) -> Tuple[List[float], List[float], np.ndarray]:
     """Trains one PCA(n_qubits)->VQC model for a fixed `n_epochs` ceiling
     (no early stopping — the whole point is to see the un-truncated curve),
     computing train- and test-set ROC-AUC after every epoch.
+
+    `init_seed` seeds torch immediately before constructing `VQCClassifier`
+    so its random weight init (quantum layer + readout `nn.Linear`, both
+    drawn from torch's global RNG) is reproducible and controlled by the
+    caller's `--seed`, rather than depending on whatever state the global
+    RNG happened to be left in by prior folds/conditions.
 
     Returns:
         `(train_auc_per_epoch, test_auc_per_epoch, final_test_probs)` — an
@@ -117,6 +124,7 @@ def train_vqc_with_curve(
     q_train = reducer.fit_transform(X_train)
     q_test = reducer.transform(X_test)
 
+    torch.manual_seed(init_seed)
     model = VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.BCELoss()
@@ -169,6 +177,7 @@ def run_epoch_curve_analysis(
         train_curve, test_curve, _ = train_vqc_with_curve(
             X_train, y_train, X_test, y_test, n_epochs=n_epochs, lr=lr,
             n_qubits=n_qubits, n_layers=n_layers, use_incremental_pca=use_incremental_pca,
+            init_seed=seed * 1_000 + fold_idx,
         )
         fold_train_curves.append(train_curve)
         fold_test_curves.append(test_curve)
@@ -208,17 +217,18 @@ def run_oof_macro_auc_analysis(
     y_true_full: Dict[str, np.ndarray] = {}
     y_prob_full: Dict[str, np.ndarray] = {}
 
-    for condition in condition_names:
+    for condition_idx, condition in enumerate(condition_names):
         y = labels[condition]
         skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         oof_probs = np.full(n_samples, np.nan, dtype=np.float64)
 
-        for train_idx, test_idx in skf.split(features, y):
+        for fold_idx, (train_idx, test_idx) in enumerate(skf.split(features, y)):
             X_train, X_test = features[train_idx], features[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
             _, _, final_test_probs = train_vqc_with_curve(
                 X_train, y_train, X_test, y_test, n_epochs=n_epochs, lr=lr,
                 n_qubits=n_qubits, n_layers=n_layers, use_incremental_pca=use_incremental_pca,
+                init_seed=seed * 1_000_000 + condition_idx * 1_000 + fold_idx,
             )
             oof_probs[test_idx] = final_test_probs
 
