@@ -44,8 +44,8 @@ export function Hero() {
           </a>
         </div>
         <p className="mx-auto mt-8 max-w-xl text-xs text-slate-600">
-          Investigational research prototype · Stanford MRNet validation cohort · Confirmatory
-          radiologist over-read required
+          Investigational research prototype · Real RSNA Knee ground truth, n=58 (directional, not
+          a clinical validation — see RESULTS.md) · Confirmatory radiologist over-read required
         </p>
       </div>
     </section>

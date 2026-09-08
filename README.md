@@ -14,7 +14,7 @@ license: mit
 
 **Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via a Streamlit clinical dashboard.**
 
-> This README covers the PRD-scoped pipeline: ingestion → ResNet18 → PCA → 4-qubit VQC → Streamlit UI → Grad-CAM → SVM benchmark. A FastAPI backend, clinician auth, multi-service Docker/cloud deploy config, and a few alternate model variants were quarantined (moved, not deleted) to [`extras/`](extras/README.md) — see that directory's README for what's there and why.
+> This README covers the PRD-scoped pipeline: ingestion → ResNet18 → PCA → 4-qubit VQC → Streamlit UI → Grad-CAM → SVM benchmark. A FastAPI backend, clinician auth, multi-service Docker/cloud deploy config, and a few alternate model variants were quarantined (moved, not deleted) to [`extras/`](extras/README.md) — see that directory's README for what's there and why. A separate Next.js client for that quarantined FastAPI backend also exists at [`frontend/`](frontend/) — it is a secondary, exploratory interface, not part of judged scope. **See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the authoritative picture of how the Streamlit dashboard (primary) and the Next.js/FastAPI pair (secondary) relate, and why.**
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](#)
@@ -174,7 +174,8 @@ python -m qknee.models.pipeline
 # Train + evaluate against classical baselines, save ROC/confusion-matrix figures
 python -m qknee.models.evaluate
 
-# Launch the Streamlit clinical dashboard (http://localhost:8501)
+# Launch the Streamlit clinical dashboard (http://localhost:8501) -- the PRIMARY,
+# judged interface. See ARCHITECTURE.md for why.
 streamlit run qknee/ui/dashboard.py
 
 # Run the test suite (testpaths=qknee/tests, see pytest.ini)
@@ -182,7 +183,19 @@ pytest                    # full suite
 pytest -m "not slow"      # skip the real ResNet18/PennyLane latency benchmark
 ```
 
-> A FastAPI backend, Docker/docker-compose setup, and Render/Vercel deploy config exist in [`extras/`](extras/README.md) (quarantined — outside the judged PRD scope) if you want the multi-service architecture back.
+**Secondary/exploratory interface** — a FastAPI backend + Next.js frontend also exist, quarantined out of judged scope (see [`ARCHITECTURE.md`](ARCHITECTURE.md)), calling the exact same `PipelineRunner` over HTTP instead of in-process:
+
+```bash
+# FastAPI backend (http://localhost:8000/docs) -- needs both requirements files
+# and a JWT secret; see extras/README.md's "Security configuration" section.
+pip install -r extras/api/requirements.txt
+uvicorn extras.api.server:app --reload --port 8000
+
+# Next.js frontend (http://localhost:3000), in a separate terminal
+cd frontend && npm install && npm run dev
+```
+
+> Docker/docker-compose setup and Render/Vercel deploy config for the above also exist in [`extras/`](extras/README.md) — see that README's "Deployment targets" table for what's actually been validated vs. deployed.
 
 ---
 
@@ -251,9 +264,15 @@ qknee/
 │   └── evaluate.py                # SVM / ResNet-only / VQC comparison + ROC/confusion plots
 ├── xai/
 │   └── gradcam.py                 # Grad-CAM on ResNet18 layer4 + OpenCV overlay
+├── observability/
+│   ├── provenance.py               # LIVE/PRECOMPUTED-DEMO/MOCK-FALLBACK/CACHED/PROXY
+│   │                                # classification -- shared by qknee/ui/dashboard.py AND
+│   │                                # extras/api/server.py, see ARCHITECTURE.md
+│   └── model_health.py             # per-checkpoint validation/status -- same sharing
 ├── ui/
 │   ├── dashboard.py                # Streamlit clinical dashboard — opens straight into the
-│   │                                # workstation, no sign-in (tri-planar, dual risk heads)
+│   │                                # workstation, no sign-in (tri-planar viewport, three risk
+│   │                                # heads: ACL/MCL/Medial Meniscus — see ARCHITECTURE.md)
 │   └── analysis_app.py             # Streamlit single-scan analysis app
 ├── tests/
 │   ├── conftest.py                 # shared fixtures (fitted reducer, ResNet, QKneeModel)
@@ -275,6 +294,16 @@ extras/                              # quarantined — outside the judged PRD sc
 ├── scripts/                         # export_onnx.py, generate_kaggle_submission.py
 ├── models/                          # vqc_strongly_entangling.py (alternate ansatz)
 └── tests/                           # tests for everything above
+
+frontend/                            # Next.js client for extras/api/'s FastAPI backend --
+│                                     # secondary/exploratory interface, NOT judged scope, NOT
+│                                     # quarantined into extras/ (see ARCHITECTURE.md for why it
+│                                     # gets its own top-level entry instead). Contains no ML
+│                                     # code -- lib/api.ts is a typed HTTP client only.
+├── app/workstation/                 # the diagnostic workstation page
+├── components/workstation/          # MRI viewport, triage card, provenance badge
+├── lib/api.ts                       # fetch() calls to the FastAPI backend's JSON contract
+└── lib/types.ts                     # TypeScript mirror of extras/api/server.py's Pydantic models
 
 .streamlit/config.toml              # dark theme config
 requirements.txt                    # runtime dependencies (+ pyyaml)

@@ -1,5 +1,11 @@
 # Extras — quarantined, not part of the judged PRD scope
 
+> **See [`ARCHITECTURE.md`](../ARCHITECTURE.md)** at the repo root for the
+> authoritative picture of how everything here relates to the judged
+> Streamlit interface and to `frontend/` (a Next.js client for the FastAPI
+> server below — NOT itself moved into this directory, and NOT judged
+> scope; see that document for why it gets its own top-level entry).
+
 Everything under this directory was moved out of `qknee/` (and the repo
 root) because it falls outside the hackathon PRD's scoped pipeline:
 
