@@ -9,6 +9,7 @@ for clinical use. See [README.md](README.md) for architecture and setup.
 2. [Effusion label-quality audit](#2-effusion-label-quality-audit)
 3. [SSL pretraining — seeded multi-run result](#3-ssl-pretraining--seeded-multi-run-result)
 4. [Parameter efficiency comparison (VQC vs. matched MLP)](#4-parameter-efficiency-comparison-vqc-vs-matched-mlp)
+5. [Effusion severity-hedge lookup rule (label-scaling ceiling)](#5-effusion-severity-hedge-lookup-rule-label-scaling-ceiling)
 
 ---
 
@@ -262,4 +263,116 @@ for s in 0 1 2 3 4; do
     --seed "$s" \
     --output "qknee/artifacts/vqc_vs_mlp_kfold_summary_seed${s}.json"
 done
+```
+
+---
+
+## 5. Effusion severity-hedge lookup rule (label-scaling ceiling)
+
+**Status: finalized.**
+
+[§2](#2-effusion-label-quality-audit) established that the raw Effusion
+ground truth is noisy but didn't quantify *why* in a form that could be
+codified into a rule for scaling to the 4,349 unlabeled reports. This
+section builds that rule explicitly: [`scripts/effusion_severity_rule.py`](scripts/effusion_severity_rule.py)
+scans each of the 58 labeled reports for an effusion-concept anchor
+(English `effusion`, and the equivalents actually observed in this
+multilingual report set — Spanish `derrame`, Turkish `sıvı`/`efüzyon`,
+Croatian/Bosnian `izljev`, Bulgarian `излив`, Greek `υγρού`, Dutch
+`opzetting`/`vocht`, German `Erguss`), takes the qualifier phrase around the
+last (most conclusion-proximal) mention, buckets it into a severity tier,
+and fits each tier to whichever label (positive/negative) is the majority
+in the 58-set.
+
+**Lookup table** (tier → predicted label, fit on the 58 labeled reports):
+
+| Severity phrase tier | Example phrases | → Predicted label | n in 58-set | Tier accuracy |
+|---|---|:---:|:---:|:---:|
+| No mention / explicit negation | "no effusion", "no knee/joint effusion", "no significant effusion", "sin derrame", no anchor found at all | **Negative** | 8 | 7/8 = 88% |
+| Trace / minimal / slight | "trace", "minimal", "geringer Gelenkerguss", "минимален ставен излив" | **Negative** | 6 | 4/6 = 67% |
+| Mild / small / some amount of | "mild effusion", "small joint effusion", "some amount of ... effusion", "leve derrame articular" | **Positive** *(coin flip — see caveat)* | 19 | 10/19 = 53% |
+| Moderate | "moderate joint effusion", "matige opzetting", "µέτρια ποσότητα" | **Positive** | 5 | 3/5 = 60% |
+| Large / massive / extensive | "large effusion", "massive joint effusion", "opsežan zglobni izljev", "yaygın sıvı artışı" | **Positive** | 6 | 6/6 = 100% |
+| Mentioned, no severity qualifier at all | "Derrame.", "Effusion with synovitis", "Joint effusion and suprapatellar bursitis" | **Positive** | 14 | 13/14 = 93% |
+
+**Overall rule accuracy on the 58 ground-truth labels: 43/58 = 74.1%.**
+
+- This number is the realistic **ceiling**, not a floor, for what a
+  keyword rule can achieve on the 4,349 unlabeled reports: it's fit and
+  evaluated on the same 58 reports, so it has already seen every phrasing
+  quirk in that set. On genuinely unseen reports, expect this to be a
+  soft upper bound — new phrasings, more languages, and translation-quality
+  variance will only pull it down.
+- The ceiling is capped almost entirely by one bucket: **"mild / small /
+  some amount of"**, the single largest tier at 19/58 (33%) of all labeled
+  reports, splits **10 positive / 9 negative** — statistically
+  indistinguishable from a coin flip. No lookup rule, however cleverly
+  worded, can do better than chance on this bucket with the *label*
+  convention as given; this is the same ~50/50 split [§2](#2-effusion-label-quality-audit)'s
+  audit already flagged as verbatim-identical text mapped to opposite
+  labels, now isolated to the specific phrase family responsible for it.
+- Every other tier is genuinely informative: absence/negation is 88%
+  reliable as negative, trace/minimal leans negative (67%), and
+  moderate/large/unqualified-mention all lean strongly positive
+  (60–100%). If "mild/small/some" reports were excluded rather than
+  guessed on, accuracy on the remaining 39 reports would be 33/39 = 84.6%
+  — the practical takeaway is that this hedge tier is where human review
+  (or a better ground-truth source) is worth spending effort, not the
+  unambiguous tiers.
+- **Do not apply this rule to silently auto-label the 4,349 unlabeled
+  reports and treat the output as ground truth.** At a 74% best-case
+  ceiling — and a coin-flip on a third of typical phrasing — a model
+  trained on rule-generated pseudo-labels would be learning to reproduce
+  this same ~26%+ error rate, likely amplified on report phrasings outside
+  the 58-report training set. Reasonable uses: (a) flag the "mild/small/
+  some" tier as low-confidence/needs-review rather than auto-labeling it,
+  (b) use the rule only for the high-accuracy tiers (none/negation,
+  large, unqualified-mention) as a cheap positive/negative prefilter, or
+  (c) use it as weak supervision inside a framework that models label
+  noise explicitly, not as a drop-in label generator.
+
+**Scaled application to the 4,349 unlabeled reports** (`train.csv` rows
+with a blank `Effusion` column — confirmed: 4,407 total rows − 58
+ground-truth-labeled = 4,349): the rule was applied with the coin-flip MILD
+tier hard-excluded from labeling (never assigned, regardless of what
+`TIER_TO_LABEL` says), and TRACE included but carrying its weaker 67%
+validated accuracy alongside the label.
+
+| Tier | n in 4,349 | Scaled? |
+|---|:---:|:---:|
+| No mention / negation | 1,526 | yes (88% acc.) |
+| Trace / minimal | 402 | yes (67% acc., flagged lower-confidence) |
+| Mild / small / some amount of | 626 | **no — left null / needs-review** |
+| Moderate | 266 | yes (60% acc.) |
+| Large / massive / extensive | 96 | yes (100% acc.) |
+| Mentioned, no qualifier | 1,433 | yes (93% acc.) |
+
+**Confidently labeled: 3,723 / 4,349 = 85.6%** (1,928 negative, 1,795
+positive under this rule). **Left unresolved (needs-review): 626 / 4,349 =
+14.4%** — exactly the reports whose effusion language falls in the
+coin-flip MILD tier, output with `assigned_label` empty and
+`needs_review=1` rather than guessed.
+
+Note the confidently-labeled fraction here (85.6%) is *not* the same
+number as the 74.1% overall rule accuracy above — that 74.1% is accuracy
+including the MILD tier's forced guesses on the 58-set; scaling excludes
+MILD from receiving a label at all, so 85.6% is coverage (how many of the
+4,349 get *any* label), not accuracy. Expected accuracy on the 3,723 that
+*do* get labeled is the weighted average of the per-tier accuracies above
+(88/67/60/100/93%), i.e. materially better than 74.1% — but still an
+extrapolation from 58 examples to 3,723 unseen ones, not a guarantee.
+
+Full per-study output (`StudyInstanceUID`, `tier`, `assigned_label`,
+`tier_accuracy_on_58set`, `needs_review`) is written to
+[`qknee/artifacts/effusion_scaled_labels.csv`](qknee/artifacts/effusion_scaled_labels.csv).
+
+Regenerate with:
+
+```bash
+# Validate only:
+PYTHONPATH=. python scripts/effusion_severity_rule.py --input rsna_effusion_audit_input.csv
+
+# Validate + apply to the 4,349 unlabeled reports in train.csv:
+PYTHONPATH=. python scripts/effusion_severity_rule.py --apply --input train.csv \
+    --output qknee/artifacts/effusion_scaled_labels.csv
 ```

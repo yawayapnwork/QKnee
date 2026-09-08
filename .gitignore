@@ -86,3 +86,6 @@ rsna_labeled_fetch_checkpoint.json
 qknee/artifacts/rsna58_features_*.npz
 rsna_pretrain_pool_*.json
 scripts/_*.log
+
+qknee/artifacts/effusion_weak_labeled_features_*.npz
+rsna_effusion_weak_labeled_checkpoint.json
