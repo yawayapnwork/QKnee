@@ -17,6 +17,7 @@ suite is fully self-contained and deterministic.
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -307,6 +308,102 @@ class TestPredictViewerContract:
         assert payload["gradcam_plane"] == "axial"
         assert payload["gradcam_slice_index"] == 11 // 2
         assert payload["primary_slice_index"] == 11 // 2
+
+
+# --------------------------------------------------------------------------- #
+# 1a3. /predict provenance contract (AUDIT.md P1 #5/#7): every response must
+# carry a `qknee.observability.provenance`-derived provenance label, and it
+# must survive the backend -> API boundary unchanged.
+# --------------------------------------------------------------------------- #
+
+class TestPredictProvenanceContract:
+    def test_live_backend_with_trained_checkpoint_reports_live_provenance(
+        self, live_client: TestClient, dummy_slice_2d: np.ndarray,
+    ):
+        response = live_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["backend"] == "live"
+        assert payload["provenance"] == "live"
+        assert payload["provenance_label"] == "LIVE"
+        assert payload["model_source"] == "trained_checkpoint"
+        assert payload["quantum_execution"] == "quantum_simulator"
+        assert payload["quantum_execution_label"] == "QUANTUM SIMULATOR"
+
+    def test_mock_backend_reports_mock_fallback_provenance_with_no_model_source(
+        self, mock_client: TestClient, dummy_slice_2d: np.ndarray,
+    ):
+        response = mock_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["backend"] == "mock"
+        assert payload["provenance"] == "mock_fallback"
+        assert payload["provenance_label"] == "MOCK/FALLBACK"
+        assert payload["model_source"] is None
+        assert payload["quantum_execution"] == "unavailable"
+
+    def test_live_backend_with_untrained_checkpoint_is_downgraded_to_mock_fallback(
+        self, pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        dummy_slice_2d: np.ndarray,
+    ):
+        """AUDIT.md C4b's exact regression: a real forward pass through
+        randomly-initialized weights (no trained checkpoint present) must
+        never report LIVE provenance, even though `backend` -- the legacy
+        field -- still literally says 'live'."""
+        live_backend = server_module.QKneeBackend(pca_artifact_path=pca_artifact_path)
+        assert live_backend.backend_ready
+        # Force the "no trained checkpoint was found" branch this test is
+        # about, without needing a whole separate PipelineRunner construction.
+        monkeypatch.setattr(live_backend.runner, "vqc_checkpoint_loaded", False)
+        monkeypatch.setattr(server_module, "backend", live_backend)
+        monkeypatch.setattr(server_module, "cache_service", server_module.CacheService())
+        client = _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
+
+        response = client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["backend"] == "live"  # legacy field unchanged
+        assert payload["provenance"] == "mock_fallback"  # authoritative signal, downgraded
+        assert payload["provenance_label"] == "MOCK/FALLBACK"
+        assert payload["model_source"] == "random_fallback"
+
+    def test_cache_fallback_backend_reports_precomputed_demo_provenance(self, tmp_path: Path):
+        cache_path = tmp_path / "precomputed_cache.json"
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_0001",
+                            "risk_score": 0.5,
+                            "heatmap_base64": "",
+                            "pauli_z_expectations": [0.1, 0.2, 0.3, 0.4],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        cached_backend = server_module.CachedFallbackBackend(cache_path=cache_path)
+        response = cached_backend.predict(b"any bytes", "slice.npy")
+
+        assert response.backend == "cache-fallback/case_0001"
+        assert response.provenance == "precomputed_demo"
+        assert response.provenance_label == "PRECOMPUTED DEMO"
+        assert response.model_source is None
+        assert response.quantum_execution == "quantum_simulator"
 
 
 # --------------------------------------------------------------------------- #

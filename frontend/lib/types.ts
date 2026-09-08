@@ -68,6 +68,49 @@ export interface PredictionResponse {
   primary_plane: AnatomicalPlane;
   /** 0-based index, within `planes[primary_plane].slices`, of the slice actually classified. */
   primary_slice_index: number;
+  /** Unified prediction-provenance category — see `qknee.observability.provenance.classify`
+   * (the Python module both this API and the Streamlit dashboard derive their provenance from).
+   * One of "live" | "precomputed_demo" | "mock_fallback" | "cached" | "proxy". This is the
+   * authoritative signal the UI must badge/gate on — never `backend` (above), which is a
+   * free-form legacy tag. A real forward pass through untrained/randomly-initialized weights
+   * (AUDIT.md B3/C4b) is reported here as "mock_fallback", never "live", even though `backend`
+   * still says "live" for that case. */
+  provenance: Provenance;
+  /** Exact display string for `provenance` (e.g. "LIVE", "MOCK/FALLBACK") — render verbatim. */
+  provenance_label: string;
+  /** "trained_checkpoint" | "random_fallback" when a real model forward pass ran; `null` when no
+   * model ran at all (mock/precomputed-demo/proxy paths). */
+  model_source: ModelSource | null;
+  /** Exact display string for `model_source`, or `null` iff `model_source` is `null`. */
+  model_source_label: string | null;
+  /** "quantum_simulator" when a real PennyLane circuit executed for this response, else
+   * "unavailable". Never labeled "SIMULATION MODE" — the quantum simulator running is this
+   * project's normal, expected state (AUDIT.md C4c); only "unavailable" means something is
+   * actually missing. */
+  quantum_execution: QuantumExecution;
+  /** Exact display string for `quantum_execution` — render verbatim. */
+  quantum_execution_label: string;
+}
+
+export type Provenance = "live" | "precomputed_demo" | "mock_fallback" | "cached" | "proxy";
+export type ModelSource = "trained_checkpoint" | "random_fallback";
+export type QuantumExecution = "quantum_simulator" | "unavailable";
+
+/** App-level provenance bundle threaded onto every `DiagnosticResult` — see `lib/provenance.ts`.
+ * Built exactly once per result (from a live `PredictionResponse` or explicitly for a preset/demo
+ * case), never re-derived at a render call site, so the badge a viewer sees always matches the
+ * actual execution path. */
+export interface ProvenanceInfo {
+  provenance: Provenance;
+  provenanceLabel: string;
+  modelSource: ModelSource | null;
+  modelSourceLabel: string | null;
+  quantumExecution: QuantumExecution;
+  quantumExecutionLabel: string;
+  /** False whenever this result must never be presented as an ordinary successful "LIVE" result
+   * (currently: `provenance === "mock_fallback"`) — the UI must render an unmistakable, high-
+   * contrast badge in that case, per AUDIT.md P1 #5 requirement 5. */
+  isTrustworthy: boolean;
 }
 
 export type AnatomicalPlane = "axial" | "coronal" | "sagittal";
@@ -174,4 +217,5 @@ export interface DiagnosticResult {
   quantumTelemetry: QuantumTelemetry;
   volume: VolumeView;
   source: "live" | "mock";
+  provenance: ProvenanceInfo;
 }

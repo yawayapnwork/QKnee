@@ -717,6 +717,50 @@ class TestGracefulMissingCheckpointFallback:
         assert result.gradcam_heatmap is not None
         assert result.gradcam_heatmap.ndim == 2
 
+    def test_model_checkpoint_loaded_flag_is_false_without_a_checkpoint(
+        self, pca_artifact_path: Path, missing_checkpoint_path: Path,
+    ):
+        """AUDIT.md P1 #7 (B3/C4b): both `PipelineRunner.vqc_checkpoint_loaded`
+        and the `PipelineResult` it returns must record that this run used
+        randomly-initialized weights, not a trained checkpoint -- this is
+        the signal `qknee.observability.provenance.classify` downgrades to
+        MOCK/FALLBACK provenance instead of a silently-trusted LIVE result."""
+        pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=missing_checkpoint_path)
+        assert pipeline.vqc_checkpoint_loaded is False
+
+        rng = np.random.default_rng(14)
+        volume = rng.integers(0, 255, size=(4, 224, 224), dtype=np.uint8)
+        result = pipeline.predict_volume(volume)
+
+        assert result.model_checkpoint_loaded is False
+
+    def test_model_checkpoint_loaded_flag_is_true_with_a_real_checkpoint(
+        self, pca_artifact_path: Path, tmp_path: Path,
+    ):
+        """The positive counterpart: a genuinely loaded checkpoint must
+        report `True`, not just default to it -- otherwise this flag could
+        never actually distinguish the two cases `classify()` relies on."""
+        torch.manual_seed(3)
+        seed_pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=tmp_path / "unused.pt")
+        checkpoint_path = tmp_path / "trained.pt"
+        torch.save(
+            {
+                "vqc_state_dict": seed_pipeline.vqc.state_dict(),
+                "n_qubits": seed_pipeline.vqc.n_qubits,
+                "n_layers": seed_pipeline.vqc.n_layers,
+            },
+            checkpoint_path,
+        )
+
+        pipeline = QKneePipeline(pca_artifact_path=pca_artifact_path, vqc_checkpoint_path=checkpoint_path)
+        assert pipeline.vqc_checkpoint_loaded is True
+
+        rng = np.random.default_rng(15)
+        volume = rng.integers(0, 255, size=(4, 224, 224), dtype=np.uint8)
+        result = pipeline.predict_volume(volume)
+
+        assert result.model_checkpoint_loaded is True
+
     def test_missing_checkpoint_logs_the_required_warning_message(
         self, pca_artifact_path: Path, missing_checkpoint_path: Path, caplog: pytest.LogCaptureFixture,
     ):

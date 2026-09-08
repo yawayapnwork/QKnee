@@ -78,6 +78,7 @@ from qknee.api.auth import router as auth_router
 from qknee.api.auth import user_store
 from qknee.config.loader import load_config, redact_connection_string
 from qknee.config.logging_config import get_logger, setup_logging
+from qknee.observability import provenance as provenance_module
 
 # --------------------------------------------------------------------------- #
 # Deliberately NOT imported at module scope: torch, torchvision, pennylane
@@ -439,6 +440,35 @@ class PredictionResponse(BaseModel):
                     "'default.qubit'), from `qknee.config.config.yaml`'s `quantum.device`. `None` exactly when "
                     "`quantum_expectations` is `None`.",
     )
+    provenance: str = Field(
+        ...,
+        description="Unified prediction-provenance category -- one of 'live', 'precomputed_demo', "
+                    "'mock_fallback', 'cached', 'proxy'. See qknee.observability.provenance.classify -- this is "
+                    "the single authoritative signal a caller should badge/gate UI behavior on, since `backend` "
+                    "(above) is a free-form legacy tag kept only for backwards compatibility. AUDIT.md P1 #5/#7: "
+                    "a real forward pass through untrained/randomly-initialized weights is reported here as "
+                    "'mock_fallback', never as 'live', even though `backend` still says 'live' for that case.",
+    )
+    provenance_label: str = Field(
+        ..., description="Human-readable label for `provenance` (e.g. 'LIVE', 'MOCK/FALLBACK') -- the exact "
+                         "string every UI surface (Next.js, Streamlit) must display verbatim, never re-worded.",
+    )
+    model_source: Optional[str] = Field(
+        None,
+        description="'trained_checkpoint' or 'random_fallback' when a real model forward pass ran for this "
+                    "response; `None` when no model ran at all (pure mock/precomputed-demo/proxy paths). "
+                    "'random_fallback' means the classifier that produced `risk_score` had no trained checkpoint "
+                    "available and ran on randomly-initialized weights instead (AUDIT.md B3/C4b).",
+    )
+    model_source_label: Optional[str] = Field(None, description="Human-readable label for `model_source`.")
+    quantum_execution: str = Field(
+        ...,
+        description="'quantum_simulator' when a real PennyLane circuit executed for this response (live or "
+                    "precomputed), else 'unavailable'. Deliberately never labeled 'SIMULATION MODE' -- the "
+                    "quantum simulator running is this project's normal, non-degraded state (AUDIT.md C4c); only "
+                    "'unavailable' means something is actually missing.",
+    )
+    quantum_execution_label: str = Field(..., description="Human-readable label for `quantum_execution`.")
 
 
 class HealthResponse(BaseModel):
@@ -499,6 +529,8 @@ class _PredictParts:
     gradcam_slice_index: Optional[int]
     planes: Dict[str, PlaneInfo]
     primary_slice_index: int
+    model_checkpoint_loaded: Optional[bool] = None  # None: no model forward pass ran for this
+    # response (mock mode) -- see qknee.observability.provenance.classify's `model_checkpoint_loaded` arg.
 
 
 # --------------------------------------------------------------------------- #
@@ -748,6 +780,12 @@ class QKneeBackend:
 
         diagnosis = "Tear Detected" if parts.risk_score >= TEAR_RISK_THRESHOLD else "Normal"
 
+        info = provenance_module.classify(
+            backend_tag=backend,
+            model_checkpoint_loaded=parts.model_checkpoint_loaded,
+            quantum_expectations_present=parts.quantum_expectations is not None,
+        )
+
         return PredictionResponse(
             risk_score=parts.risk_score,
             diagnosis=diagnosis,
@@ -764,6 +802,7 @@ class QKneeBackend:
             planes=parts.planes,
             primary_plane="axial",
             primary_slice_index=parts.primary_slice_index,
+            **info.as_dict(),
         )
 
     def _predict_live(self, raw_array: np.ndarray) -> _PredictParts:
@@ -827,6 +866,7 @@ class QKneeBackend:
                 gradcam_slice_index=primary_slice_index,
                 planes=planes,
                 primary_slice_index=primary_slice_index,
+                model_checkpoint_loaded=self.runner.vqc_checkpoint_loaded,
             )
         except HTTPException:
             raise
@@ -1005,6 +1045,13 @@ class CachedFallbackBackend:
             "sagittal": PlaneInfo(available=False, num_slices=0, slices=[]),
         }
 
+        backend_tag = f"cache-fallback/{case.get('case_id', 'unknown')}"
+        info = provenance_module.classify(
+            backend_tag=backend_tag,
+            model_checkpoint_loaded=None,  # no model forward pass ran for this request -- see class docstring
+            quantum_expectations_present=quantum_expectations is not None,
+        )
+
         return PredictionResponse(
             risk_score=risk_score,
             diagnosis=diagnosis,
@@ -1012,7 +1059,7 @@ class CachedFallbackBackend:
             n_qubits=len(quantum_expectations) if quantum_expectations is not None else None,
             quantum_backend=_config.quantum.device if quantum_expectations is not None else None,
             gradcam_heatmap=heatmap_b64,
-            backend=f"cache-fallback/{case.get('case_id', 'unknown')}",
+            backend=backend_tag,
             base_image="",
             gradcam_overlay=None,
             gradcam_plane=None,
@@ -1020,6 +1067,7 @@ class CachedFallbackBackend:
             planes=planes,
             primary_plane="axial",
             primary_slice_index=0,
+            **info.as_dict(),
         )
 
 
@@ -1067,7 +1115,25 @@ class ProxyBackend:
 
     def predict(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> "PredictionResponse":
         response = self._forward("/predict", raw_bytes, filename, auth_header)
-        return PredictionResponse(**response.json())
+        payload = response.json()
+
+        # Preserve the upstream's own provenance verbatim when it's already
+        # present (an upstream running this same, current API version
+        # always includes it) -- this process merely relayed real bytes,
+        # it must not overwrite a genuine "live"/"mock_fallback" verdict
+        # with a blanket "proxy" label. Only fill in a conservative
+        # 'proxy' default when the upstream predates this schema (rolling
+        # upgrade / older BACKEND_API_URL deployment) and sent no
+        # provenance fields at all.
+        if "provenance" not in payload:
+            info = provenance_module.classify(
+                backend_tag="proxy",
+                model_checkpoint_loaded=None,
+                quantum_expectations_present=payload.get("quantum_expectations") is not None,
+            )
+            payload = {**info.as_dict(), **payload}
+
+        return PredictionResponse(**payload)
 
     def explain(self, raw_bytes: bytes, filename: str, auth_header: Optional[str] = None) -> "ExplanationResponse":
         response = self._forward("/explain", raw_bytes, filename, auth_header)

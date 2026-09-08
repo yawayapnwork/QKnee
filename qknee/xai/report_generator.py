@@ -679,6 +679,12 @@ def generate_radiology_report(
 
     generated_at = datetime.now(timezone.utc)
     backend = _get(prediction_results, "backend", "live")
+    # AUDIT.md P1 #9: prefer the caller-supplied unified provenance label
+    # (from qknee.observability.provenance) when given, so an exported
+    # report uses the exact same terminology as the on-screen badge rather
+    # than a raw internal tag like "cache-fallback/case_0007". Falls back
+    # to the raw `backend` tag for callers that don't pass one yet.
+    provenance_label = _get(prediction_results, "provenance") or backend
 
     # =================================================================== #
     # PAGE 1 — Header, Clinical Impression, Patient/Study Info, Visual Evidence
@@ -748,7 +754,7 @@ def generate_radiology_report(
     y = _draw_table(c, _latency_table(prediction_results), MARGIN, y - 2, CONTENT_WIDTH) - 4
     c.setFont("Helvetica-Oblique", 7.5)
     c.setFillColor(colors.grey)
-    c.drawString(MARGIN, y - 8, f"Inference backend: {backend}")
+    c.drawString(MARGIN, y - 8, f"Inference backend: {backend} — Provenance: {provenance_label}")
     y -= 24
 
     # --- Section 5: Legal/Clinical Disclaimer + timestamped signature placeholder ---

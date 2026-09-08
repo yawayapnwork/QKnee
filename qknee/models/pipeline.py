@@ -107,6 +107,11 @@ class PipelineResult:
     # own raw per-qubit measurement, read directly from `quantum_layer` before the classical
     # readout collapses it into `risk_score`. None if the classifying model doesn't expose a
     # `.quantum_layer` (see `PipelineRunner.get_pauli_z_expectations`).
+    model_checkpoint_loaded: bool = False  # False means the VQC classifier that produced
+    # `risk_score` is running on randomly-initialized weights (no trained checkpoint was found
+    # at construction time) -- see `PipelineRunner.vqc_checkpoint_loaded` and
+    # `qknee.observability.provenance.classify`, which downgrades this to MOCK/FALLBACK
+    # provenance rather than reporting it as a trustworthy LIVE result (AUDIT.md C4b).
 
 
 _VQC_PREFIX = "vqc."
@@ -356,8 +361,10 @@ class PipelineRunner:
             checkpoint_path = DEFAULT_BEST_CHECKPOINT_PATH
         if checkpoint_path.exists():
             self._load_vqc_checkpoint(checkpoint_path)
+            self.vqc_checkpoint_loaded = True
             logger.info("Loaded trained %s weights from %s", classifier_cls.__name__, checkpoint_path)
         else:
+            self.vqc_checkpoint_loaded = False
             # Graceful missing-checkpoint handler: never raises
             # FileNotFoundError here — a fresh checkout with no trained
             # qknee/artifacts/checkpoints/best_qknee_model.pt yet must
@@ -737,6 +744,7 @@ class PipelineRunner:
             quantum_angles=quantum_angles,
             gradcam_heatmap=heatmap,
             pauli_z_expectations=pauli_z_expectations,
+            model_checkpoint_loaded=self.vqc_checkpoint_loaded,
         )
 
 

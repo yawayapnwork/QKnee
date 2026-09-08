@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ApiError, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
+import { provenanceFromPrediction } from "@/lib/provenance";
 import { volumeViewFromPrediction } from "@/lib/viewer";
 import type { DiagnosticResult, PresetCase } from "@/lib/types";
 
@@ -46,14 +47,20 @@ export default function WorkstationPage() {
         quantumTelemetry: quantumTelemetryFromPrediction(prediction),
         volume: volumeViewFromPrediction(prediction),
         source: "live",
+        provenance: provenanceFromPrediction(prediction),
       });
     } catch (err) {
+      // AUDIT.md P1 #7 requirements 6/7: a failed live call must never
+      // silently keep looking like (or quietly become) a trustworthy
+      // result — the error is shown AND the fallback result is stamped
+      // "mock_fallback" (loud/unmistakable), never "precomputed_demo"
+      // (the calmer label a deliberately-picked preset case gets).
       setError(
         err instanceof ApiError
           ? err.detail
           : "Backend unreachable (likely a Render cold start) — showing preset data instead.",
       );
-      setResult(mockDiagnosticResult(activeCase));
+      setResult(mockDiagnosticResult(activeCase, /* isFailedLiveFallback */ true));
     } finally {
       setLoading(false);
     }

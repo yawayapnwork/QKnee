@@ -243,3 +243,58 @@ class TestDashboardHelpers:
         assert result_a.total_latency_ms == pytest.approx(
             result_a.resnet_latency_ms + result_a.pca_latency_ms + result_a.quantum_latency_ms
         )
+        # AUDIT.md P1 #5/#7: mock inference must never carry a checkpoint
+        # status -- no local model ran at all for this backend.
+        assert result_a.checkpoint_status is None
+
+
+# --------------------------------------------------------------------------- #
+# 3. Unified provenance (AUDIT.md P1 #5/#7/#9): the Streamlit dashboard must
+# derive its badges from the exact same `qknee.observability.provenance`
+# module the Next.js API uses, and consistently thread per-head checkpoint
+# status through `InferenceResult`.
+# --------------------------------------------------------------------------- #
+
+class TestDashboardProvenance:
+    def test_render_diagnostic_tab_terminology_never_says_simulation_mode(self):
+        """AUDIT.md C4c regression: the ambiguous 'SIMULATION MODE' string
+        must not appear anywhere in the module's source, since a real
+        quantum simulator being active is this project's normal, non-
+        degraded state, not something that should share a badge with a
+        genuinely degraded/fabricated result."""
+        import inspect
+
+        source = inspect.getsource(dashboard)
+        assert "SIMULATION MODE" not in source
+
+    def test_render_quantum_status_uses_the_shared_provenance_vocabulary(self):
+        import inspect
+
+        source = inspect.getsource(dashboard.render_quantum_status)
+        assert "provenance_module.PROVENANCE_LABELS" in source
+        assert "provenance_module.QUANTUM_EXECUTION_LABELS" in source
+
+    def test_render_provenance_badge_classifies_via_the_shared_module(self):
+        from qknee.observability import provenance as provenance_module
+
+        live_result = dashboard.InferenceResult(
+            acl_risk=0.5, mcl_risk=0.5, meniscus_risk=0.5,
+            resnet_latency_ms=1.0, pca_latency_ms=1.0, quantum_latency_ms=1.0, total_latency_ms=3.0,
+            backend="live", pauli_z_expectations=np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
+        )
+        info = provenance_module.classify(
+            backend_tag=live_result.backend,
+            model_checkpoint_loaded=None,
+            quantum_expectations_present=live_result.pauli_z_expectations is not None,
+        )
+        assert info.provenance == "live"
+        assert info.provenance_label == "LIVE"
+
+    def test_load_backend_return_shape_includes_checkpoint_status(self):
+        """`load_backend()` must return a 5th element (`checkpoint_status`),
+        not the old 4-tuple -- a caller unpacking only 4 values would raise
+        `ValueError` rather than silently losing this signal."""
+        import inspect
+
+        source = inspect.getsource(dashboard.load_backend)
+        assert "return runner, acl_model, mcl_model, meniscus_model, checkpoint_status" in source

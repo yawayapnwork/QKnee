@@ -26,6 +26,12 @@ export function livePrediction(overrides: Partial<PredictionResponse> = {}): Pre
     },
     primary_plane: "axial",
     primary_slice_index: 12,
+    provenance: "live",
+    provenance_label: "LIVE",
+    model_source: "trained_checkpoint",
+    model_source_label: "TRAINED MODEL",
+    quantum_execution: "quantum_simulator",
+    quantum_execution_label: "QUANTUM SIMULATOR",
     ...overrides,
   };
 }

@@ -46,6 +46,7 @@ import streamlit as st
 
 from qknee.config.loader import load_config
 from qknee.config.logging_config import get_logger
+from qknee.observability import provenance as provenance_module
 from qknee.ui import theme
 
 # Session-state key for a precomputed-cache case id to pre-select in the
@@ -120,6 +121,11 @@ class InferenceResult:
     pauli_z_expectations: Optional[np.ndarray] = None  # (n_qubits,) in [-1, 1] — the ACL circuit's own
     # raw per-qubit measurement, read before the classical Linear+Sigmoid readout collapses it to a
     # single risk probability. None if unavailable for this backend (see get_pauli_z_expectations).
+    checkpoint_status: Optional[Dict[str, bool]] = None  # {"acl": bool, "mcl": bool, "meniscus": bool} —
+    # whether each head's risk score above came from a real trained checkpoint (True) or randomly-
+    # initialized weights (False, AUDIT.md B3/C4b) -- None for backends where no local model ran at
+    # all ("mock", "api"). See qknee.observability.provenance.MODEL_SOURCE_LABELS for the per-head
+    # "MODEL FALLBACK" badge this drives in render_risk_gauge.
 
 
 def get_pauli_z_expectations(vqc_model, quantum_angles: np.ndarray) -> Optional[np.ndarray]:
@@ -175,16 +181,23 @@ def _release_inference_memory() -> None:
 
 
 @st.cache_resource(show_spinner=False, max_entries=1)
-def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object], Optional[object]]:
+def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object], Optional[object], Dict[str, bool]]:
     """Attempts to load the real ResNet18 -> PCA -> VQC pipeline.
 
-    Returns a tuple (runner, acl_model, mcl_model, meniscus_model) or
-    (None, None, None, None) if any dependency (torch, pennylane, or the
-    fitted PCA artifact) is unavailable — the caller falls back to mock
-    inference in that case.
+    Returns a tuple (runner, acl_model, mcl_model, meniscus_model,
+    checkpoint_status) or (None, None, None, None, {}) if any dependency
+    (torch, pennylane, or the fitted PCA artifact) is unavailable — the
+    caller falls back to mock inference in that case.
+
+    `checkpoint_status` is `{"acl": bool, "mcl": bool, "meniscus": bool}` —
+    whether each head actually loaded a trained checkpoint (`True`) or is
+    running on randomly-initialized weights (`False`). MCL is always
+    `False` here (AUDIT.md B3: no `paths.mcl_checkpoint` exists yet) — see
+    `qknee.observability.provenance.MODEL_SOURCE_LABELS` for the per-head
+    "MODEL FALLBACK" badge this drives (`render_risk_gauge`).
     """
     if not _config.paths.pca_artifact.exists():
-        return None, None, None, None
+        return None, None, None, None, {}
 
     try:
         import torch
@@ -202,12 +215,15 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
         # initialized weights for that head only (not the whole backend).
         # MCL has no dedicated config.yaml checkpoint path (yet), so it
         # always uses a seeded-random head.
+        checkpoint_status: Dict[str, bool] = {"acl": False, "mcl": False, "meniscus": False}
+
         torch.manual_seed(42)
         acl_model = VQCClassifier()
         if _config.paths.acl_checkpoint.exists():
             try:
                 load_vqc_weights(acl_model, _config.paths.acl_checkpoint)
                 logger.info("Loaded trained ACL VQC weights from %s", _config.paths.acl_checkpoint)
+                checkpoint_status["acl"] = True
             except PipelineValidationError as exc:
                 logger.warning("Failed to load ACL checkpoint (%s); using random weights: %s",
                                 _config.paths.acl_checkpoint, exc)
@@ -219,7 +235,7 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
         torch.manual_seed(21)
         mcl_model = VQCClassifier()
         logger.warning("No MCL checkpoint configured (paths.mcl_checkpoint); using randomly initialized weights.")
-        mcl_model.eval()
+        mcl_model.eval()  # checkpoint_status["mcl"] stays False -- AUDIT.md B3, no checkpoint path exists yet
 
         torch.manual_seed(7)
         meniscus_model = VQCClassifier()
@@ -227,6 +243,7 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
             try:
                 load_vqc_weights(meniscus_model, _config.paths.meniscus_checkpoint)
                 logger.info("Loaded trained meniscus VQC weights from %s", _config.paths.meniscus_checkpoint)
+                checkpoint_status["meniscus"] = True
             except PipelineValidationError as exc:
                 logger.warning("Failed to load meniscus checkpoint (%s); using random weights: %s",
                                 _config.paths.meniscus_checkpoint, exc)
@@ -235,10 +252,10 @@ def load_backend() -> Tuple[Optional[object], Optional[object], Optional[object]
                             _config.paths.meniscus_checkpoint)
         meniscus_model.eval()
 
-        return runner, acl_model, mcl_model, meniscus_model
+        return runner, acl_model, mcl_model, meniscus_model, checkpoint_status
     except Exception as exc:  # noqa: BLE001 - surface any backend failure as "unavailable"
         st.session_state.setdefault("_backend_error", str(exc))
-        return None, None, None, None
+        return None, None, None, None, {}
 
 
 # --------------------------------------------------------------------------- #
@@ -402,7 +419,10 @@ def run_mock_inference(slice_2d: np.ndarray) -> InferenceResult:
 
 
 @st.cache_data(show_spinner=False, max_entries=10, ttl=3600)
-def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _meniscus_model) -> InferenceResult:
+def run_live_inference(
+    slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _meniscus_model,
+    checkpoint_status: Optional[Dict[str, bool]] = None,
+) -> InferenceResult:
     """Runs the real DataIngestion -> ResNet18 -> PCA -> VQC pipeline (via
     `PipelineRunner`'s stage methods) on one 2D slice, timing each stage,
     and generates a Grad-CAM overlay backpropagated from the ACL risk score
@@ -470,6 +490,7 @@ def run_live_inference(slice_2d: np.ndarray, _runner, _acl_model, _mcl_model, _m
         gradcam_overlay=gradcam_overlay,
         gradcam_heatmap=gradcam_heatmap,
         pauli_z_expectations=pauli_z_expectations,
+        checkpoint_status=checkpoint_status,
     )
 
     # `batch`/`features`/`quantum_angles` and Grad-CAM's backward-pass
@@ -640,15 +661,29 @@ def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]
         )
         st.sidebar.caption("Inference runs in the API container; per-stage latency is not reported this way.")
     elif backend_ready:
+        # "KERNEL ONLINE" + QUANTUM SIMULATOR here describes this project's
+        # normal, always-true, non-degraded state (PennyLane's `default.
+        # qubit` IS the real execution backend — no physical QPU is ever
+        # claimed anywhere in this project, see README.md/RESULTS.md), so
+        # this label must never be confused with the degraded state below.
         st.sidebar.markdown(
-            '<span class="qknee-badge qknee-badge-low">KERNEL ONLINE</span> '
-            "NISQ Simulator Active — PennyLane `default.qubit`, 4 qubits",
+            f'<span class="qknee-badge qknee-badge-low">KERNEL ONLINE</span> '
+            f'{provenance_module.QUANTUM_EXECUTION_LABELS["quantum_simulator"]} — '
+            "PennyLane `default.qubit`, 4 qubits",
             unsafe_allow_html=True,
         )
         st.sidebar.caption("Angle-encoded VQC · variational depth = 3 layers")
     else:
+        # AUDIT.md C4c: the retired ambiguous badge here read as "the
+        # (expected) quantum simulator is active" rather than its intended
+        # meaning below — an artifact is missing and every score shown is
+        # fabricated. Uses the same MOCK/FALLBACK vocabulary as the Next.js
+        # API and the per-result provenance badge above
+        # (render_provenance_badge) instead of a bespoke, ambiguous label.
         st.sidebar.markdown(
-            '<span class="qknee-badge qknee-badge-moderate">SIMULATION MODE</span> Quantum kernel unavailable',
+            f'<span class="qknee-badge qknee-badge-high">'
+            f'{provenance_module.PROVENANCE_LABELS["mock_fallback"]}</span> '
+            f'{provenance_module.QUANTUM_EXECUTION_LABELS["unavailable"]} — quantum kernel unavailable',
             unsafe_allow_html=True,
         )
         backend_error = st.session_state.get("_backend_error")
@@ -661,7 +696,45 @@ def render_quantum_status(mode: str, backend_ready: bool, api_url: Optional[str]
         st.sidebar.caption(f"$QKNEE_API_URL is set ({api_url}) but unreachable — using in-process/mock inference.")
 
 
-def render_risk_gauge(label: str, value: Optional[float]) -> None:
+_PROVENANCE_BADGE_CSS_CLASS: Dict[str, str] = {
+    "live": "low",         # green — matches render_quantum_status's "KERNEL ONLINE"
+    "precomputed_demo": "moderate",  # amber — explicitly marked demo data, not alarming
+    "mock_fallback": "high",         # red — AUDIT.md P1 #7 requirement 5: visually unmistakable
+    "cached": "info",
+    "proxy": "info",
+}
+
+
+def render_provenance_badge(result: InferenceResult) -> None:
+    """The prominent, persistent provenance badge AUDIT.md P1 #5 (D2) asks
+    for — every `InferenceResult.backend` tag is run through the same
+    `qknee.observability.provenance.classify` the Next.js API uses, so the
+    Streamlit dashboard and the Next.js workstation describe identical
+    underlying states with identical words (AUDIT.md P1 #9)."""
+    info = provenance_module.classify(
+        backend_tag=result.backend,
+        model_checkpoint_loaded=None,  # per-head status is shown separately, see render_risk_gauge
+        quantum_expectations_present=result.pauli_z_expectations is not None,
+    )
+    css_class = _PROVENANCE_BADGE_CSS_CLASS.get(info.provenance, "neutral")
+    st.markdown(
+        f'<span class="qknee-badge qknee-badge-{css_class}" style="font-weight:700;font-size:0.85rem;">'
+        f"{info.provenance_label}</span>",
+        unsafe_allow_html=True,
+    )
+    st.caption(info.quantum_execution_label)
+    if not info.is_trustworthy:
+        st.error("This result did not come from a real inference call — no score above is clinically meaningful.")
+
+
+def render_risk_gauge(label: str, value: Optional[float], checkpoint_loaded: Optional[bool] = None) -> None:
+    """`checkpoint_loaded`: `True`/`False` when this head's own checkpoint
+    status is known (live backend only — see `InferenceResult.checkpoint_status`),
+    `None` for a backend where that's not applicable (mock/api). `False`
+    renders an unmistakable "MODEL FALLBACK" tag next to the gauge — this is
+    what makes AUDIT.md B3 (MCL always random) and C4b (a missing ACL/
+    meniscus checkpoint silently degrading the score) visible in the UI
+    instead of only a `logger.warning`."""
     if value is None:
         st.metric(label=f"{label} Tear Risk", value="N/A", delta="unavailable in API mode")
         st.markdown('<span class="qknee-badge qknee-badge-neutral">UNAVAILABLE</span>', unsafe_allow_html=True)
@@ -671,6 +744,12 @@ def render_risk_gauge(label: str, value: Optional[float]) -> None:
     _, tier = theme.risk_tier(value)
     st.metric(label=f"{label} Tear Risk", value=f"{value * 100:.1f}%", delta=tier)
     st.markdown(theme.risk_badge_html(label, value), unsafe_allow_html=True)
+    if checkpoint_loaded is False:
+        st.markdown(
+            f'<span class="qknee-badge qknee-badge-moderate">'
+            f'{provenance_module.MODEL_SOURCE_LABELS["random_fallback"]}</span>',
+            unsafe_allow_html=True,
+        )
     st.markdown(f'<div class="qknee-ci">{theme.format_confidence_interval(value)}</div>', unsafe_allow_html=True)
     st.progress(min(max(value, 0.0), 1.0))
 
@@ -1125,6 +1204,17 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
     if gradcam_overlay is None and result.gradcam_heatmap is not None:
         gradcam_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
 
+    # AUDIT.md P1 #9: the exported report must use the same
+    # provenance vocabulary as the on-screen badge (render_provenance_badge),
+    # not just the raw `backend` tag -- a reviewer reading a saved PDF later
+    # shouldn't have to know that "cache-fallback/case_0007" means
+    # "PRECOMPUTED DEMO".
+    provenance_info = provenance_module.classify(
+        backend_tag=result.backend,
+        model_checkpoint_loaded=None,
+        quantum_expectations_present=result.pauli_z_expectations is not None,
+    )
+
     try:
         pdf_bytes = generate_radiology_report(
             output_path=None,
@@ -1142,6 +1232,7 @@ def render_report_download(display_slice: np.ndarray, result: InferenceResult) -
                 "quantum_latency_ms": result.quantum_latency_ms,
                 "total_latency_ms": result.total_latency_ms,
                 "backend": result.backend,
+                "provenance": provenance_info.provenance_label,
             },
             metadata={
                 "modality": "MRI Knee",
@@ -1185,6 +1276,13 @@ def render_markdown_report_download(display_slice: np.ndarray, result: Inference
         "\n".join(f"- **q{i}**: {value:+.3f}" for i, value in enumerate(pauli_z))
         if pauli_z is not None else "- Unavailable for this backend/case."
     )
+    # AUDIT.md P1 #9: same unified provenance vocabulary as the PDF export
+    # and the on-screen badge (render_provenance_badge).
+    markdown_provenance = provenance_module.classify(
+        backend_tag=result.backend,
+        model_checkpoint_loaded=None,
+        quantum_expectations_present=pauli_z is not None,
+    )
 
     def _risk_line(label: str, value: Optional[float]) -> str:
         if value is None:
@@ -1195,7 +1293,7 @@ def render_markdown_report_download(display_slice: np.ndarray, result: Inference
     markdown_report = f"""# Q-Knee Diagnostic Report
 
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Backend: `{result.backend}`
+Backend: `{result.backend}` — Provenance: **{markdown_provenance.provenance_label}** ({markdown_provenance.quantum_execution_label})
 
 ## Tear Risk
 
@@ -1231,7 +1329,7 @@ Backend: `{result.backend}`
 # --------------------------------------------------------------------------- #
 
 def render_diagnostic_tab() -> None:
-    pipeline, acl_model, mcl_model, meniscus_model = load_backend()
+    pipeline, acl_model, mcl_model, meniscus_model, checkpoint_status = load_backend()
     backend_ready = pipeline is not None
 
     api_url = resolve_api_url()
@@ -1327,7 +1425,9 @@ def render_diagnostic_tab() -> None:
 
             if result is None:
                 if backend_ready:
-                    result = run_live_inference(raw_slice, pipeline, acl_model, mcl_model, meniscus_model)
+                    result = run_live_inference(
+                        raw_slice, pipeline, acl_model, mcl_model, meniscus_model, checkpoint_status,
+                    )
                 else:
                     result = run_mock_inference(raw_slice)
         elif use_fast_path and fast_path_case is not None:
@@ -1358,9 +1458,11 @@ def render_diagnostic_tab() -> None:
 
     with triage_col:
         st.markdown("#### Diagnostic Triage Card")
-        render_risk_gauge("ACL", result.acl_risk)
-        render_risk_gauge("MCL", result.mcl_risk)
-        render_risk_gauge("Medial Meniscus", result.meniscus_risk)
+        render_provenance_badge(result)
+        head_checkpoint_status = result.checkpoint_status or {}
+        render_risk_gauge("ACL", result.acl_risk, head_checkpoint_status.get("acl"))
+        render_risk_gauge("MCL", result.mcl_risk, head_checkpoint_status.get("mcl"))
+        render_risk_gauge("Medial Meniscus", result.meniscus_risk, head_checkpoint_status.get("meniscus"))
         st.markdown("---")
         st.markdown(f"##### {theme.icon('circuit', size=15)} Quantum Circuit Diagnostics", unsafe_allow_html=True)
         render_quantum_attribution_panel(result.pauli_z_expectations)

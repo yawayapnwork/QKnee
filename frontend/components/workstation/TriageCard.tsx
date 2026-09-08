@@ -2,6 +2,7 @@ import { Loader2, AlertTriangle } from "lucide-react";
 import { Card, CardHeader, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Gauge } from "@/components/ui/Gauge";
+import { ProvenanceBadge } from "@/components/workstation/ProvenanceBadge";
 import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
 import { ReportExport } from "@/components/workstation/ReportExport";
 import { formatLatency } from "@/lib/utils";
@@ -47,14 +48,23 @@ export function TriageCard({
           </div>
         ) : result ? (
           <>
+            <ProvenanceBadge provenance={result.provenance} />
+
+            {!result.provenance.isTrustworthy && (
+              <div className="flex items-start gap-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                This result did not come from a real inference call — no diagnosis below should be
+                treated as clinically meaningful.
+              </div>
+            )}
+
             <div className="flex justify-center">
               <Gauge value={result.riskScore} severity={result.severity} />
             </div>
 
-            <div className="grid grid-cols-3 gap-3 text-center">
+            <div className="grid grid-cols-2 gap-3 text-center">
               <Metric label="Diagnosis" value={result.diagnosis} />
               <Metric label="Latency" value={formatLatency(result.latencyMs)} />
-              <Metric label="Backend" value={result.source === "live" ? "Live" : "Preset"} />
             </div>
 
             <QuantumTelemetry telemetry={result.quantumTelemetry} />
