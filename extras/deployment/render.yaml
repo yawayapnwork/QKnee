@@ -25,6 +25,16 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.14
+      # AUDIT.md P1 #8: qknee.api.auth.resolve_jwt_secret() now refuses to
+      # start at all without a real, sufficiently strong secret whenever
+      # QKNEE_ENV is unset or production-like (the default) — there is no
+      # committed fallback anymore. QKNEE_JWT_SECRET_KEY (`sync: false`,
+      # i.e. must be set manually in the Render dashboard, never
+      # auto-populated or defaulted) must be a long, random, high-entropy
+      # value: generate one with
+      # `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+      - key: QKNEE_ENV
+        value: production
       - key: QKNEE_JWT_SECRET_KEY
         sync: false
       - key: DATABASE_URL

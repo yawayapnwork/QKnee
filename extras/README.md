@@ -61,6 +61,33 @@ moving the files back, not just running them from this location.
   already excludes this directory from the main test run — no config
   change was needed.
 
+## Security configuration (JWT secret, environment)
+
+`extras/api/auth.py` no longer ships any fallback JWT signing secret — see
+AUDIT.md P1 #8 (the old committed default in `config.yaml`, E1, is gone
+entirely). Before running `extras/api/server.py` (directly, via
+`docker-compose`, or on Render):
+
+1. Copy `extras/api/.env.example` to `.env` (git-ignored) and set
+   `QKNEE_JWT_SECRET_KEY` to a real, random, >= 32-character secret:
+   `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+2. `$QKNEE_ENV` controls strictness — unset or anything other than
+   `development`/`dev`/`local`/`test` is treated as **production**, which
+   makes a missing or weak secret a hard startup failure
+   (`InsecureJWTConfigurationError`), never a warning-and-continue. Local
+   Docker Compose sets `QKNEE_ENV=development` +
+   `QKNEE_ALLOW_INSECURE_JWT_SECRET=1` so a fresh clone can boot without
+   generating a secret first — **never set that combination anywhere
+   reachable outside your own machine.**
+3. Render's `render.yaml` sets `QKNEE_ENV=production` explicitly and
+   leaves `QKNEE_JWT_SECRET_KEY` as `sync: false` (must be entered manually
+   in the Render dashboard — Render never auto-populates or defaults it).
+
+See `qknee.api.auth.resolve_jwt_secret`'s docstring for the exact
+precedence/validation rules (minimum length, rejected placeholder values,
+the two-opt-in local-dev escape hatch), and `extras/tests/test_jwt_security.py`
+for the regression tests covering every branch of that logic.
+
 ## What was requested but deliberately NOT moved (see PR discussion)
 
 Three explicitly-requested removals turned out to be load-bearing

@@ -101,9 +101,10 @@ BACKEND_ROLE_TO_UI_LABEL: Dict[str, str] = {v: k for k, v in UI_ROLE_TO_BACKEND_
 # Mirrors `qknee.api.auth.INFERENCE_ROLES` (the one role the API's
 # `require_role` guard permits onto `/predict`/`/explain`/`/report`) —
 # duplicated as a plain literal rather than imported, since `qknee.api.auth`
-# has import-time side effects (opens a DB engine/creates tables, logs the
-# insecure-default-JWT-secret warning) that don't belong in the UI process
-# just to read one constant.
+# has import-time side effects (opens a DB engine/creates tables, resolves
+# and validates the JWT signing secret -- see `resolve_jwt_secret`, which
+# can raise `InsecureJWTConfigurationError` outright) that don't belong in
+# the UI process just to read one constant.
 _CLINICAL_INFERENCE_ROLES: tuple[str, ...] = ("radiologist",)
 
 DEMO_EMAIL = "demo.researcher@qknee-demo.org"

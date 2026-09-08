@@ -50,7 +50,11 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "paths.acl_checkpoint": "ACL_CHECKPOINT_PATH",
     "paths.meniscus_checkpoint": "MENISCUS_CHECKPOINT_PATH",
     "paths.rsna_series_dir": "RSNA_SERIES_DIR",
-    "api.jwt_secret_key": "QKNEE_JWT_SECRET_KEY",
+    "api.access_token_expire_minutes": "QKNEE_ACCESS_TOKEN_EXPIRE_MINUTES",
+    # No "api.jwt_secret_key" entry here, deliberately: the JWT signing
+    # secret is never read from config.yaml (a committed file) at all —
+    # see qknee.api.auth.resolve_jwt_secret, which reads $QKNEE_JWT_SECRET_KEY
+    # / $SECRET_KEY directly and refuses to start without one (AUDIT.md P1 #8).
     # Optional PostgreSQL/Redis connection strings for `qknee.api.auth`'s
     # user repository and `qknee.api.server`'s CacheService, respectively.
     # Both are read with `os.environ.get` (see `_apply_env_overrides`
@@ -170,10 +174,9 @@ class APIConfig:
     port: int
     cors_origins: List[str]
     tear_risk_threshold: float
-    # Both default so a config.yaml predating auth.py's addition still loads;
-    # jwt_secret_key's shipped default is dev-only (see config.yaml) and is
-    # meant to be overridden via $QKNEE_JWT_SECRET_KEY in any real deployment.
-    jwt_secret_key: str = "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
+    # No jwt_secret_key field here, deliberately (AUDIT.md P1 #8) — the JWT
+    # signing secret must never be sourceable from a committed config file.
+    # See qknee.api.auth.resolve_jwt_secret for the env-var-only resolution.
     access_token_expire_minutes: int = 60
 
 
@@ -315,7 +318,27 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
         training = TrainingConfig(**raw["training"])
         gradcam = GradCAMConfig(**raw["gradcam"])
         evaluation = EvaluationConfig(**raw["evaluation"])
-        api = APIConfig(**raw["api"])
+        api_raw = dict(raw["api"])
+        # `$QKNEE_ACCESS_TOKEN_EXPIRE_MINUTES` (via _ENV_OVERRIDES below)
+        # arrives as a string like every env-var override; coerced to int
+        # here (mirrors topk_k/n_components above) since APIConfig's field
+        # is `int`, and validated for sanity (AUDIT.md P1 #8 requirement 8)
+        # rather than silently accepting "0", a negative value, or garbage.
+        try:
+            expire_minutes = int(api_raw.get("access_token_expire_minutes", 60))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"api.access_token_expire_minutes must be an integer, got {api_raw.get('access_token_expire_minutes')!r}"
+            ) from exc
+        if not (0 < expire_minutes <= 1440):
+            raise ConfigError(
+                f"api.access_token_expire_minutes must be in (0, 1440] (1 minute to 24 hours), "
+                f"got {expire_minutes}. A non-positive value would mint tokens that are already "
+                f"expired or never expire; anything beyond 24 hours is an unusually long-lived "
+                f"bearer token for a credential with no refresh/revocation mechanism."
+            )
+        api_raw["access_token_expire_minutes"] = expire_minutes
+        api = APIConfig(**api_raw)
         logging_cfg = LoggingConfig(**raw["logging"])
 
         # Optional section: absent entirely from a config.yaml predating

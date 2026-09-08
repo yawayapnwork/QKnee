@@ -312,7 +312,10 @@ class TestForgedAndExpiredTokens:
     def test_valid_token_for_a_since_deleted_user_is_rejected(self, client: TestClient):
         """A structurally valid, unexpired, correctly-signed token whose
         subject no longer exists in the store (e.g. the account was
-        removed after the token was issued)."""
+        removed after the token was issued). AUDIT.md P1 #8 requirement 11:
+        the response must use the same generic message an ordinary invalid
+        token gets -- a bearer of a stale token must not learn from the
+        response that this specific account was deleted."""
         token = auth_module.create_access_token(
             data={"sub": "ghost_user_never_created@hospital.org", "user_id": "ghost-id", "role": "radiologist"},
         )
@@ -320,7 +323,7 @@ class TestForgedAndExpiredTokens:
         response = client.get("/api/v1/auth/me", headers=_bearer(token))
 
         assert response.status_code == 401
-        assert response.json()["detail"] == "User for this access token no longer exists"
+        assert response.json()["detail"] == "Could not validate credentials"
 
     def test_expired_token_is_also_rejected_on_the_predict_route(self, client: TestClient):
         """The expiry check applies uniformly across every protected

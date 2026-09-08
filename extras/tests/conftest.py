@@ -22,12 +22,24 @@ end up being the exact same module object.
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+# `extras.api.auth` (imported below) resolves its JWT signing secret at
+# MODULE IMPORT TIME and refuses to import at all without a valid one by
+# default (AUDIT.md P1 #8: no committed/default secret exists anymore --
+# see `qknee.api.auth.resolve_jwt_secret`). This test suite explicitly
+# configures its own throwaway-but-strong secret before that import, the
+# same way a real deployment must configure a real one -- it does NOT rely
+# on the local-dev insecure-secret opt-in, so these tests also exercise the
+# "valid configured secret" path on every run.
+os.environ.setdefault("QKNEE_ENV", "test")
+os.environ.setdefault("QKNEE_JWT_SECRET_KEY", "test-suite-only-secret-" + "b" * 40)
 
 import extras.api.auth as _extras_auth
 

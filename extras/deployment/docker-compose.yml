@@ -40,6 +40,15 @@ services:
       - PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl
       - MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
       - DATA_ROOT_PATH=/app/data
+      # AUDIT.md P1 #8: qknee.api.auth refuses to start without a JWT
+      # signing secret by default (no committed fallback exists anymore —
+      # see extras/api/.env.example). QKNEE_ENV=development here is what
+      # makes the explicit insecure-dev-secret opt-in below available at
+      # all; for anything beyond throwaway local Docker use, set a real
+      # QKNEE_JWT_SECRET_KEY via a git-ignored `.env` file (env_file:)
+      # instead of these two lines.
+      - QKNEE_ENV=development
+      - QKNEE_ALLOW_INSECURE_JWT_SECRET=1
       # Reachable by any training/eval script that wants to log runs
       # (`mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])`);
       # nothing in the pipeline calls MLflow yet, this just wires the URI

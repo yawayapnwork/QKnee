@@ -61,7 +61,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Sequence
+from typing import Callable, Mapping, Optional, Sequence
 
 import jwt
 from argon2 import PasswordHasher
@@ -242,24 +242,182 @@ def verify_password(raw_password: str, hashed_password: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 ALGORITHM = "HS256"
+_ALLOWED_DECODE_ALGORITHMS = (ALGORITHM,)  # pinned, non-empty — see decode_access_token's docstring
 ACCESS_TOKEN_EXPIRE_MINUTES = _config.api.access_token_expire_minutes
 
-# `$QKNEE_JWT_SECRET_KEY` (this project's own name) takes precedence when
-# both are set; `$SECRET_KEY` (the generic name a platform like
-# Render/Railway/Heroku often auto-populates or that an operator reaches
-# for by habit) is accepted as a fallback; `_config.api.jwt_secret_key`
-# (config.yaml's dev-only default) is the last resort if neither env var
-# is set.
-_SECRET_KEY = os.getenv("QKNEE_JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or _config.api.jwt_secret_key
-_INSECURE_DEFAULT_SECRET_KEY = "INSECURE-DEV-ONLY-CHANGE-ME-VIA-QKNEE_JWT_SECRET_KEY-ENV-VAR"
 
-if _SECRET_KEY == _INSECURE_DEFAULT_SECRET_KEY:
+class InsecureJWTConfigurationError(RuntimeError):
+    """Raised at import time when no safe JWT signing secret can be
+    resolved — AUDIT.md P1 #8: this project must never fall back to a
+    secret that's committed to source control or otherwise guessable,
+    silently or otherwise. See `resolve_jwt_secret`'s docstring for the
+    exact rules this enforces."""
+
+
+# --------------------------------------------------------------------------- #
+# Environment classification — controls whether a missing/weak JWT secret is
+# a hard startup failure (production) or can be explicitly opted out of for
+# local development (see resolve_jwt_secret). Defaults to the STRICT
+# (production) behavior: an operator must actively opt into the permissive
+# path via $QKNEE_ENV, never the other way around — the original
+# vulnerability this fixes was exactly a permissive default nobody had to
+# opt into.
+# --------------------------------------------------------------------------- #
+_DEVELOPMENT_ENV_VALUES = frozenset({"development", "dev", "local", "test"})
+
+
+def _is_production_environment(env: Mapping[str, str]) -> bool:
+    value = (env.get("QKNEE_ENV") or "").strip().lower()
+    return value not in _DEVELOPMENT_ENV_VALUES
+
+
+# A fixed, obviously-fake string — used ONLY as the actual signing key in the
+# explicit-opt-in local-dev path below, never read from any file, config, or
+# env var. Deliberately similar in spirit to the old committed default so a
+# reader immediately recognizes it as "not a real secret," but it is no
+# longer ever used unless an operator explicitly sets
+# $QKNEE_ALLOW_INSECURE_JWT_SECRET=1 AND $QKNEE_ENV is a development value —
+# both are required, and $QKNEE_ENV defaults to the strict/production path.
+_DEV_ONLY_FIXED_SECRET = "dev-only-fixed-insecure-secret-DO-NOT-USE-OUTSIDE-localhost"
+
+_MIN_SECRET_LENGTH = 32
+_WEAK_SECRET_MARKERS = frozenset(
+    {
+        "",
+        "secret",
+        "changeme",
+        "change-me",
+        "change_me",
+        "password",
+        "insecure",
+        "test",
+        "example",
+        "default",
+        _DEV_ONLY_FIXED_SECRET.lower(),
+        # The exact string this project used to ship committed in
+        # config.yaml (AUDIT.md E1) — must be rejected forever, even if a
+        # copy of it lingers in an old .env file or deploy config somewhere.
+        "insecure-dev-only-change-me-via-qknee_jwt_secret_key-env-var",
+    }
+)
+
+
+def _looks_weak(secret: str) -> bool:
+    stripped = secret.strip()
+    if len(stripped) < _MIN_SECRET_LENGTH:
+        return True
+    lowered = stripped.lower()
+    if lowered in _WEAK_SECRET_MARKERS:
+        return True
+    # Low-entropy guard: a secret that's just one character repeated (or
+    # comes from an obviously-templated placeholder like "xxxxxxxx...") is
+    # exactly as guessable as the marker strings above even though it
+    # isn't literally one of them.
+    if len(set(lowered)) <= 2:
+        return True
+    return False
+
+
+def resolve_jwt_secret(env: Optional[Mapping[str, str]] = None) -> str:
+    """Resolves and validates the JWT signing secret. Never returns a
+    secret that is empty, short, or matches a known-weak/placeholder
+    value, EXCEPT via the single explicit local-dev opt-in path described
+    below. Raises `InsecureJWTConfigurationError` (never silently
+    degrades) in every other unsafe case.
+
+    Precedence:
+        1. `$QKNEE_JWT_SECRET_KEY` (this project's own name).
+        2. `$SECRET_KEY` (the generic name a platform like Render/Railway/
+           Heroku often auto-populates, or that an operator reaches for by
+           habit).
+        3. Nothing configured at all.
+
+    Rules (AUDIT.md P1 #8, replacing the old "log a warning and proceed
+    anyway" behavior entirely):
+        - If a secret is configured (case 1/2) and it passes a minimum
+          strength check (>= 32 chars, not a known placeholder/low-entropy
+          string) — use it. This is the only path any real deployment
+          should ever take.
+        - If a secret is configured but fails that check:
+            - `$QKNEE_ENV` unset or a production-like value (the default):
+              hard failure. A weak secret in what looks like a production
+              deployment is exactly the vulnerability this function exists
+              to close.
+            - `$QKNEE_ENV` is an explicit development value (`development`,
+              `dev`, `local`, `test`): a warning is logged (never the
+              secret's own value) and the configured secret is used anyway
+              — an operator who explicitly typed a short throwaway secret
+              into their own local `.env` has made an informed choice.
+        - If NO secret is configured at all:
+            - `$QKNEE_ENV` unset or production-like (the default): hard
+              failure — this is requirement 2, "missing JWT_SECRET must
+              cause startup/configuration failure in production."
+            - `$QKNEE_ENV` is an explicit development value AND
+              `$QKNEE_ALLOW_INSECURE_JWT_SECRET=1` is ALSO explicitly set:
+              use a fixed, obviously-fake, never-committed-as-a-default
+              string (`_DEV_ONLY_FIXED_SECRET`) so a fresh local clone can
+              still boot without an operator needing to generate a real
+              secret just to run tests/click around locally. Two separate
+              opt-ins are required (not just `$QKNEE_ENV`) so this can
+              never be "the default" for any environment by accident —
+              requirement 3, "only if clearly configured."
+            - `$QKNEE_ENV` is a development value but the extra opt-in is
+              NOT set: hard failure too, with a message explaining the
+              opt-in — no environment gets a free insecure default without
+              asking for it explicitly.
+    """
+    env = env if env is not None else os.environ
+    is_production = _is_production_environment(env)
+    allow_insecure = (env.get("QKNEE_ALLOW_INSECURE_JWT_SECRET") or "").strip().lower() in ("1", "true", "yes")
+
+    configured = env.get("QKNEE_JWT_SECRET_KEY") or env.get("SECRET_KEY")
+
+    if configured:
+        if not _looks_weak(configured):
+            return configured.strip()
+
+        if is_production:
+            raise InsecureJWTConfigurationError(
+                "The configured JWT secret ($QKNEE_JWT_SECRET_KEY or $SECRET_KEY) is too short or "
+                f"matches a known-weak/placeholder value (minimum length {_MIN_SECRET_LENGTH} chars, "
+                "sufficient entropy required). Refusing to start with QKNEE_ENV unset or set to a "
+                "production-like value. Generate a strong secret, e.g.: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        logger.warning(
+            "The configured JWT secret is weak (too short or a known placeholder), but QKNEE_ENV=%r "
+            "is a development value, so it is being used anyway. Never do this for any deployment "
+            "reachable outside your own machine.",
+            env.get("QKNEE_ENV"),
+        )
+        return configured.strip()
+
+    # No secret configured at all.
+    if is_production:
+        raise InsecureJWTConfigurationError(
+            "No JWT signing secret is configured: neither $QKNEE_JWT_SECRET_KEY nor $SECRET_KEY is "
+            "set. Refusing to start with QKNEE_ENV unset or set to a production-like value — a "
+            "prediction/auth API must never boot without a real signing secret. Generate one with: "
+            "python -c \"import secrets; print(secrets.token_urlsafe(48))\" and set "
+            "$QKNEE_JWT_SECRET_KEY."
+        )
+    if not allow_insecure:
+        raise InsecureJWTConfigurationError(
+            "No JWT signing secret is configured, and QKNEE_ENV is a development value, but "
+            "$QKNEE_ALLOW_INSECURE_JWT_SECRET=1 was not also set. Either set a real "
+            "$QKNEE_JWT_SECRET_KEY, or explicitly set QKNEE_ALLOW_INSECURE_JWT_SECRET=1 to opt into "
+            "a fixed, insecure development-only secret for local use."
+        )
     logger.warning(
-        "qknee.api.auth is signing JWTs with the INSECURE DEFAULT dev secret key. "
-        "Set the $QKNEE_JWT_SECRET_KEY (or $SECRET_KEY) environment variable before "
-        "deploying anywhere reachable outside a local dev machine — tokens signed with "
-        "the default key are forgeable by anyone who has read this source file."
+        "No JWT secret configured; QKNEE_ALLOW_INSECURE_JWT_SECRET=1 is set, so a fixed, "
+        "publicly-known, development-ONLY secret is being used. This must NEVER be set for any "
+        "deployment reachable outside your own machine — tokens signed with it are forgeable by "
+        "anyone who has read this source file."
     )
+    return _DEV_ONLY_FIXED_SECRET
+
+
+_SECRET_KEY = resolve_jwt_secret()
 
 # Gates self-service `role="radiologist"` registration (the only role
 # permitted to run diagnostic inference — see `INFERENCE_ROLES`). Unset by
@@ -301,9 +459,20 @@ def _credentials_exception(detail: str) -> HTTPException:
 def decode_access_token(token: str) -> TokenData:
     """Verifies signature + expiry and returns the decoded `TokenData`.
     Raises a 401 `HTTPException` (never a raw `jwt` exception) on any
-    failure — expired, malformed, wrong signature, or missing claims."""
+    failure — expired, malformed, wrong signature, or missing claims.
+
+    AUDIT.md P1 #8 (algorithm confusion): `algorithms=` is passed
+    explicitly and pinned to `_ALLOWED_DECODE_ALGORITHMS` (`("HS256",)`
+    only) on every call — PyJWT refuses to trust the token's own `alg`
+    header unless it's in this list, which is what actually prevents both
+    the classic `alg: none` bypass and an RS256/HS256 "confused deputy"
+    attack (where a token signed with a public verification key gets
+    accepted as if it were HMAC-signed with that same string as a shared
+    secret). Never call `jwt.decode` anywhere in this module without an
+    explicit `algorithms=` argument.
+    """
     try:
-        payload = jwt.decode(token, _SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, _SECRET_KEY, algorithms=list(_ALLOWED_DECODE_ALGORITHMS))
     except jwt.ExpiredSignatureError as exc:
         raise _credentials_exception("Access token has expired") from exc
     except jwt.InvalidTokenError as exc:
@@ -522,13 +691,22 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> UserResponse:
     profile. Raises 401 if the token is missing/invalid/expired, if it
     decodes fine but no longer names an existing account (e.g. deleted
     after the token was issued), or if the account has since been
-    deactivated."""
+    deactivated.
+
+    AUDIT.md P1 #8 requirement 11: the account-no-longer-exists and
+    account-deactivated cases are deliberately collapsed into the exact
+    same generic 401 message as an ordinary invalid token. Whoever
+    presents a stale/stolen token (not necessarily its rightful owner)
+    must not be able to learn from the response alone whether that
+    specific account was deleted vs. deactivated vs. never existed at all
+    — none of that is this caller's business, and it's exactly the kind
+    of account-lifecycle detail that should never leak to an unauthenticated
+    bearer of an old token.
+    """
     token_data = decode_access_token(token)
     user = user_store.get_by_email(token_data.email)
-    if user is None:
-        raise _credentials_exception("User for this access token no longer exists")
-    if not user.is_active:
-        raise _credentials_exception("This account has been deactivated")
+    if user is None or not user.is_active:
+        raise _credentials_exception("Could not validate credentials")
     return user.to_response()
 
 
