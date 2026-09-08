@@ -8,6 +8,7 @@ import { AuthModal } from "@/components/auth/AuthModal";
 import { useAuth } from "@/lib/auth-context";
 import { ApiError, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
+import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
 import type { DiagnosticResult, PresetCase } from "@/lib/types";
 
 export default function WorkstationPage() {
@@ -42,10 +43,7 @@ export default function WorkstationPage() {
         heatmap: prediction.gradcam_heatmap,
         backend: prediction.backend,
         latencyMs: prediction.latency_ms,
-        // The live /predict response doesn't expose per-qubit expectations —
-        // reuse the active preset's illustrative values so the telemetry
-        // panel still renders something coherent alongside the real risk score.
-        qubitExpectations: activeCase.qubitExpectations,
+        quantumTelemetry: quantumTelemetryFromPrediction(prediction),
         source: "live",
       });
     } catch (err) {

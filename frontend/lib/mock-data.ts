@@ -1,3 +1,4 @@
+import { quantumTelemetryFromPreset } from "./quantum-telemetry";
 import type { DiagnosticResult, PresetCase, SeverityTag } from "./types";
 
 export const PRESET_CASES: PresetCase[] = [
@@ -61,7 +62,7 @@ export function mockDiagnosticResult(preset: PresetCase): DiagnosticResult {
     heatmap: placeholderHeatmapDataUri(seed),
     backend: "mock/cold-start-fallback",
     latencyMs: null,
-    qubitExpectations: preset.qubitExpectations,
+    quantumTelemetry: quantumTelemetryFromPreset(preset),
     source: "mock",
   };
 }

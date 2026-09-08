@@ -57,7 +57,7 @@ export function TriageCard({
               <Metric label="Backend" value={result.source === "live" ? "Live" : "Preset"} />
             </div>
 
-            <QuantumTelemetry expectations={result.qubitExpectations} />
+            <QuantumTelemetry telemetry={result.quantumTelemetry} />
 
             <div className="mt-auto pt-2">
               <ReportExport result={result} caseLabel={caseLabel} />

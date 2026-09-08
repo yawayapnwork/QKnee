@@ -5,8 +5,22 @@ import { Button } from "@/components/ui/Button";
 import { formatLatency, formatPercent } from "@/lib/utils";
 import type { DiagnosticResult } from "@/lib/types";
 
+const PROVENANCE_LABEL = {
+  live: "LIVE QUANTUM TELEMETRY",
+  "precomputed-demo": "PRECOMPUTED DEMO TELEMETRY",
+  unavailable: "Quantum telemetry unavailable",
+} as const;
+
 function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
   const timestamp = new Date().toISOString();
+  const telemetry = result.quantumTelemetry;
+  const telemetrySection =
+    telemetry.provenance === "unavailable"
+      ? "_Quantum telemetry unavailable for this result._"
+      : `| Qubit | Expectation |\n|-------|-------------|\n${telemetry.expectations
+          .map((v, i) => `| q${i} | ${v.toFixed(4)} |`)
+          .join("\n")}`;
+
   return `# Q-Knee Automated Screening Report
 
 **Case:** ${caseLabel}
@@ -22,9 +36,9 @@ function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
 
 ## Quantum Circuit Telemetry (⟨Z⟩ expectations)
 
-| Qubit | Expectation |
-|-------|-------------|
-${result.qubitExpectations.map((v, i) => `| q${i} | ${v.toFixed(4)} |`).join("\n")}
+**Source:** ${PROVENANCE_LABEL[telemetry.provenance]}
+
+${telemetrySection}
 
 ---
 

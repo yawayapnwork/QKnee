@@ -50,7 +50,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
 # Set before ANY matplotlib import — including a transitive one triggered
 # by `get_backend()`'s lazy torch/pennylane/gradcam import chain, or by
@@ -362,6 +362,27 @@ class PredictionResponse(BaseModel):
                     "sub-millisecond precision. None for backends that don't measure it (e.g. a cached/proxied "
                     "response where this process never ran the pipeline).",
     )
+    quantum_expectations: Optional[List[float]] = Field(
+        None,
+        description="Raw per-qubit Pauli-Z expectation values in [-1, 1], read directly from the VQC's "
+                    "`quantum_layer` before the classical readout collapses them into `risk_score` -- see "
+                    "`qknee.models.pipeline.PipelineRunner.get_pauli_z_expectations`. Populated for `backend== "
+                    "'live'` (this exact upload's own executed circuit) and for `backend.startswith("
+                    "'cache-fallback/')` (a real circuit execution recorded ahead of time for that cached case, "
+                    "not this upload's). `None` for `backend == 'mock'` (no quantum circuit ran) or any backend "
+                    "that doesn't expose this -- never derived from `risk_score`, never randomly generated, and "
+                    "never a hardcoded placeholder.",
+    )
+    n_qubits: Optional[int] = Field(
+        None, description="Length of `quantum_expectations`, i.e. how many qubits the executed circuit measured. "
+                          "`None` exactly when `quantum_expectations` is `None`.",
+    )
+    quantum_backend: Optional[str] = Field(
+        None,
+        description="PennyLane device identifier the circuit behind `quantum_expectations` ran on (e.g. "
+                    "'default.qubit'), from `qknee.config.config.yaml`'s `quantum.device`. `None` exactly when "
+                    "`quantum_expectations` is `None`.",
+    )
 
 
 class HealthResponse(BaseModel):
@@ -614,10 +635,11 @@ class QKneeBackend:
         # real signal; the nanosecond counter doesn't.
         t0_ns = time.perf_counter_ns()
         if self.backend_ready:
-            risk_score, heatmap_b64 = self._predict_live(display_slice)
+            risk_score, heatmap_b64, quantum_expectations = self._predict_live(display_slice)
             backend = "live"
         else:
             risk_score, heatmap_b64 = self._predict_mock(display_slice)
+            quantum_expectations = None  # no quantum circuit ran -- see _predict_mock
             backend = "mock"
         latency_ms = (time.perf_counter_ns() - t0_ns) / 1e6
 
@@ -629,16 +651,22 @@ class QKneeBackend:
             gradcam_heatmap=heatmap_b64,
             backend=backend,
             latency_ms=latency_ms,
+            quantum_expectations=quantum_expectations,
+            n_qubits=len(quantum_expectations) if quantum_expectations is not None else None,
+            quantum_backend=_config.quantum.device if quantum_expectations is not None else None,
         )
 
-    def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str]:
+    def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str, Optional[List[float]]]:
         from qknee.xai.gradcam import overlay_heatmap
 
         try:
             result = self.runner.run(display_slice)  # DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM
             overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
             heatmap_b64 = self._encode_png_base64(overlay)
-            return result.risk_score, heatmap_b64
+            quantum_expectations = (
+                result.pauli_z_expectations.tolist() if result.pauli_z_expectations is not None else None
+            )
+            return result.risk_score, heatmap_b64, quantum_expectations
         except Exception as exc:  # noqa: BLE001 - PipelineValidationError or any unexpected failure
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
         finally:
@@ -756,9 +784,22 @@ class CachedFallbackBackend:
         diagnosis = "Tear Detected" if risk_score >= TEAR_RISK_THRESHOLD else "Normal"
         heatmap_b64 = case.get("heatmap_base64", "")
 
+        # Real, per-case Pauli-Z expectations recorded ahead of time by
+        # `scripts/generate_demo_cache.py`'s own live circuit execution (see
+        # `qknee/artifacts/precomputed_cache.json`) -- genuine quantum
+        # measurement data, just not from *this* upload's own inference
+        # call. `backend` is prefixed `cache-fallback/...` precisely so a
+        # caller can distinguish this from `QKneeBackend`'s live per-upload
+        # circuit run.
+        raw_expectations = case.get("pauli_z_expectations")
+        quantum_expectations = [float(v) for v in raw_expectations] if raw_expectations else None
+
         return PredictionResponse(
             risk_score=risk_score,
             diagnosis=diagnosis,
+            quantum_expectations=quantum_expectations,
+            n_qubits=len(quantum_expectations) if quantum_expectations is not None else None,
+            quantum_backend=_config.quantum.device if quantum_expectations is not None else None,
             gradcam_heatmap=heatmap_b64,
             backend=f"cache-fallback/{case.get('case_id', 'unknown')}",
         )

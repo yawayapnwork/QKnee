@@ -36,6 +36,17 @@ export interface PredictionResponse {
   gradcam_heatmap: string;
   backend: string;
   latency_ms: number | null;
+  /** Raw per-qubit Pauli-Z expectation values in [-1, 1], read directly from the
+   * executed VQC circuit before the classical readout collapses them into
+   * `risk_score` (see `qknee.models.pipeline.PipelineRunner.get_pauli_z_expectations`).
+   * `null` when this response's backend didn't run a quantum circuit for this
+   * request (e.g. `backend === "mock"`) — never a fallback/placeholder array. */
+  quantum_expectations: number[] | null;
+  /** Length of `quantum_expectations`. `null` exactly when `quantum_expectations` is `null`. */
+  n_qubits: number | null;
+  /** PennyLane device identifier the circuit ran on (e.g. "default.qubit").
+   * `null` exactly when `quantum_expectations` is `null`. */
+  quantum_backend: string | null;
 }
 
 export interface HealthResponse {
@@ -71,6 +82,27 @@ export interface PresetCase {
   qubitExpectations: [number, number, number, number];
 }
 
+/**
+ * Where a `QuantumTelemetry` reading came from — determines what label the
+ * UI is allowed to show alongside it (never silently mixed):
+ *   - "live": this exact upload's own executed VQC circuit
+ *     (`PredictionResponse.backend === "live"`).
+ *   - "precomputed-demo": real Pauli-Z measurements, but recorded ahead of
+ *     time for a demo/preset case rather than this request's own upload
+ *     (a frontend `PresetCase`, or the API's `cache-fallback/...` backend).
+ *   - "unavailable": no real per-qubit data exists for this result. The UI
+ *     must show "Quantum telemetry unavailable", never a fake/derived value.
+ */
+export type QuantumTelemetryProvenance = "live" | "precomputed-demo" | "unavailable";
+
+export interface QuantumTelemetry {
+  provenance: QuantumTelemetryProvenance;
+  /** Empty when provenance is "unavailable". */
+  expectations: number[];
+  nQubits: number | null;
+  device: string | null;
+}
+
 export interface DiagnosticResult {
   riskScore: number;
   diagnosis: string;
@@ -78,6 +110,6 @@ export interface DiagnosticResult {
   heatmap: string;
   backend: string;
   latencyMs: number | null;
-  qubitExpectations: [number, number, number, number];
+  quantumTelemetry: QuantumTelemetry;
   source: "live" | "mock";
 }

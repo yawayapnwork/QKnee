@@ -63,7 +63,12 @@ export async function registerClinician(data: RegisterPayload): Promise<Token> {
 }
 
 /** POST /api/v1/predict — multipart upload of a DICOM (.dcm/.dicom) or
- * NumPy (.npy) MRI slice/volume. Requires a `radiologist` bearer token. */
+ * NumPy (.npy) MRI slice/volume. Requires a `radiologist` bearer token.
+ * The response's `quantum_expectations`/`n_qubits`/`quantum_backend` are the
+ * VQC's own real per-qubit measurement for this request (or `null` if this
+ * backend didn't run a live circuit) — see `lib/quantum-telemetry.ts`,
+ * which is the only place that data should be turned into UI-facing
+ * `QuantumTelemetry`. */
 export async function predictScanVolume(file: File, token: string): Promise<PredictionResponse> {
   const formData = new FormData();
   formData.append("file", file);

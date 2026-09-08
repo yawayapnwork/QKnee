@@ -153,6 +153,112 @@ class TestStageBoundaryAssertions:
 
 
 # --------------------------------------------------------------------------- #
+# 2b. Pauli-Z expectation telemetry (AUDIT.md P0 #2: the live quantum
+# telemetry panel must show the executed circuit's own measurement, never a
+# hardcoded/preset value, a function of risk_score, or random noise).
+# --------------------------------------------------------------------------- #
+
+class TestPauliZExpectationTelemetry:
+    def test_get_pauli_z_expectations_matches_the_model_s_own_quantum_layer(
+        self, pipeline_runner: PipelineRunner
+    ):
+        """The value returned must be exactly what the executed circuit
+        measured -- read `quantum_layer` directly ourselves and compare, so
+        this fails if `get_pauli_z_expectations` is ever changed to return
+        anything else (a placeholder, a derived value, noise)."""
+        angles = np.random.default_rng(11).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+
+        expvals = pipeline_runner.get_pauli_z_expectations(angles)
+
+        with torch.no_grad():
+            expected = pipeline_runner.vqc.quantum_layer(torch.from_numpy(angles).float()).numpy().reshape(-1)
+        assert expvals is not None
+        np.testing.assert_allclose(expvals, expected, atol=1e-6)
+
+    def test_pauli_z_expectations_are_bounded_and_shaped_for_n_qubits(self, pipeline_runner: PipelineRunner):
+        angles = np.random.default_rng(12).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+        expvals = pipeline_runner.get_pauli_z_expectations(angles)
+        assert expvals is not None
+        assert expvals.shape == (4,)
+        assert np.all(expvals >= -1.0 - 1e-6) and np.all(expvals <= 1.0 + 1e-6)
+
+    def test_pauli_z_expectations_are_deterministic_for_the_same_angles(self, pipeline_runner: PipelineRunner):
+        """Same input -> same output. If this were randomly generated (as
+        opposed to read from the deterministic executed circuit), two calls
+        would disagree."""
+        angles = np.random.default_rng(13).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+        first = pipeline_runner.get_pauli_z_expectations(angles)
+        second = pipeline_runner.get_pauli_z_expectations(angles)
+        np.testing.assert_allclose(first, second)
+
+    def test_pauli_z_expectations_vary_with_the_input_angles(self, pipeline_runner: PipelineRunner):
+        """Different quantum_angles must generally produce different
+        expectation values -- proves this is a real function of the circuit
+        input, not a hardcoded/constant placeholder."""
+        angles_a = np.random.default_rng(14).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+        angles_b = np.random.default_rng(15).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+
+        expvals_a = pipeline_runner.get_pauli_z_expectations(angles_a)
+        expvals_b = pipeline_runner.get_pauli_z_expectations(angles_b)
+
+        assert not np.allclose(expvals_a, expvals_b)
+
+    def test_pauli_z_expectations_are_not_a_function_of_risk_score_alone(self, pipeline_runner: PipelineRunner):
+        """Two distinct angle vectors that happen to classify to
+        (approximately) the same risk_score must not collapse to the same
+        expectation vector -- guards against ever "deriving" telemetry from
+        risk_score instead of reading the circuit's own measurement."""
+        rng = np.random.default_rng(16)
+        candidates = [rng.uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32) for _ in range(40)]
+        scored = [(pipeline_runner.classify(a), a) for a in candidates]
+        scored.sort(key=lambda pair: pair[0])
+
+        # Pick the two candidates whose risk scores are closest together.
+        closest_pair = min(
+            zip(scored, scored[1:]), key=lambda pair: abs(pair[0][0] - pair[1][0])
+        )
+        (risk_a, angles_a), (risk_b, angles_b) = closest_pair
+        assert risk_a == pytest.approx(risk_b, abs=0.02)  # sanity: they really are close in risk_score
+
+        expvals_a = pipeline_runner.get_pauli_z_expectations(angles_a)
+        expvals_b = pipeline_runner.get_pauli_z_expectations(angles_b)
+        assert not np.allclose(expvals_a, expvals_b, atol=1e-3)
+
+    def test_get_pauli_z_expectations_returns_none_for_a_model_without_a_quantum_layer(
+        self, pipeline_runner: PipelineRunner
+    ):
+        """Returns None (not a fabricated array) when the classifying model
+        doesn't expose `.quantum_layer` -- e.g. a plain nn.Module stand-in."""
+        angles = np.random.default_rng(17).uniform(0, 2 * np.pi, size=(1, 4)).astype(np.float32)
+
+        class NoQuantumLayerModel(torch.nn.Module):
+            def forward(self, x):
+                return torch.sigmoid(x.sum(dim=-1, keepdim=True))
+
+        assert pipeline_runner.get_pauli_z_expectations(angles, vqc=NoQuantumLayerModel()) is None
+
+    def test_run_populates_pauli_z_expectations_from_the_same_executed_circuit(
+        self, pipeline_runner: PipelineRunner, dummy_slice_2d
+    ):
+        """End-to-end: `PipelineRunner.run()`'s `PipelineResult.pauli_z_expectations`
+        must be the *same* executed-circuit measurement `get_pauli_z_expectations`
+        returns for that exact call's `quantum_angles` -- not None, not derived
+        from `risk_score`, not a preset."""
+        result = pipeline_runner.run(dummy_slice_2d, skip_gradcam=True)
+
+        assert result.pauli_z_expectations is not None
+        assert result.pauli_z_expectations.shape == (4,)
+
+        expected = pipeline_runner.get_pauli_z_expectations(result.quantum_angles)
+        # atol (not the 1e-6 used elsewhere in this class): `run()`'s risk_score
+        # comes from `classify()`, which may prefer VQCClassifier.predict_fast's
+        # separate lightning.qubit-backed circuit over `quantum_layer` directly
+        # when that plugin is installed -- a different simulator backend for the
+        # same math, so float32 cross-backend noise is expected here.
+        np.testing.assert_allclose(result.pauli_z_expectations, expected, atol=1e-3)
+
+
+# --------------------------------------------------------------------------- #
 # 3. Error handling
 # --------------------------------------------------------------------------- #
 

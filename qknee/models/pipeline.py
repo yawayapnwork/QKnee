@@ -103,6 +103,10 @@ class PipelineResult:
     risk_score: float                 # in [0, 1]
     quantum_angles: np.ndarray        # (1, n_qubits), in [0, 2*pi]
     gradcam_heatmap: Optional[np.ndarray]  # (H, W) in [0, 1], or None if skip_gradcam=True
+    pauli_z_expectations: Optional[np.ndarray] = None  # (n_qubits,) in [-1, 1] -- the VQC circuit's
+    # own raw per-qubit measurement, read directly from `quantum_layer` before the classical
+    # readout collapses it into `risk_score`. None if the classifying model doesn't expose a
+    # `.quantum_layer` (see `PipelineRunner.get_pauli_z_expectations`).
 
 
 _VQC_PREFIX = "vqc."
@@ -528,6 +532,36 @@ class PipelineRunner:
             raise PipelineValidationError(f"[VQC] risk score {risk_value} outside expected range [0, 1]")
         return risk_value
 
+    def get_pauli_z_expectations(
+        self, quantum_angles: np.ndarray, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None
+    ) -> Optional[np.ndarray]:
+        """Raw per-qubit Pauli-Z expectation values in `[-1, 1]` -- the
+        quantum circuit's own measurement output, read directly from the
+        classifying model's `quantum_layer` before the classical
+        `Linear(n_qubits, 1)` + sigmoid readout in `classify()` collapses it
+        into one risk probability. This is the real, executed-circuit data
+        that backs any "live quantum telemetry" surfaced to a caller (e.g.
+        `qknee.api.server`'s `/predict`) -- never derived from `risk_score`
+        and never randomly generated.
+
+        Functionally mirrors `qknee.ui.dashboard.get_pauli_z_expectations`,
+        kept as an independent implementation here so non-UI callers (the
+        FastAPI server) don't have to import Streamlit/matplotlib.
+
+        Returns `None` (rather than guessing) if the model doesn't expose a
+        `.quantum_layer` attribute -- e.g. a custom ansatz that doesn't
+        follow `VQCClassifier`'s structure.
+        """
+        model = vqc or self.vqc
+        quantum_layer = getattr(model, "quantum_layer", None)
+        if quantum_layer is None:
+            return None
+
+        angles_tensor = torch.from_numpy(quantum_angles).float().to(self.device)
+        with torch.inference_mode():
+            expvals = quantum_layer(angles_tensor)
+        return expvals.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
     def classify_multitarget(
         self,
         quantum_angles: np.ndarray,
@@ -673,6 +707,7 @@ class PipelineRunner:
         features_512d = self.extract_resnet_features(batch)
         quantum_angles = self.reduce_to_quantum_angles(features_512d)
         risk_score = self.classify(quantum_angles)
+        pauli_z_expectations = self.get_pauli_z_expectations(quantum_angles)
 
         heatmap = None
         if not skip_gradcam:
@@ -697,7 +732,12 @@ class PipelineRunner:
         del batch, features_512d
         _release_memory()
 
-        return PipelineResult(risk_score=risk_score, quantum_angles=quantum_angles, gradcam_heatmap=heatmap)
+        return PipelineResult(
+            risk_score=risk_score,
+            quantum_angles=quantum_angles,
+            gradcam_heatmap=heatmap,
+            pauli_z_expectations=pauli_z_expectations,
+        )
 
 
 class QKneePipeline(PipelineRunner):
