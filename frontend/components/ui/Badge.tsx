@@ -1,14 +1,19 @@
 import { cn } from "@/lib/utils";
 
-type BadgeTone = "accent" | "fallback" | "demo" | "proxy" | "neutral" | "live";
+/**
+ * A small inline tag for non-status metadata (e.g. "Hybrid" next to a
+ * benchmark row, a role label). Distinct from `StatusIndicator` --
+ * `Badge` never renders a LIVE/DEMO/MOCK-FALLBACK provenance state; that
+ * is `StatusIndicator`'s/`ProvenanceBadge`'s job exclusively.
+ */
+type BadgeTone = "accent" | "neutral" | "info" | "warning" | "danger";
 
 const toneClasses: Record<BadgeTone, string> = {
-  live: "bg-status-live/10 text-status-live ring-status-live/30",
-  demo: "bg-status-demo/10 text-status-demo ring-status-demo/30",
-  fallback: "bg-status-fallback/10 text-status-fallback ring-status-fallback/40",
-  proxy: "bg-status-proxy/10 text-status-proxy ring-status-proxy/30",
-  accent: "bg-accent/10 text-accent ring-accent/30",
-  neutral: "bg-surface-2 text-ink-muted ring-surface-3",
+  accent: "bg-accent-subtle text-accent ring-accent/30",
+  neutral: "bg-surface-2 text-ink-muted ring-surface-4",
+  info: "bg-info/10 text-info ring-info/30",
+  warning: "bg-warning/10 text-warning ring-warning/30",
+  danger: "bg-danger/10 text-danger ring-danger/30",
 };
 
 export function Badge({
@@ -23,7 +28,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold uppercase tracking-wide ring-1 ring-inset",
+        "inline-flex items-center gap-1.5 rounded-xs px-2 py-0.5 text-2xs font-semibold uppercase tracking-wide ring-1 ring-inset",
         toneClasses[tone],
         className,
       )}

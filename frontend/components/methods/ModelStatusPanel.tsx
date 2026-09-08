@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { fetchHealth } from "@/lib/api";
 import { Surface } from "@/components/ui/Surface";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { Table, TableHead, Th, Tr, Td } from "@/components/ui/Table";
 
 const LABELS: Record<string, string> = {
   primary: "Primary (API unified head)",
@@ -15,8 +16,7 @@ const LABELS: Record<string, string> = {
 /**
  * Surfaces `GET /health`'s `model_status` field -- present on the backend
  * (`extras/api/server.py`) but, until this component, invisible anywhere
- * in the Next.js frontend (a real schema gap: the TS `HealthResponse` type
- * didn't even declare the field). This is the same checkpoint-availability
+ * in the Next.js frontend. This is the same checkpoint-availability
  * question the Streamlit dashboard's "Model Health" sidebar answers --
  * shown here so a reviewer of either interface sees the same facts.
  */
@@ -40,24 +40,35 @@ export function ModelStatusPanel() {
         no trained checkpoint exists for that head — never presented as a working prediction.
       </p>
 
-      <dl className="mt-3 space-y-1.5 font-mono text-xs">
-        {failed && <p className="text-ink-faint">API unreachable — status not available.</p>}
+      <div className="mt-3">
+        {failed && <p className="text-xs text-ink-faint">API unreachable — status not available.</p>}
         {!failed && !status && (
-          <>
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-full" />
-          </>
+          <div className="space-y-1.5">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+          </div>
         )}
-        {status &&
-          Object.entries(status).map(([key, value]) => (
-            <div key={key} className="flex items-center justify-between">
-              <dt className="text-ink-muted">{LABELS[key] ?? key}</dt>
-              <dd className={value === "available" ? "text-status-live" : "text-ink-faint"}>
-                {value === "available" ? "Available" : "Unavailable"}
-              </dd>
-            </div>
-          ))}
-      </dl>
+        {status && (
+          <Table caption="Model checkpoint availability by head">
+            <TableHead>
+              <Th>Head</Th>
+              <Th>Status</Th>
+            </TableHead>
+            <tbody>
+              {Object.entries(status).map(([key, value]) => (
+                <Tr key={key}>
+                  <Td header className="font-mono">
+                    {LABELS[key] ?? key}
+                  </Td>
+                  <Td className={value === "available" ? "font-mono text-success" : "font-mono text-ink-faint"}>
+                    {value === "available" ? "Available" : "Unavailable"}
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </div>
     </Surface>
   );
 }

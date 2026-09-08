@@ -2,28 +2,91 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================= */
+/* Q-KNEE DESIGN SYSTEM — design tokens, rebuilt from first        */
+/* principles. See DESIGN_SYSTEM.md at the repo root for the full  */
+/* rationale of every token and the component hierarchy built on   */
+/* top of it. Nothing here is inherited from the previous ad-hoc   */
+/* teal/cyan-gradient token set — every value below is chosen for  */
+/* a specific, named reason (precise / clinical / restrained), not */
+/* "looks advanced."                                                */
+/* ============================================================= */
 :root {
   color-scheme: dark;
+
+  /* --- Surface: layered dark neutrals, zero blur by default --- */
+  --color-surface-0: #0a0d12; /* app background */
+  --color-surface-1: #10141b; /* panel background */
+  --color-surface-2: #161b24; /* raised / hover */
+  --color-surface-3: #1e2530; /* border, divider */
+  --color-surface-4: #2a3341; /* strong border, focused input */
+
+  /* --- Ink: text hierarchy, four steps, never five+ --- */
+  --color-ink-primary: #e8ebef;
+  --color-ink-secondary: #aab2bf;
+  --color-ink-muted: #7c8697;
+  --color-ink-faint: #4d5563;
+
+  /* --- Accent: ONE interactive hue. Not a gradient pair. --- */
+  --color-accent: #2dd4bf;
+  --color-accent-strong: #14b8a6; /* hover/active */
+  --color-accent-subtle: rgba(45, 212, 191, 0.12); /* backgrounds only */
+
+  /* --- Semantic feedback: information / warning / danger --- */
+  --color-info: #38bdf8;
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-danger: #ef4444;
+  --color-neutral: #64748b;
+
+  /* Provenance/severity share the info-success-warning-danger hue
+     family on purpose (FRONTEND_REDESIGN.md: both answer "how much
+     should I trust this") -- aliased, not re-picked, so the two axes
+     can never silently drift apart in color. */
+  --color-status-live: var(--color-success);
+  --color-status-demo: var(--color-warning);
+  --color-status-fallback: var(--color-danger);
+  --color-status-proxy: var(--color-neutral);
+  --color-severity-normal: var(--color-success);
+  --color-severity-indeterminate: var(--color-warning);
+  --color-severity-urgent: var(--color-danger);
+
+  /* --- Radius: four steps, no "giant rounded card" size --- */
+  --radius-xs: 3px;  /* checkboxes, tiny chips */
+  --radius-sm: 5px;  /* inputs, buttons, badges */
+  --radius-md: 8px;  /* panels, cards, tables */
+  --radius-lg: 12px; /* modals, drawers */
+  --radius-full: 999px; /* dots, pills -- status indicators only */
+
+  /* --- Elevation: restrained, four steps, one deliberate "alert" --- */
+  --elevation-0: none;
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.55);
+  --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.6);
+  /* The ONE deliberate glow-like effect in the entire system --
+     reserved exclusively for a MOCK/FALLBACK result, never decoration
+     and never a default/hover button state. */
+  --elevation-alert: 0 0 0 1px rgba(239, 68, 68, 0.45), 0 0 20px rgba(239, 68, 68, 0.2);
+
+  /* --- Motion: two durations, nothing else --- */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
 }
 
 body {
-  background-color: #0b0f14; /* surface-0 */
-  color: #e6e9ee; /* ink-primary */
+  background-color: var(--color-surface-0);
+  color: var(--color-ink-primary);
 }
 
 ::selection {
-  background-color: rgba(45, 212, 191, 0.3);
+  background-color: var(--color-accent-subtle);
 }
 
-/* Visible keyboard focus everywhere -- never rely on a browser default
-   that some resets remove, and never remove it ourselves. */
 :focus-visible {
-  outline: 2px solid #2dd4bf;
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-/* Screen-reader-only utility for status text that shouldn't be visually
-   duplicated but must be announced (e.g. a live-updating result state). */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -36,42 +99,38 @@ body {
   border: 0;
 }
 
-/* Thin, clinical-styled scrollbars -- cosmetic but harmless (doesn't
-   animate, doesn't run continuously, doesn't imply functionality). */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #334155 #11161d;
+  scrollbar-color: var(--color-surface-4) var(--color-surface-1);
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: #11161d;
+  background: var(--color-surface-1);
 }
 *::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 999px;
+  background: var(--color-surface-4);
+  border-radius: var(--radius-full);
 }
 
-/* Motion: the only two keyframes in the entire product, both tied to a
-   real state transition (data arriving / a value changing), neither an
-   infinite decorative loop. No permanent scan-line, no ambient background
-   animation. Respect prefers-reduced-motion unconditionally. */
+/* Motion: two keyframes total, both tied to a real state transition
+   (data arriving / a panel opening), never an ambient decorative loop. */
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
 .animate-fade-in {
-  animation: fade-in 200ms ease-out;
+  animation: fade-in var(--duration-base) ease-out;
 }
 
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
 }
-.animate-toast-in {
-  animation: toast-in 180ms ease-out;
+.animate-slide-in-left {
+  animation: slide-in-left var(--duration-base) ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -80,5 +139,14 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* Print: the report export's "Print / Save as PDF" action should not
+   print the app chrome (nav, sidebar, controls) -- only the analysis
+   content that was actually visible. */
+@media print {
+  header, aside, .no-print {
+    display: none !important;
   }
 }

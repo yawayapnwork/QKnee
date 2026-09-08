@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
  * default wrapper for every piece of UI.
  */
 export function Surface({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <div className={cn("rounded-lg border border-surface-3 bg-surface-1", className)}>{children}</div>;
+  return <div className={cn("rounded-md border border-surface-3 bg-surface-1", className)}>{children}</div>;
 }
 
 export function SurfaceHeader({ children, className }: { children: React.ReactNode; className?: string }) {

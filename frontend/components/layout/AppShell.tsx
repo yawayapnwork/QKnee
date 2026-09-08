@@ -58,7 +58,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <span className="hidden text-xs text-ink-muted sm:inline">
                   {user.full_name} · <span className="text-accent">{user.role}</span>
                 </span>
-                <Button variant="ghost" size="sm" onClick={signOut} aria-label="Sign out">
+                <Button variant="tertiary" size="sm" onClick={signOut} aria-label="Sign out">
                   <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
                   <span className="hidden sm:inline">Sign Out</span>
                 </Button>

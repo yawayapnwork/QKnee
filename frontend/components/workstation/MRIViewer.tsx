@@ -66,10 +66,20 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
     disabledReason: "This plane was not produced for this study — a single-series MRI upload only has a real axial stack.",
   }));
 
+  const hasUnavailablePlane = planeTabs.some((tab) => tab.disabled);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-3 px-4 py-3">
         <Tabs items={planeTabs} value={plane ?? "axial"} onChange={selectPlane} label="Anatomical plane" />
+        {/* Stated inline, not hover-only -- a disabled tab isn't keyboard-
+            focusable at all, so its `title` tooltip is unreachable without
+            a mouse. The reason must be visible unconditionally. */}
+        {hasUnavailablePlane && (
+          <span className="text-2xs text-ink-faint">
+            {planeTabs.find((t) => t.disabled)?.disabledReason}
+          </span>
+        )}
       </div>
 
       <div className="relative flex flex-1 items-center justify-center bg-black">

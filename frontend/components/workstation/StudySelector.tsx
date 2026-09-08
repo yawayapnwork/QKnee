@@ -1,11 +1,13 @@
+import { Alert } from "@/components/ui/Alert";
 import { PRESET_CASES } from "@/lib/mock-data";
 import type { PresetCase } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * LEFT zone: demo-case context. A real `<select>`-shaped list (radio
- * group, not a hand-rolled `<div>` dropdown with no keyboard support) --
- * every item is a real, focusable, labeled button.
+ * LEFT zone (permanent column at `lg:` and above; rendered inside a
+ * `Drawer` below it). A real radio group -- every item is a focusable,
+ * labeled button, not a hand-rolled `<div>` dropdown with no keyboard
+ * support.
  */
 export function StudySelector({
   activeCaseId,
@@ -48,10 +50,10 @@ export function StudySelector({
       </div>
 
       {!canDiagnose && (
-        <p className="mt-2 rounded-md border border-status-demo/30 bg-status-demo/10 px-3 py-2 text-xs text-status-demo">
+        <Alert tone="info" className="mt-2">
           Sign in with radiologist credentials to run a new upload against the live model. Demo cases remain
           available to everyone.
-        </p>
+        </Alert>
       )}
     </div>
   );

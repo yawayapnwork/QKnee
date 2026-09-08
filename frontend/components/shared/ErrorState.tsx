@@ -17,11 +17,8 @@ export function ErrorState({
   onLoadDemo?: () => void;
 }) {
   return (
-    <div
-      role="alert"
-      className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-12 text-center"
-    >
-      <AlertTriangle className="h-5 w-5 text-status-fallback" aria-hidden="true" />
+    <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-12 text-center">
+      <AlertTriangle className="h-5 w-5 text-danger" aria-hidden="true" />
       <p className="text-sm font-medium text-ink-primary">Analysis unavailable</p>
       <p className="max-w-sm text-xs text-ink-muted">{message}</p>
       <div className="mt-2 flex gap-2">
@@ -31,7 +28,7 @@ export function ErrorState({
           </Button>
         )}
         {onLoadDemo && (
-          <Button variant="ghost" size="sm" onClick={onLoadDemo}>
+          <Button variant="tertiary" size="sm" onClick={onLoadDemo}>
             Load Demo Case
           </Button>
         )}

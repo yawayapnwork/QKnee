@@ -1,16 +1,27 @@
 import { cn } from "@/lib/utils";
 import type { ButtonHTMLAttributes } from "react";
 
-type Variant = "primary" | "secondary" | "ghost" | "danger";
+/**
+ * The four-step action hierarchy (DESIGN_SYSTEM.md §7):
+ *   primary     — the one action a screen wants you to take (flat accent
+ *                 fill; never more than one `primary` button visible at once)
+ *   secondary   — an alternative, equally-valid action (outlined)
+ *   tertiary    — a low-emphasis/auxiliary action (text-only, no border)
+ *   destructive — an irreversible or credential-affecting action (this
+ *                 product currently has none exposed to the UI, but the
+ *                 variant exists so one is never improvised from `danger`-
+ *                 tinted `secondary` styling)
+ * No gradient, no glow on any variant -- a flat accent fill is the entire
+ * "primary" signal.
+ */
+type Variant = "primary" | "secondary" | "tertiary" | "destructive";
 type Size = "sm" | "md";
 
-// No gradient, no glow. A flat accent fill is the entire "primary" signal --
-// it does not need a shadow effect to read as the main action.
 const variantClasses: Record<Variant, string> = {
-  primary: "bg-accent text-surface-0 font-semibold hover:bg-accent-muted hover:text-ink-primary",
-  secondary: "bg-surface-2 text-ink-primary ring-1 ring-inset ring-surface-3 hover:bg-surface-3",
-  ghost: "text-ink-muted hover:bg-surface-2 hover:text-ink-primary",
-  danger: "bg-status-fallback/10 text-status-fallback ring-1 ring-inset ring-status-fallback/40 hover:bg-status-fallback/20",
+  primary: "bg-accent text-surface-0 font-semibold hover:bg-accent-strong",
+  secondary: "bg-transparent text-ink-primary ring-1 ring-inset ring-surface-4 hover:bg-surface-2",
+  tertiary: "bg-transparent text-ink-muted hover:bg-surface-2 hover:text-ink-primary",
+  destructive: "bg-transparent text-danger ring-1 ring-inset ring-danger/40 hover:bg-danger/10",
 };
 
 const sizeClasses: Record<Size, string> = {
@@ -27,7 +38,7 @@ export function Button({ variant = "primary", size = "md", className, ...props }
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-md transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex items-center justify-center gap-2 rounded-sm transition-colors duration-fast disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[variant],
         sizeClasses[size],
         className,

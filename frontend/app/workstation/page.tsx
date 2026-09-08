@@ -13,6 +13,7 @@ import { LoadingState } from "@/components/shared/LoadingState";
 import { ErrorState } from "@/components/shared/ErrorState";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { AuthModal } from "@/components/auth/AuthModal";
+import { Drawer } from "@/components/ui/Drawer";
 import { useAuth } from "@/lib/auth-context";
 import { ApiError, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
@@ -30,6 +31,7 @@ export default function WorkstationPage() {
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
+  const [casesOpen, setCasesOpen] = useState(false);
   const lastFileRef = useRef<File | null>(null);
 
   const canDiagnose = isReady && user?.role === "radiologist";
@@ -39,6 +41,7 @@ export default function WorkstationPage() {
     setStatus("idle");
     setErrorMessage(null);
     setResult(mockDiagnosticResult(preset));
+    setCasesOpen(false);
   }
 
   async function runInference(file: File) {
@@ -91,12 +94,21 @@ export default function WorkstationPage() {
 
   return (
     <div className="flex flex-1 flex-col">
-      <StudyHeader caseLabel={activeCase.label} result={status === "error" ? null : result} onUpload={handleUpload} />
+      <StudyHeader
+        caseLabel={activeCase.label}
+        result={status === "error" ? null : result}
+        onUpload={handleUpload}
+        onOpenCases={() => setCasesOpen(true)}
+      />
 
       <div className="grid flex-1 grid-cols-1 lg:grid-cols-[220px_1.6fr_1fr]">
-        <aside className="border-b border-surface-3 lg:border-b-0 lg:border-r">
+        <aside className="hidden lg:block lg:border-r lg:border-surface-3">
           <StudySelector activeCaseId={activeCase.id} onSelectCase={handleSelectCase} canDiagnose={Boolean(canDiagnose)} />
         </aside>
+
+        <Drawer open={casesOpen} onClose={() => setCasesOpen(false)} title="Demo Cases">
+          <StudySelector activeCaseId={activeCase.id} onSelectCase={handleSelectCase} canDiagnose={Boolean(canDiagnose)} />
+        </Drawer>
 
         <section className="min-h-[420px] border-b border-surface-3 lg:border-b-0 lg:border-r" aria-label="MRI viewer">
           <MRIViewer result={status === "error" ? null : result} />
