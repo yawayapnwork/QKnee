@@ -1,9 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { CommandBar } from "@/components/workstation/CommandBar";
-import { MriViewport } from "@/components/workstation/MriViewport";
-import { TriageCard } from "@/components/workstation/TriageCard";
+import { useRef, useState } from "react";
+import { StudyHeader } from "@/components/workstation/StudyHeader";
+import { StudySelector } from "@/components/workstation/StudySelector";
+import { MRIViewer } from "@/components/workstation/MRIViewer";
+import { PredictionPanel } from "@/components/workstation/PredictionPanel";
+import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
+import { ExplanationPanel } from "@/components/workstation/ExplanationPanel";
+import { TechnicalDetails } from "@/components/workstation/TechnicalDetails";
+import { ReportExport } from "@/components/workstation/ReportExport";
+import { LoadingState } from "@/components/shared/LoadingState";
+import { ErrorState } from "@/components/shared/ErrorState";
+import { EmptyState } from "@/components/shared/EmptyState";
 import { AuthModal } from "@/components/auth/AuthModal";
 import { useAuth } from "@/lib/auth-context";
 import { ApiError, predictScanVolume } from "@/lib/api";
@@ -13,31 +21,32 @@ import { provenanceFromPrediction } from "@/lib/provenance";
 import { volumeViewFromPrediction } from "@/lib/viewer";
 import type { DiagnosticResult, PresetCase } from "@/lib/types";
 
+type Status = "idle" | "loading" | "error";
+
 export default function WorkstationPage() {
   const { token, user, isReady } = useAuth();
   const [activeCase, setActiveCase] = useState<PresetCase>(PRESET_CASES[0]);
   const [result, setResult] = useState<DiagnosticResult | null>(() => mockDiagnosticResult(PRESET_CASES[0]));
-  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<Status>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const lastFileRef = useRef<File | null>(null);
 
   const canDiagnose = isReady && user?.role === "radiologist";
 
   function handleSelectCase(preset: PresetCase) {
     setActiveCase(preset);
-    setError(null);
+    setStatus("idle");
+    setErrorMessage(null);
     setResult(mockDiagnosticResult(preset));
   }
 
-  async function handleUpload(file: File) {
-    setError(null);
-    if (!token || !canDiagnose) {
-      setAuthOpen(true);
-      return;
-    }
-    setLoading(true);
+  async function runInference(file: File) {
+    lastFileRef.current = file;
+    setStatus("loading");
+    setErrorMessage(null);
     try {
-      const prediction = await predictScanVolume(file, token);
+      const prediction = await predictScanVolume(file, token!);
       setResult({
         riskScore: prediction.risk_score,
         diagnosis: prediction.diagnosis,
@@ -46,44 +55,77 @@ export default function WorkstationPage() {
         latencyMs: prediction.latency_ms,
         quantumTelemetry: quantumTelemetryFromPrediction(prediction),
         volume: volumeViewFromPrediction(prediction),
-        source: "live",
         provenance: provenanceFromPrediction(prediction),
       });
+      setStatus("idle");
     } catch (err) {
-      // AUDIT.md P1 #7 requirements 6/7: a failed live call must never
-      // silently keep looking like (or quietly become) a trustworthy
-      // result — the error is shown AND the fallback result is stamped
-      // "mock_fallback" (loud/unmistakable), never "precomputed_demo"
-      // (the calmer label a deliberately-picked preset case gets).
-      setError(
-        err instanceof ApiError
-          ? err.detail
-          : "Backend unreachable (likely a Render cold start) — showing preset data instead.",
+      // Execution mandate rule 13: a failed request must never silently
+      // become a mock prediction. No `DiagnosticResult` is produced here —
+      // the analysis column renders `ErrorState` instead, with an
+      // explicit, viewer-initiated "Load Demo Case" action rather than an
+      // automatic substitution.
+      setErrorMessage(
+        err instanceof ApiError ? err.detail : "The Q-Knee API is unreachable (a Render cold start can take up to a minute).",
       );
-      setResult(mockDiagnosticResult(activeCase, /* isFailedLiveFallback */ true));
-    } finally {
-      setLoading(false);
+      setStatus("error");
     }
   }
 
-  return (
-    <main className="min-h-screen bg-orthoc-bg">
-      <CommandBar activeCaseId={activeCase.id} onSelectCase={handleSelectCase} onOpenAuth={() => setAuthOpen(true)} />
+  function handleUpload(file: File) {
+    if (!token || !canDiagnose) {
+      setAuthOpen(true);
+      return;
+    }
+    void runInference(file);
+  }
 
-      <div className="mx-auto grid max-w-7xl grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-[1.3fr_1fr]">
-        <MriViewport result={result} onUpload={handleUpload} />
-        <TriageCard result={result} loading={loading} caseLabel={activeCase.label} canDiagnose={Boolean(canDiagnose)} />
+  function handleRetry() {
+    if (lastFileRef.current) void runInference(lastFileRef.current);
+  }
+
+  function handleLoadDemo() {
+    setStatus("idle");
+    setErrorMessage(null);
+    setResult(mockDiagnosticResult(activeCase));
+  }
+
+  return (
+    <div className="flex flex-1 flex-col">
+      <StudyHeader caseLabel={activeCase.label} result={status === "error" ? null : result} onUpload={handleUpload} />
+
+      <div className="grid flex-1 grid-cols-1 lg:grid-cols-[220px_1.6fr_1fr]">
+        <aside className="border-b border-surface-3 lg:border-b-0 lg:border-r">
+          <StudySelector activeCaseId={activeCase.id} onSelectCase={handleSelectCase} canDiagnose={Boolean(canDiagnose)} />
+        </aside>
+
+        <section className="min-h-[420px] border-b border-surface-3 lg:border-b-0 lg:border-r" aria-label="MRI viewer">
+          <MRIViewer result={status === "error" ? null : result} />
+        </section>
+
+        <section className="flex flex-col gap-6 p-4 sm:p-6" aria-label="AI analysis">
+          {status === "loading" && <LoadingState />}
+
+          {status === "error" && (
+            <ErrorState message={errorMessage ?? "Unknown error."} onRetry={handleRetry} onLoadDemo={handleLoadDemo} />
+          )}
+
+          {status === "idle" && result && (
+            <>
+              <PredictionPanel result={result} />
+              <QuantumTelemetry telemetry={result.quantumTelemetry} provenance={result.provenance} />
+              <ExplanationPanel volume={result.volume} />
+              <TechnicalDetails result={result} />
+              <ReportExport result={result} caseLabel={activeCase.label} />
+            </>
+          )}
+
+          {status === "idle" && !result && (
+            <EmptyState title="No result yet" description="Select a demo case or upload a scan to begin." />
+          )}
+        </section>
       </div>
 
-      {error && (
-        <div className="mx-auto max-w-7xl px-6 pb-6">
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-400">
-            {error}
-          </div>
-        </div>
-      )}
-
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
-    </main>
+    </div>
   );
 }

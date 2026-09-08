@@ -1,52 +1,52 @@
 import Link from "next/link";
-import { ArrowRight, BookOpen, Cpu } from "lucide-react";
-import { Badge } from "@/components/ui/Badge";
-import { API_BASE_URL } from "@/lib/api";
+import { ArrowRight } from "lucide-react";
 
+/**
+ * Rebuilt from scratch (FRONTEND_REDESIGN.md Part Q). No full-viewport
+ * hero, no gradient wordmark, no glow CTA, no unhedged headline sitting
+ * above a subordinate disclaimer. "What this is" and "what this is not"
+ * carry equal visual weight, side by side, because both are load-bearing
+ * facts a viewer needs before clicking anywhere.
+ */
 export function Hero() {
   return (
-    <section className="relative overflow-hidden border-b border-slate-800/80 bg-grid">
-      <div
-        className="pointer-events-none absolute inset-0 -z-10"
-        style={{
-          background:
-            "radial-gradient(50% 40% at 50% 0%, rgba(20,184,166,0.16) 0%, rgba(2,6,23,0) 70%)",
-        }}
-      />
-      <div className="mx-auto max-w-5xl px-6 py-24 text-center sm:py-32">
-        <Badge tone="teal" dot className="mb-6">
-          NISQ-Ready Hybrid ML
-        </Badge>
-        <h1 className="text-4xl font-bold tracking-tight text-slate-50 sm:text-6xl">
-          Q-Knee <span className="text-gradient">Diagnostic Platform</span>
-        </h1>
-        <p className="mx-auto mt-6 max-w-2xl text-balance text-base leading-relaxed text-slate-400 sm:text-lg">
-          Accelerating orthopedic knee MRI triage by coupling deep spatial feature extraction with a
-          4-qubit variational quantum classifier.
-        </p>
-        <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Link
-            href="/workstation"
-            className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-teal-500 to-cyan-400 px-6 py-3.5 text-sm font-semibold text-slate-950 shadow-md shadow-teal-500/10 transition-all hover:shadow-glow"
-          >
-            <Cpu className="h-4 w-4" />
-            Launch Diagnostic Workstation
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-          <a
-            href={`${API_BASE_URL}/docs`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-6 py-3.5 text-sm font-semibold text-slate-200 transition-colors hover:bg-slate-800"
-          >
-            <BookOpen className="h-4 w-4" />
-            API Swagger Docs
-          </a>
+    <section className="mx-auto max-w-4xl px-4 py-12 sm:px-6 sm:py-16">
+      <h1 className="text-2xl font-bold tracking-tight text-ink-primary sm:text-3xl">Q-Knee</h1>
+      <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-muted sm:text-base">
+        A hybrid classical/quantum research pipeline for knee MRI triage: ResNet18 feature extraction, PCA
+        compression, and a 4-qubit variational quantum classifier, with Grad-CAM explanation.
+      </p>
+
+      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-surface-3 bg-surface-1 p-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-status-live">What this is</h2>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">
+            A research prototype for ACL/meniscal tear risk triage, evaluated on real RSNA Knee data (n=58).
+          </p>
         </div>
-        <p className="mx-auto mt-8 max-w-xl text-xs text-slate-600">
-          Investigational research prototype · Real RSNA Knee ground truth, n=58 (directional, not
-          a clinical validation — see RESULTS.md) · Confirmatory radiologist over-read required
-        </p>
+        <div className="rounded-lg border border-surface-3 bg-surface-1 p-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-status-fallback">What this is not</h2>
+          <p className="mt-1.5 text-xs leading-relaxed text-ink-muted">
+            Not a certified medical device. Not validated for clinical use. Confirmatory radiologist review
+            is required for every result.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+        <Link
+          href="/workstation"
+          className="inline-flex items-center justify-center gap-2 rounded-md bg-accent px-4 py-2 text-sm font-semibold text-surface-0 hover:bg-accent-muted hover:text-ink-primary"
+        >
+          Open Workstation
+          <ArrowRight className="h-4 w-4" aria-hidden="true" />
+        </Link>
+        <Link
+          href="/methods"
+          className="inline-flex items-center justify-center gap-2 rounded-md bg-surface-2 px-4 py-2 text-sm font-medium text-ink-primary ring-1 ring-inset ring-surface-3 hover:bg-surface-3"
+        >
+          Explore Methods
+        </Link>
       </div>
     </section>
   );

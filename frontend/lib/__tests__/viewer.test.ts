@@ -194,8 +194,8 @@ describe("Grad-CAM exists for only one slice, and only overlay opacity affects i
 });
 
 describe("overlay opacity affects only the Grad-CAM layer, never the base image", () => {
-  const MRI_VIEWPORT = join(__dirname, "..", "..", "components", "workstation", "MriViewport.tsx");
-  const source = readFileSync(MRI_VIEWPORT, "utf-8");
+  const MRI_VIEWER = join(__dirname, "..", "..", "components", "workstation", "MRIViewer.tsx");
+  const source = readFileSync(MRI_VIEWER, "utf-8");
 
   it("the base MRI <img> has no opacity style driven by the opacity slider state", () => {
     const baseImgBlock = source.slice(source.indexOf('alt="MRI slice"') - 200, source.indexOf('alt="MRI slice"') + 100);
@@ -204,8 +204,8 @@ describe("overlay opacity affects only the Grad-CAM layer, never the base image"
 
   it("the Grad-CAM overlay <img> is the only element styled from the opacity slider state", () => {
     const overlayImgBlock = source.slice(
-      source.indexOf('alt="Grad-CAM overlay"') - 100,
-      source.indexOf('alt="Grad-CAM overlay"') + 300,
+      source.indexOf('alt="Grad-CAM model-attention overlay"') - 100,
+      source.indexOf('alt="Grad-CAM model-attention overlay"') + 300,
     );
     expect(overlayImgBlock).toMatch(/opacity:\s*opacity\s*\/\s*100/);
   });

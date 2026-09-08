@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { provenanceForFailedLiveFallback, provenanceForPreset, provenanceFromPrediction } from "../provenance";
+import { provenanceForPreset, provenanceFromPrediction } from "../provenance";
 import { mockDiagnosticResult } from "../mock-data";
 import { PRESET_CASES } from "../mock-data";
 import { livePrediction } from "./fixtures";
@@ -76,24 +76,24 @@ describe("preset provenance is always explicitly marked, never disguised as live
   });
 });
 
-describe("AUDIT.md P1 #7 requirements 6/7: a failed live call never silently looks trustworthy", () => {
-  it("provenanceForFailedLiveFallback is the loud mock_fallback state, distinct from a deliberately-selected preset", () => {
-    const failed = provenanceForFailedLiveFallback();
-    const selected = provenanceForPreset();
-
-    expect(failed.provenance).toBe("mock_fallback");
-    expect(failed.isTrustworthy).toBe(false);
-    expect(failed.provenance).not.toBe(selected.provenance);
+describe("execution mandate rule 13: a failed live call never silently becomes a mock prediction", () => {
+  it("there is no client-side constructor for a 'failed live call' provenance -- mock_fallback can only ever come from the backend's own response", async () => {
+    // `provenanceForFailedLiveFallback` used to exist specifically so a
+    // failed fetch() could synthesize a DiagnosticResult labeled
+    // mock_fallback. That function is deleted: app/workstation/page.tsx's
+    // catch block renders `ErrorState` (no DiagnosticResult at all) instead
+    // of calling into this module. The only way `provenance === "mock_fallback"`
+    // can appear on screen is a genuine, successfully-received API payload
+    // that says so itself (see the C4b regression test above).
+    const provenanceModule: Record<string, unknown> = await import("../provenance");
+    expect(provenanceModule.provenanceForFailedLiveFallback).toBeUndefined();
   });
 
-  it("mockDiagnosticResult's isFailedLiveFallback flag switches provenance from precomputed_demo to mock_fallback for the exact same preset data", () => {
-    const preset = PRESET_CASES[0];
-    const selected = mockDiagnosticResult(preset, false);
-    const failedFallback = mockDiagnosticResult(preset, true);
-
-    expect(selected.riskScore).toBe(failedFallback.riskScore); // same underlying case
-    expect(selected.provenance.provenance).toBe("precomputed_demo");
-    expect(failedFallback.provenance.provenance).toBe("mock_fallback");
-    expect(failedFallback.provenance.isTrustworthy).toBe(false);
+  it("mockDiagnosticResult always yields precomputed_demo -- selecting a demo case (including after a failed live call) is never mislabeled mock_fallback", () => {
+    for (const preset of PRESET_CASES) {
+      const result = mockDiagnosticResult(preset);
+      expect(result.provenance.provenance).toBe("precomputed_demo");
+      expect(result.provenance.isTrustworthy).toBe(true);
+    }
   });
 });

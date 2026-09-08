@@ -174,6 +174,11 @@ export interface HealthResponse {
     latency_ms_per_sample: number;
     roc_auc: number;
   } | null;
+  /** Per-head checkpoint availability — "available" | "unavailable" — e.g.
+   * `{"primary": "available", "acl": "unavailable", ...}`. Was present on
+   * the backend response but had no TypeScript representation at all;
+   * surfaced on the Methods page's Model Status panel. */
+  model_status: Record<string, string>;
 }
 
 export type SeverityTag = "Normal" | "Indeterminate" | "Urgent Surgical Consult";
@@ -188,34 +193,39 @@ export interface PresetCase {
 }
 
 /**
- * Where a `QuantumTelemetry` reading came from — determines what label the
- * UI is allowed to show alongside it (never silently mixed):
- *   - "live": this exact upload's own executed VQC circuit
- *     (`PredictionResponse.backend === "live"`).
- *   - "precomputed-demo": real Pauli-Z measurements, but recorded ahead of
- *     time for a demo/preset case rather than this request's own upload
- *     (a frontend `PresetCase`, or the API's `cache-fallback/...` backend).
- *   - "unavailable": no real per-qubit data exists for this result. The UI
- *     must show "Quantum telemetry unavailable", never a fake/derived value.
+ * Raw per-qubit circuit output — nothing else. Whether this data is
+ * trustworthy, live, demo, or fabricated is answered ENTIRELY by the
+ * parent `DiagnosticResult.provenance.quantumExecution` — this interface
+ * used to carry its own separate provenance field (`QuantumTelemetryProvenance`,
+ * a second, hyphenated vocabulary independent of `Provenance`); that field
+ * is deleted. Two provenance systems for one product is exactly the
+ * "competing vocabularies" defect the provenance model exists to prevent.
+ * `expectations` is empty iff `provenance.quantumExecution === "unavailable"`.
  */
-export type QuantumTelemetryProvenance = "live" | "precomputed-demo" | "unavailable";
-
 export interface QuantumTelemetry {
-  provenance: QuantumTelemetryProvenance;
-  /** Empty when provenance is "unavailable". */
   expectations: number[];
   nQubits: number | null;
   device: string | null;
 }
 
+/**
+ * One diagnostic result, one provenance. `provenance: ProvenanceInfo` is
+ * the ONLY field any component may branch on to decide whether this result
+ * is live, demo, mock, cached, or proxied — never `backend` (a raw,
+ * free-form debug string, kept only for the Technical Details panel) and
+ * never a second `source`/telemetry-specific field (deleted; this struct
+ * used to carry three overlapping "what kind of result is this" fields).
+ */
 export interface DiagnosticResult {
   riskScore: number;
   diagnosis: string;
   severity: SeverityTag;
+  /** Raw backend tag (e.g. "live", "mock", "cache-fallback/case_003") —
+   * diagnostic/debug value only. Never branch UI behavior on this; use
+   * `provenance` instead. */
   backend: string;
   latencyMs: number | null;
   quantumTelemetry: QuantumTelemetry;
   volume: VolumeView;
-  source: "live" | "mock";
   provenance: ProvenanceInfo;
 }

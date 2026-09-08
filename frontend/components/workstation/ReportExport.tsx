@@ -1,31 +1,36 @@
 "use client";
 
-import { Download, FileText } from "lucide-react";
+import { Download, Printer } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { formatLatency, formatPercent } from "@/lib/utils";
 import type { DiagnosticResult } from "@/lib/types";
 
-const PROVENANCE_LABEL = {
-  live: "LIVE QUANTUM TELEMETRY",
-  "precomputed-demo": "PRECOMPUTED DEMO TELEMETRY",
-  unavailable: "Quantum telemetry unavailable",
-} as const;
-
+/**
+ * Builds the exported report from `result.provenance` -- the same
+ * canonical model the on-screen badge reads from. This file used to
+ * maintain its OWN, third, hardcoded copy of the provenance label map and
+ * cite the legacy `backend`/`source` fields instead; a viewer could see
+ * "LIVE" on screen and a differently-worded label in the downloaded
+ * report for the identical result. That divergence is now structurally
+ * impossible: there is only one label to read.
+ */
 function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
   const timestamp = new Date().toISOString();
   const telemetry = result.quantumTelemetry;
-  const telemetrySection =
-    telemetry.provenance === "unavailable"
-      ? "_Quantum telemetry unavailable for this result._"
-      : `| Qubit | Expectation |\n|-------|-------------|\n${telemetry.expectations
-          .map((v, i) => `| q${i} | ${v.toFixed(4)} |`)
-          .join("\n")}`;
+  const quantumAvailable = result.provenance.quantumExecution === "quantum_simulator" && telemetry.expectations.length > 0;
+  const telemetrySection = quantumAvailable
+    ? `| Qubit | Expectation |\n|-------|-------------|\n${telemetry.expectations
+        .map((v, i) => `| q${i} | ${v.toFixed(4)} |`)
+        .join("\n")}`
+    : `_${result.provenance.quantumExecutionLabel}._`;
 
   return `# Q-Knee Automated Screening Report
 
 **Case:** ${caseLabel}
 **Generated:** ${timestamp}
-**Backend:** ${result.backend} (${result.source})
+**Provenance:** ${result.provenance.provenanceLabel}
+**Model:** ${result.provenance.modelSourceLabel ?? "n/a"}
+**Quantum backend:** ${result.provenance.quantumExecutionLabel}
 
 ## Diagnostic Summary
 
@@ -35,8 +40,6 @@ function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
 - **Inference Latency:** ${formatLatency(result.latencyMs)}
 
 ## Quantum Circuit Telemetry (⟨Z⟩ expectations)
-
-**Source:** ${PROVENANCE_LABEL[telemetry.provenance]}
 
 ${telemetrySection}
 
@@ -68,17 +71,16 @@ export function ReportExport({ result, caseLabel }: { result: DiagnosticResult; 
         className="flex-1"
         onClick={() => downloadFile(`qknee-report-${caseLabel}.md`, buildMarkdown(result, caseLabel), "text/markdown")}
       >
-        <FileText className="h-3.5 w-3.5" />
+        <Download className="h-3.5 w-3.5" aria-hidden="true" />
         Export Markdown
       </Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="flex-1"
-        onClick={() => window.print()}
-      >
-        <Download className="h-3.5 w-3.5" />
-        Export PDF
+      {/* Honestly labeled: this opens the browser print dialog, which lets
+          the user save as PDF -- it does not generate a PDF file itself.
+          The old label ("Export PDF") implied server-side/library PDF
+          generation that never existed. */}
+      <Button variant="secondary" size="sm" className="flex-1" onClick={() => window.print()}>
+        <Printer className="h-3.5 w-3.5" aria-hidden="true" />
+        Print / Save as PDF
       </Button>
     </div>
   );

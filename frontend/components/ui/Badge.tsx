@@ -1,35 +1,33 @@
 import { cn } from "@/lib/utils";
 
-type BadgeTone = "teal" | "rose" | "emerald" | "amber" | "slate";
+type BadgeTone = "accent" | "fallback" | "demo" | "proxy" | "neutral" | "live";
 
 const toneClasses: Record<BadgeTone, string> = {
-  teal: "bg-teal-500/10 text-teal-400 ring-teal-500/30",
-  rose: "bg-rose-500/10 text-rose-400 ring-rose-500/30",
-  emerald: "bg-emerald-500/10 text-emerald-400 ring-emerald-500/30",
-  amber: "bg-amber-500/10 text-amber-400 ring-amber-500/30",
-  slate: "bg-slate-500/10 text-slate-300 ring-slate-500/30",
+  live: "bg-status-live/10 text-status-live ring-status-live/30",
+  demo: "bg-status-demo/10 text-status-demo ring-status-demo/30",
+  fallback: "bg-status-fallback/10 text-status-fallback ring-status-fallback/40",
+  proxy: "bg-status-proxy/10 text-status-proxy ring-status-proxy/30",
+  accent: "bg-accent/10 text-accent ring-accent/30",
+  neutral: "bg-surface-2 text-ink-muted ring-surface-3",
 };
 
 export function Badge({
   children,
-  tone = "slate",
+  tone = "neutral",
   className,
-  dot,
 }: {
   children: React.ReactNode;
   tone?: BadgeTone;
   className?: string;
-  dot?: boolean;
 }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset",
+        "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold uppercase tracking-wide ring-1 ring-inset",
         toneClasses[tone],
         className,
       )}
     >
-      {dot && <span className={cn("h-1.5 w-1.5 rounded-full", `bg-current`)} />}
       {children}
     </span>
   );

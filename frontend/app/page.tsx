@@ -1,19 +1,18 @@
-import { Navbar } from "@/components/landing/Navbar";
 import { Hero } from "@/components/landing/Hero";
-import { PipelineVisualizer } from "@/components/landing/PipelineVisualizer";
-import { BenchmarksTable } from "@/components/landing/BenchmarksTable";
+import { ArchitectureDiagram } from "@/components/landing/ArchitectureDiagram";
 
 export default function HomePage() {
   return (
-    <main>
-      <Navbar />
+    <>
       <Hero />
-      <PipelineVisualizer />
-      <BenchmarksTable />
-      <footer className="border-t border-slate-800/80 px-6 py-10 text-center text-xs text-slate-600">
-        Q-Knee Diagnostic Platform · AI &amp; Quantum Innovation Track · Investigational research
-        prototype, not for clinical use.
+      <ArchitectureDiagram />
+      <footer className="border-t border-surface-3 px-4 py-8 text-center text-xs text-ink-faint sm:px-6">
+        Q-Knee — investigational research prototype, not for clinical use.{" "}
+        <a href="/methods" className="text-accent hover:underline">
+          Full methods & evaluation
+        </a>
+        .
       </footer>
-    </main>
+    </>
   );
 }

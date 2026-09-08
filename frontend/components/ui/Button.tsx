@@ -2,21 +2,20 @@ import { cn } from "@/lib/utils";
 import type { ButtonHTMLAttributes } from "react";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger";
-type Size = "sm" | "md" | "lg";
+type Size = "sm" | "md";
 
+// No gradient, no glow. A flat accent fill is the entire "primary" signal --
+// it does not need a shadow effect to read as the main action.
 const variantClasses: Record<Variant, string> = {
-  primary:
-    "bg-gradient-to-r from-teal-500 to-cyan-400 text-slate-950 font-semibold hover:shadow-glow shadow-md shadow-teal-500/10",
-  secondary:
-    "bg-slate-800 text-slate-100 ring-1 ring-inset ring-slate-700 hover:bg-slate-700",
-  ghost: "text-slate-300 hover:bg-slate-800/60 hover:text-white",
-  danger: "bg-rose-500/10 text-rose-400 ring-1 ring-inset ring-rose-500/30 hover:bg-rose-500/20",
+  primary: "bg-accent text-surface-0 font-semibold hover:bg-accent-muted hover:text-ink-primary",
+  secondary: "bg-surface-2 text-ink-primary ring-1 ring-inset ring-surface-3 hover:bg-surface-3",
+  ghost: "text-ink-muted hover:bg-surface-2 hover:text-ink-primary",
+  danger: "bg-status-fallback/10 text-status-fallback ring-1 ring-inset ring-status-fallback/40 hover:bg-status-fallback/20",
 };
 
 const sizeClasses: Record<Size, string> = {
   sm: "px-3 py-1.5 text-xs",
-  md: "px-4 py-2.5 text-sm",
-  lg: "px-6 py-3.5 text-base",
+  md: "px-4 py-2 text-sm",
 };
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -28,7 +27,7 @@ export function Button({ variant = "primary", size = "md", className, ...props }
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-lg transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex items-center justify-center gap-2 rounded-md transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[variant],
         sizeClasses[size],
         className,

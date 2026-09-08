@@ -62,29 +62,16 @@ export function provenanceForPreset(): ProvenanceInfo {
     provenanceLabel: PROVENANCE_LABELS.precomputed_demo,
     modelSource: null,
     modelSourceLabel: null,
-    quantumExecution: "unavailable",
-    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.unavailable,
+    // Preset cases carry real, precomputed per-qubit values (see
+    // PresetCase.qubitExpectations / quantumTelemetryFromPreset) -- not
+    // random placeholders -- so a real circuit execution genuinely
+    // happened at some point, just not for this request. Marking this
+    // "unavailable" would contradict the non-empty telemetry the panel
+    // displays right next to this badge.
+    quantumExecution: "quantum_simulator",
+    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.quantum_simulator,
     isTrustworthy: true,
   };
 }
 
-/**
- * Builds the provenance for a *failed* live inference call that fell back
- * to a preset/demo result (AUDIT.md P1 #7 requirements 6/7: never silently
- * transition live -> mock — this must render as the loud, unmistakable
- * "MOCK/FALLBACK" state, not the calmer "PRECOMPUTED DEMO" a deliberately-
- * selected preset case gets via `provenanceForPreset`, even though both
- * currently reuse the same underlying preset data).
- */
-export function provenanceForFailedLiveFallback(): ProvenanceInfo {
-  return {
-    provenance: "mock_fallback",
-    provenanceLabel: PROVENANCE_LABELS.mock_fallback,
-    modelSource: null,
-    modelSourceLabel: null,
-    quantumExecution: "unavailable",
-    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.unavailable,
-    isTrustworthy: false,
-  };
-}
 
