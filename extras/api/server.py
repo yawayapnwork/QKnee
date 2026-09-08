@@ -49,6 +49,7 @@ import hashlib
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 
@@ -350,11 +351,66 @@ cache_service = CacheService(
 # Response schema
 # --------------------------------------------------------------------------- #
 
+class PlaneInfo(BaseModel):
+    """One anatomical plane's real, backend-reported availability for the
+    viewer -- never a claim the backend can't back up. See
+    `PredictionResponse.planes` and `QKneeBackend._all_axial_slices_uint8`
+    for why only "axial" is ever `available=True` in this implementation."""
+
+    available: bool = Field(..., description="Whether real slice images exist for this plane in this response.")
+    num_slices: int = Field(..., ge=0, description="True slice count along this plane, from the ingested volume's "
+                                                    "own shape -- never hardcoded. 0 when unavailable.")
+    slices: List[str] = Field(
+        default_factory=list,
+        description="Base64-encoded PNG for every slice along this plane, index-aligned with `num_slices`. "
+                    "Empty when `available` is False -- the frontend must disable this plane, not synthesize slices.",
+    )
+
+
 class PredictionResponse(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=1.0, description="Predicted tear risk probability, in [0, 1].")
     diagnosis: str = Field(..., description="'Tear Detected' if risk_score >= 0.5, else 'Normal'.")
     gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
     backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
+    base_image: str = Field(
+        "",
+        description="Base64-encoded PNG of the RAW MRI slice actually classified -- no Grad-CAM, no overlay of "
+                    "any kind. This and `gradcam_overlay` are always two separate images; neither is ever the "
+                    "other one relabeled.",
+    )
+    gradcam_overlay: Optional[str] = Field(
+        None,
+        description="Base64-encoded PNG (RGBA, transparent) of ONLY the Grad-CAM heatmap, sized to match "
+                    "`base_image` -- composite it over `base_image` client-side, at a caller-controlled opacity, "
+                    "rather than pre-blended. `None` when no heatmap was computed for this response.",
+    )
+    gradcam_plane: Optional[str] = Field(
+        None, description="Which plane `gradcam_overlay` belongs to (currently always 'axial' when present). "
+                          "`None` exactly when `gradcam_overlay` is `None`.",
+    )
+    gradcam_slice_index: Optional[int] = Field(
+        None,
+        description="0-based index, within `planes[gradcam_plane].slices`, of the exact slice `gradcam_overlay` "
+                    "was computed for -- Grad-CAM is computed for one representative (anatomical-midpoint) slice "
+                    "only, never for every slice, so the frontend must show the overlay for this slice alone and "
+                    "say so, not imply every slice has one. `None` exactly when `gradcam_overlay` is `None`.",
+    )
+    planes: Dict[str, PlaneInfo] = Field(
+        default_factory=lambda: {
+            plane: PlaneInfo(available=False, num_slices=0, slices=[]) for plane in ("axial", "coronal", "sagittal")
+        },
+        description="Real per-plane volume metadata -- 'axial', 'coronal', 'sagittal' keys, each reporting only "
+                    "what this backend actually produced for this upload (see `PlaneInfo`). A plane the backend "
+                    "can't produce is `available=False` with an empty `slices` list, never a fabricated one.",
+    )
+    primary_plane: str = Field(
+        "axial", description="The plane `risk_score`/`gradcam_overlay` were computed from -- matches "
+                             "`gradcam_plane` when a heatmap is present.",
+    )
+    primary_slice_index: int = Field(
+        0, description="0-based index, within `planes[primary_plane].slices`, of the slice actually classified "
+                       "(the anatomical midpoint of the primary plane's stack; 0 for a single-slice upload).",
+    )
     latency_ms: Optional[float] = Field(
         None,
         description="Wall-clock time for this call's inference stage (ResNet18 -> PCA -> VQC -> Grad-CAM for "
@@ -424,6 +480,25 @@ class ExplanationResponse(BaseModel):
     gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
     risk_score: float = Field(..., ge=0.0, le=1.0, description="Predicted tear risk probability, in [0, 1] — provided for context alongside the heatmap.")
     backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
+
+
+@dataclass
+class _PredictParts:
+    """Everything `QKneeBackend.predict()` needs from `_predict_live`/
+    `_predict_mock` to assemble a `PredictionResponse` -- kept as one
+    dataclass rather than a growing tuple now that the viewer needs
+    base image + transparent overlay + per-plane slice data alongside the
+    original risk score/pre-blended heatmap."""
+
+    risk_score: float
+    gradcam_heatmap_b64: str  # legacy pre-blended composite (unchanged field/consumers)
+    quantum_expectations: Optional[List[float]]
+    base_image_b64: str
+    gradcam_overlay_b64: Optional[str]
+    gradcam_plane: Optional[str]
+    gradcam_slice_index: Optional[int]
+    planes: Dict[str, PlaneInfo]
+    primary_slice_index: int
 
 
 # --------------------------------------------------------------------------- #
@@ -545,13 +620,13 @@ class QKneeBackend:
 
         return array
 
-    def load_slice(self, raw_bytes: bytes, filename: str) -> np.ndarray:
-        """Parses uploaded bytes (.dcm/.dicom or .npy) into a single 2D
-        grayscale slice array. Multi-slice/multi-frame volumes (3D `(D,H,W)`
-        or 4D `(D,H,W,C)` color arrays) are reduced to their central slice
-        via `DataIngestion`, the same ingestion path used everywhere else in
-        the pipeline — so a color multi-frame DICOM or a 4D `.npy` volume is
-        decomposed consistently instead of being rejected outright."""
+    def _parse_uploaded_array(self, raw_bytes: bytes, filename: str) -> np.ndarray:
+        """Parses uploaded bytes (.dcm/.dicom or .npy) into a raw array --
+        `(H, W)` for a single slice, or `(D, H, W)` / `(D, H, W, C)` for a
+        volume -- with no slice reduction. Shared by `load_slice` (which
+        reduces the result to one central slice, for classification) and
+        `_all_axial_slices_uint8` (which keeps every slice, for the
+        viewer)."""
         suffix = Path(filename).suffix.lower()
 
         if suffix in (".dcm", ".dicom"):
@@ -571,7 +646,37 @@ class QKneeBackend:
                 detail=f"Unsupported file type '{suffix}'. Upload a .dcm/.dicom or .npy file.",
             )
 
-        return self._to_central_2d_slice(np.asarray(array))
+        return np.asarray(array)
+
+    def load_slice(self, raw_bytes: bytes, filename: str) -> np.ndarray:
+        """Parses uploaded bytes into a single 2D grayscale slice array.
+        Multi-slice/multi-frame volumes (3D `(D,H,W)` or 4D `(D,H,W,C)`
+        color arrays) are reduced to their central slice via
+        `DataIngestion`, the same ingestion path used everywhere else in
+        the pipeline — so a color multi-frame DICOM or a 4D `.npy` volume is
+        decomposed consistently instead of being rejected outright."""
+        return self._to_central_2d_slice(self._parse_uploaded_array(raw_bytes, filename))
+
+    def _all_axial_slices_uint8(self, array: np.ndarray) -> List[np.ndarray]:
+        """Every slice along the volume's native stacking axis (axis 0 for
+        a `(D, H, W)`/`(D, H, W, C)` array; the single slice itself for a
+        plain `(H, W)` array), normalized to uint8 grayscale for display --
+        via `DataIngestion._array_to_pil_slices`, the exact same
+        normalization the ResNet ingestion path itself applies, so the
+        viewer shows the same slices the model actually sees.
+
+        This is the volume's ONLY plane this backend can honestly claim to
+        produce: a 2D "Coronal"/"Sagittal" reslice along the in-plane pixel
+        axes of a typical single-series MRI acquisition is not a real
+        anatomical view (those axes are in-plane resolution, not
+        independently acquired depth) -- so this method, and the "axial"
+        plane it feeds, is the only plane `/predict`'s `planes` field ever
+        reports as available. See `PredictionResponse.planes`.
+        """
+        from qknee.data.ingestion import DataIngestion as _DataIngestion
+
+        pil_slices = _DataIngestion._array_to_pil_slices(array)
+        return [np.array(p) for p in pil_slices]
 
     def _to_central_2d_slice(self, array: np.ndarray) -> np.ndarray:
         """Reduces a 2D/3D/4D array to one representative 2D grayscale slice.
@@ -624,8 +729,7 @@ class QKneeBackend:
         # caller's bearer token upstream) — unused here since this backend
         # runs inference in-process rather than over HTTP.
         del auth_header
-        slice_2d = self.load_slice(raw_bytes, filename)
-        display_slice = self._normalize_uint8(slice_2d)
+        raw_array = self._parse_uploaded_array(raw_bytes, filename)
 
         # perf_counter_ns() rather than perf_counter(): this stage now
         # regularly lands in the low-single-digit-millisecond range (a
@@ -635,43 +739,108 @@ class QKneeBackend:
         # real signal; the nanosecond counter doesn't.
         t0_ns = time.perf_counter_ns()
         if self.backend_ready:
-            risk_score, heatmap_b64, quantum_expectations = self._predict_live(display_slice)
+            parts = self._predict_live(raw_array)
             backend = "live"
         else:
-            risk_score, heatmap_b64 = self._predict_mock(display_slice)
-            quantum_expectations = None  # no quantum circuit ran -- see _predict_mock
+            parts = self._predict_mock(raw_array)
             backend = "mock"
         latency_ms = (time.perf_counter_ns() - t0_ns) / 1e6
 
-        diagnosis = "Tear Detected" if risk_score >= TEAR_RISK_THRESHOLD else "Normal"
+        diagnosis = "Tear Detected" if parts.risk_score >= TEAR_RISK_THRESHOLD else "Normal"
 
         return PredictionResponse(
-            risk_score=risk_score,
+            risk_score=parts.risk_score,
             diagnosis=diagnosis,
-            gradcam_heatmap=heatmap_b64,
+            gradcam_heatmap=parts.gradcam_heatmap_b64,
             backend=backend,
             latency_ms=latency_ms,
-            quantum_expectations=quantum_expectations,
-            n_qubits=len(quantum_expectations) if quantum_expectations is not None else None,
-            quantum_backend=_config.quantum.device if quantum_expectations is not None else None,
+            quantum_expectations=parts.quantum_expectations,
+            n_qubits=len(parts.quantum_expectations) if parts.quantum_expectations is not None else None,
+            quantum_backend=_config.quantum.device if parts.quantum_expectations is not None else None,
+            base_image=parts.base_image_b64,
+            gradcam_overlay=parts.gradcam_overlay_b64,
+            gradcam_plane=parts.gradcam_plane,
+            gradcam_slice_index=parts.gradcam_slice_index,
+            planes=parts.planes,
+            primary_plane="axial",
+            primary_slice_index=parts.primary_slice_index,
         )
 
-    def _predict_live(self, display_slice: np.ndarray) -> Tuple[float, str, Optional[List[float]]]:
-        from qknee.xai.gradcam import overlay_heatmap
+    def _predict_live(self, raw_array: np.ndarray) -> _PredictParts:
+        from qknee.data.ingestion import IngestionError
+        from qknee.xai.gradcam import colorize_heatmap_rgba, overlay_heatmap
 
         try:
+            # Every slice along the volume's native stacking axis, real and
+            # normalized the same way the model itself sees them (a single
+            # (H, W) input degrades to one "slice" here) -- this, and only
+            # this, is the plane the viewer is allowed to call "available".
+            axial_slices = self._all_axial_slices_uint8(raw_array)
+            primary_slice_index = len(axial_slices) // 2
+            base_image_uint8 = axial_slices[primary_slice_index]
+
+            # Classification/Grad-CAM input: identical call path to before
+            # this change (central slice, then the same per-slice contrast
+            # normalization) -- this method's ML behavior is unchanged.
+            central_slice_raw = self._to_central_2d_slice(raw_array)
+            display_slice = self._normalize_uint8(central_slice_raw)
+
             result = self.runner.run(display_slice)  # DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM
-            overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
-            heatmap_b64 = self._encode_png_base64(overlay)
+
+            # Legacy pre-blended composite -- unchanged, still what /explain
+            # and /report return; not used by the current Next.js viewer,
+            # which composites base_image + gradcam_overlay itself instead.
+            legacy_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
+            gradcam_heatmap_b64 = self._encode_png_base64(legacy_overlay)
+
+            overlay_rgba = colorize_heatmap_rgba(result.gradcam_heatmap, base_image_uint8.shape[:2])
+            gradcam_overlay_b64 = self._encode_png_base64(overlay_rgba)
+
             quantum_expectations = (
                 result.pauli_z_expectations.tolist() if result.pauli_z_expectations is not None else None
             )
-            return result.risk_score, heatmap_b64, quantum_expectations
+
+            planes = {
+                "axial": PlaneInfo(
+                    available=True,
+                    num_slices=len(axial_slices),
+                    slices=[self._encode_png_base64(cv2.cvtColor(s, cv2.COLOR_GRAY2BGR)) for s in axial_slices],
+                ),
+                # Coronal/Sagittal are NOT produced: reslicing a typical
+                # single-series MRI along its in-plane pixel axes isn't a
+                # real anatomical view (those axes are in-plane resolution,
+                # not independently acquired depth) -- see
+                # `_all_axial_slices_uint8`'s docstring. Reporting them
+                # unavailable (rather than fabricating slices) is the fix
+                # for AUDIT.md B1/C4a's "pretends every plane works".
+                "coronal": PlaneInfo(available=False, num_slices=0, slices=[]),
+                "sagittal": PlaneInfo(available=False, num_slices=0, slices=[]),
+            }
+
+            return _PredictParts(
+                risk_score=result.risk_score,
+                gradcam_heatmap_b64=gradcam_heatmap_b64,
+                quantum_expectations=quantum_expectations,
+                base_image_b64=self._encode_png_base64(cv2.cvtColor(base_image_uint8, cv2.COLOR_GRAY2BGR)),
+                gradcam_overlay_b64=gradcam_overlay_b64,
+                gradcam_plane="axial",
+                gradcam_slice_index=primary_slice_index,
+                planes=planes,
+                primary_slice_index=primary_slice_index,
+            )
+        except HTTPException:
+            raise
+        except IngestionError as exc:
+            # Malformed input shape (e.g. a 1D or 5D+ array) -- same 422
+            # this raised before viewer support was added, whether it
+            # surfaces from slice decomposition or Grad-CAM's use of the
+            # same array.
+            raise HTTPException(status_code=422, detail=f"Failed to decompose array into slices: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - PipelineValidationError or any unexpected failure
             raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
         finally:
-            # `result`'s tensors are already pulled out into `risk_score`/
-            # `heatmap_b64` (plain float/str) by this point — collect the
+            # Every value returned above has already been pulled out into
+            # plain numpy/float/str fields by this point — collect the
             # ResNet18 forward + Grad-CAM backward pass's freed activation
             # graph now rather than leaving it for the next GC cycle.
             # `PipelineRunner.run()` already does this internally too; the
@@ -679,10 +848,19 @@ class QKneeBackend:
             # above, which runs after that internal collection.
             gc.collect()
 
-    def _predict_mock(self, display_slice: np.ndarray) -> Tuple[float, str]:
+    def _predict_mock(self, raw_array: np.ndarray) -> _PredictParts:
         import hashlib
 
-        from qknee.xai.gradcam import overlay_heatmap
+        from qknee.xai.gradcam import colorize_heatmap_rgba, overlay_heatmap
+
+        # Mock mode never had (and still doesn't have) real volume/plane
+        # decomposition available -- `DataIngestion` failed to import/load
+        # for this backend instance (see `load_error`), so `_to_central_2d_slice`
+        # (unchanged) still raises 503 for a non-2D upload exactly as it did
+        # before this change; a plain 2D upload still works. Mock mode is
+        # honestly "1 slice, axial only" -- it never pretended to support
+        # multi-slice volumes.
+        display_slice = self._normalize_uint8(self._to_central_2d_slice(raw_array))
 
         digest = hashlib.sha256(display_slice.tobytes()).digest()
         seed = int.from_bytes(digest[:4], "big")
@@ -696,14 +874,33 @@ class QKneeBackend:
         cy, cx = h / 2, w / 2
         radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
         fake_heatmap = np.clip(1 - radius / radius.max(), 0, 1)
-        overlay = overlay_heatmap(fake_heatmap, display_slice)
-        return risk_score, self._encode_png_base64(overlay)
+        legacy_overlay = overlay_heatmap(fake_heatmap, display_slice)
+        overlay_rgba = colorize_heatmap_rgba(fake_heatmap, display_slice.shape[:2])
+
+        base_image_b64 = self._encode_png_base64(cv2.cvtColor(display_slice, cv2.COLOR_GRAY2BGR))
+        planes = {
+            "axial": PlaneInfo(available=True, num_slices=1, slices=[base_image_b64]),
+            "coronal": PlaneInfo(available=False, num_slices=0, slices=[]),
+            "sagittal": PlaneInfo(available=False, num_slices=0, slices=[]),
+        }
+
+        return _PredictParts(
+            risk_score=risk_score,
+            gradcam_heatmap_b64=self._encode_png_base64(legacy_overlay),
+            quantum_expectations=None,  # no quantum circuit ran in mock mode
+            base_image_b64=base_image_b64,
+            gradcam_overlay_b64=self._encode_png_base64(overlay_rgba),
+            gradcam_plane="axial",
+            gradcam_slice_index=0,
+            planes=planes,
+            primary_slice_index=0,
+        )
 
     @staticmethod
-    def _encode_png_base64(bgr_image: np.ndarray) -> str:
-        success, encoded = cv2.imencode(".png", bgr_image)
+    def _encode_png_base64(image: np.ndarray) -> str:
+        success, encoded = cv2.imencode(".png", image)
         if not success:
-            raise HTTPException(status_code=500, detail="Failed to encode Grad-CAM heatmap as PNG")
+            raise HTTPException(status_code=500, detail="Failed to encode image as PNG")
         return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
@@ -794,6 +991,20 @@ class CachedFallbackBackend:
         raw_expectations = case.get("pauli_z_expectations")
         quantum_expectations = [float(v) for v in raw_expectations] if raw_expectations else None
 
+        # `precomputed_cache.json` (see `scripts/generate_demo_cache.py`)
+        # only ever recorded the pre-blended Grad-CAM composite
+        # (`heatmap_base64`), never a separate raw slice -- there is no
+        # real base image to serve here. `base_image` stays empty and every
+        # plane stays unavailable rather than passing the composite off as
+        # the raw MRI (that would violate the base-image/overlay
+        # separation this response exists to guarantee); `gradcam_heatmap`
+        # (legacy, pre-blended) is unaffected for any other consumer.
+        planes = {
+            "axial": PlaneInfo(available=False, num_slices=0, slices=[]),
+            "coronal": PlaneInfo(available=False, num_slices=0, slices=[]),
+            "sagittal": PlaneInfo(available=False, num_slices=0, slices=[]),
+        }
+
         return PredictionResponse(
             risk_score=risk_score,
             diagnosis=diagnosis,
@@ -802,6 +1013,13 @@ class CachedFallbackBackend:
             quantum_backend=_config.quantum.device if quantum_expectations is not None else None,
             gradcam_heatmap=heatmap_b64,
             backend=f"cache-fallback/{case.get('case_id', 'unknown')}",
+            base_image="",
+            gradcam_overlay=None,
+            gradcam_plane=None,
+            gradcam_slice_index=None,
+            planes=planes,
+            primary_plane="axial",
+            primary_slice_index=0,
         )
 
 

@@ -47,6 +47,68 @@ export interface PredictionResponse {
   /** PennyLane device identifier the circuit ran on (e.g. "default.qubit").
    * `null` exactly when `quantum_expectations` is `null`. */
   quantum_backend: string | null;
+  /** Base64-encoded PNG of the RAW MRI slice actually classified — no Grad-CAM,
+   * no overlay of any kind. Always a different asset from `gradcam_overlay`. */
+  base_image: string;
+  /** Base64-encoded PNG (RGBA, transparent) of ONLY the Grad-CAM heatmap, sized
+   * to match `base_image` — composite over `base_image` client-side at a
+   * caller-controlled opacity. `null` when no heatmap was computed. */
+  gradcam_overlay: string | null;
+  /** Which plane `gradcam_overlay` belongs to. `null` iff `gradcam_overlay` is `null`. */
+  gradcam_plane: AnatomicalPlane | null;
+  /** 0-based index, within `planes[gradcam_plane].slices`, of the exact slice
+   * `gradcam_overlay` was computed for — Grad-CAM exists for one representative
+   * slice only, never every slice. `null` iff `gradcam_overlay` is `null`. */
+  gradcam_slice_index: number | null;
+  /** Real per-plane volume metadata, keyed by plane — see `RawPlaneInfo`. Wire format
+   * (snake_case field names), straight off the API — see `PlaneInfo`/`toVolumeView` in
+   * `lib/viewer.ts` for the camelCase app-level shape derived from this. */
+  planes: Record<AnatomicalPlane, RawPlaneInfo>;
+  /** The plane `risk_score`/`gradcam_overlay` were computed from. */
+  primary_plane: AnatomicalPlane;
+  /** 0-based index, within `planes[primary_plane].slices`, of the slice actually classified. */
+  primary_slice_index: number;
+}
+
+export type AnatomicalPlane = "axial" | "coronal" | "sagittal";
+
+/**
+ * One anatomical plane's real, backend-reported availability — never a
+ * claim the backend can't back up. `available: false` means the backend
+ * genuinely does not produce this plane for this upload (most commonly:
+ * only "axial" — the volume's native slice-stacking axis — is ever real
+ * for a typical single-series MRI upload; reslicing along the in-plane
+ * pixel axes isn't a real anatomical Coronal/Sagittal view). The UI must
+ * disable an unavailable plane, never pretend it works. Wire format
+ * (snake_case), as returned by `PredictionResponse.planes`.
+ */
+export interface RawPlaneInfo {
+  available: boolean;
+  num_slices: number;
+  /** Base64-encoded PNGs, index-aligned with `num_slices`. Empty when `available` is false. */
+  slices: string[];
+}
+
+/** App-level (camelCase) counterpart of `RawPlaneInfo` — see `lib/viewer.ts`. */
+export interface PlaneInfo {
+  available: boolean;
+  numSlices: number;
+  slices: string[];
+}
+
+/** App-level (camelCase) per-result volume/viewer state, derived from a
+ * `PredictionResponse` (`lib/viewer.ts#volumeViewFromPrediction`) or a
+ * `PresetCase` (`lib/viewer.ts#volumeViewFromPreset`) — never assembled by
+ * hand at a call site, so a live result's viewer data can't accidentally
+ * mix in preset/other-result data (mirrors `quantum-telemetry.ts`'s
+ * single-call-site pattern for the same reason). */
+export interface VolumeView {
+  planes: Record<AnatomicalPlane, PlaneInfo>;
+  primaryPlane: AnatomicalPlane;
+  primarySliceIndex: number;
+  gradcamOverlay: string | null;
+  gradcamPlane: AnatomicalPlane | null;
+  gradcamSliceIndex: number | null;
 }
 
 export interface HealthResponse {
@@ -107,9 +169,9 @@ export interface DiagnosticResult {
   riskScore: number;
   diagnosis: string;
   severity: SeverityTag;
-  heatmap: string;
   backend: string;
   latencyMs: number | null;
   quantumTelemetry: QuantumTelemetry;
+  volume: VolumeView;
   source: "live" | "mock";
 }

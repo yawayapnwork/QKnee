@@ -1,18 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Layers, Upload } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { cn } from "@/lib/utils";
-import type { DiagnosticResult } from "@/lib/types";
+import {
+  PLANE_DISPLAY_ORDER,
+  PLANE_LABELS,
+  clampSliceIndex,
+  isGradcamVisible,
+  resolvePlane,
+  sliceCaption,
+  sliceImageSrc,
+} from "@/lib/viewer";
+import type { AnatomicalPlane, DiagnosticResult } from "@/lib/types";
 
-const PLANES = ["Sagittal", "Coronal", "Axial"] as const;
 const WINDOWS = [
   { id: "soft-tissue", label: "Soft Tissue", wl: 40, ww: 400 },
   { id: "bone", label: "Bone", wl: 500, ww: 2000 },
 ] as const;
-
-const SLICE_COUNT = 32;
 
 export function MriViewport({
   result,
@@ -21,30 +27,63 @@ export function MriViewport({
   result: DiagnosticResult | null;
   onUpload: (file: File) => void;
 }) {
-  const [plane, setPlane] = useState<(typeof PLANES)[number]>("Sagittal");
-  const [slice, setSlice] = useState(Math.floor(SLICE_COUNT / 2));
+  const volume = result?.volume ?? null;
+
+  const [requestedPlane, setRequestedPlane] = useState<AnatomicalPlane>("axial");
+  const [slice, setSlice] = useState(0);
   const [heatmapOn, setHeatmapOn] = useState(true);
   const [opacity, setOpacity] = useState(65);
   const [windowPreset, setWindowPreset] = useState<(typeof WINDOWS)[number]["id"]>("soft-tissue");
 
+  // A new result can change which planes/slices actually exist -- reset to
+  // that result's own primary plane/slice rather than carrying over a
+  // selection the new volume may not support.
+  useEffect(() => {
+    if (!volume) return;
+    setRequestedPlane(volume.primaryPlane);
+    setSlice(volume.primarySliceIndex);
+  }, [result]);
+
   const filter = windowPreset === "bone" ? "contrast(1.4) brightness(1.1)" : "contrast(1.05) brightness(1)";
+
+  const plane = volume ? resolvePlane(volume, requestedPlane) : null;
+  const numSlices = plane && volume ? volume.planes[plane].numSlices : 0;
+  const sliceIndex = plane && volume ? clampSliceIndex(volume, plane, slice) : 0;
+  const baseImageSrc = plane && volume ? sliceImageSrc(volume, plane, sliceIndex) : null;
+  const gradcamSrc =
+    plane && volume && volume.gradcamOverlay && isGradcamVisible(volume, plane, sliceIndex)
+      ? volume.gradcamOverlay
+      : null;
+
+  function selectPlane(next: AnatomicalPlane) {
+    setRequestedPlane(next);
+    if (volume) setSlice(clampSliceIndex(volume, next, slice));
+  }
 
   return (
     <Card className="flex flex-col overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
         <div className="flex gap-1 rounded-lg bg-slate-950 p-1">
-          {PLANES.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPlane(p)}
-              className={cn(
-                "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-                plane === p ? "bg-teal-500 text-slate-950" : "text-slate-400 hover:text-slate-200",
-              )}
-            >
-              {p}
-            </button>
-          ))}
+          {PLANE_DISPLAY_ORDER.map((p) => {
+            const available = volume?.planes[p]?.available ?? false;
+            const isActive = plane === p;
+            return (
+              <button
+                key={p}
+                onClick={() => available && selectPlane(p)}
+                disabled={!available}
+                title={available ? undefined : "Unavailable — the backend did not produce this plane for this upload"}
+                className={cn(
+                  "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                  !available && "cursor-not-allowed text-slate-700 opacity-50",
+                  available && isActive && "bg-teal-500 text-slate-950",
+                  available && !isActive && "text-slate-400 hover:text-slate-200",
+                )}
+              >
+                {PLANE_LABELS[p]}
+              </button>
+            );
+          })}
         </div>
 
         <label className="flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800">
@@ -71,33 +110,37 @@ export function MriViewport({
             filter,
           }}
         >
-          {result ? (
+          {baseImageSrc ? (
             <>
               <img
-                src={result.heatmap.startsWith("data:") ? result.heatmap : `data:image/png;base64,${result.heatmap}`}
+                src={baseImageSrc}
                 alt="MRI slice"
                 className="absolute inset-0 h-full w-full object-cover opacity-90"
               />
-              {heatmapOn && (
+              {heatmapOn && gradcamSrc && (
                 <img
-                  src={result.heatmap.startsWith("data:") ? result.heatmap : `data:image/png;base64,${result.heatmap}`}
+                  src={gradcamSrc}
                   alt="Grad-CAM overlay"
-                  className="absolute inset-0 h-full w-full object-cover mix-blend-screen"
+                  className="absolute inset-0 h-full w-full object-cover"
                   style={{ opacity: opacity / 100 }}
                 />
               )}
             </>
           ) : (
-            <div className="flex h-full w-full items-center justify-center text-xs text-slate-600">
-              Select a preset case or upload a scan
+            <div className="flex h-full w-full items-center justify-center px-6 text-center text-xs text-slate-600">
+              {result
+                ? "MRI slice unavailable for this result"
+                : "Select a preset case or upload a scan"}
             </div>
           )}
           <div className="animate-scan-line pointer-events-none absolute inset-x-0 h-px bg-gradient-to-r from-transparent via-teal-400/70 to-transparent" />
         </div>
 
-        <div className="absolute left-3 top-3 rounded bg-slate-950/80 px-2 py-1 font-mono text-[10px] text-teal-400">
-          {plane.toUpperCase()} · SLICE {slice}/{SLICE_COUNT}
-        </div>
+        {plane && (
+          <div className="absolute left-3 top-3 rounded bg-slate-950/80 px-2 py-1 font-mono text-[10px] text-teal-400">
+            {sliceCaption(plane, sliceIndex, numSlices)}
+          </div>
+        )}
       </div>
 
       <div className="space-y-4 border-t border-slate-800 px-4 py-4">
@@ -105,16 +148,17 @@ export function MriViewport({
           <div className="mb-1.5 flex items-center justify-between text-xs text-slate-400">
             <span>Slice index</span>
             <span className="font-mono text-slate-300">
-              {slice} / {SLICE_COUNT}
+              {numSlices > 0 ? sliceIndex + 1 : 0} / {numSlices}
             </span>
           </div>
           <input
             type="range"
             min={0}
-            max={SLICE_COUNT}
-            value={slice}
+            max={Math.max(numSlices - 1, 0)}
+            value={sliceIndex}
+            disabled={numSlices <= 1}
             onChange={(e) => setSlice(Number(e.target.value))}
-            className="w-full accent-teal-400"
+            className="w-full accent-teal-400 disabled:opacity-40"
           />
         </div>
 
@@ -122,24 +166,31 @@ export function MriViewport({
           <label className="flex items-center gap-2 text-xs text-slate-400">
             <Layers className="h-3.5 w-3.5" />
             Grad-CAM Overlay
+            {plane && volume?.gradcamOverlay && !isGradcamVisible(volume, plane, sliceIndex) && (
+              <span className="text-slate-600">
+                (only for {volume.gradcamPlane ? PLANE_LABELS[volume.gradcamPlane] : "?"} slice{" "}
+                {(volume.gradcamSliceIndex ?? 0) + 1})
+              </span>
+            )}
           </label>
           <button
             onClick={() => setHeatmapOn((v) => !v)}
+            disabled={!gradcamSrc}
             className={cn(
-              "relative h-5 w-9 rounded-full transition-colors",
-              heatmapOn ? "bg-teal-500" : "bg-slate-700",
+              "relative h-5 w-9 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+              heatmapOn && gradcamSrc ? "bg-teal-500" : "bg-slate-700",
             )}
           >
             <span
               className={cn(
                 "absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform",
-                heatmapOn ? "translate-x-4" : "translate-x-0.5",
+                heatmapOn && gradcamSrc ? "translate-x-4" : "translate-x-0.5",
               )}
             />
           </button>
         </div>
 
-        {heatmapOn && (
+        {heatmapOn && gradcamSrc && (
           <div>
             <div className="mb-1.5 flex items-center justify-between text-xs text-slate-400">
               <span>Heatmap opacity</span>

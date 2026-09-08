@@ -224,6 +224,39 @@ def overlay_heatmap(
     return cv2.addWeighted(color_heatmap, alpha, original_bgr, 1 - alpha, 0)
 
 
+def colorize_heatmap_rgba(
+    heatmap: np.ndarray,
+    target_size: Tuple[int, int],
+    colormap: int = getattr(cv2, _config.gradcam.colormap),
+) -> np.ndarray:
+    """Resizes `heatmap` to `target_size` (H, W) and color-maps it into a
+    standalone `(H, W, 4)` BGRA image -- a transparent overlay layer meant
+    to be composited by the *caller* (e.g. client-side opacity control),
+    unlike `overlay_heatmap` above, which pre-blends onto a base image
+    server-side and returns an opaque `(H, W, 3)` composite.
+
+    The alpha channel is the heatmap's own per-pixel magnitude (in
+    `[0, 255]`): low-saliency regions are more transparent, high-saliency
+    regions more opaque, so whatever this is composited over stays visible
+    everywhere the heatmap has little to say.
+
+    Args:
+        heatmap: (h, w) array in [0, 1], typically the raw Grad-CAM output.
+        target_size: (H, W) to resize the heatmap to.
+        colormap: OpenCV colormap constant.
+
+    Returns:
+        (H, W, 4) uint8 BGRA image.
+    """
+    height, width = target_size
+    resized_heatmap = cv2.resize(
+        np.asarray(heatmap, dtype=np.float32), (width, height), interpolation=cv2.INTER_LINEAR
+    )
+    heatmap_uint8 = (np.clip(resized_heatmap, 0, 1) * 255).astype(np.uint8)
+    color_heatmap = cv2.applyColorMap(heatmap_uint8, colormap)  # (H, W, 3) BGR
+    return np.dstack([color_heatmap, heatmap_uint8])  # (H, W, 4) BGRA
+
+
 @dataclass(frozen=True)
 class SliceSaliency:
     """One slice's Grad-CAM result within a `VolumetricGradCAMResult`."""

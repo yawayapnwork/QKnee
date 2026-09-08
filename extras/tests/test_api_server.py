@@ -216,6 +216,100 @@ class TestPredictEndpointPayload:
 
 
 # --------------------------------------------------------------------------- #
+# 1a2. /predict viewer contract (AUDIT.md P0 #3/#4): base MRI slice vs.
+# Grad-CAM overlay must be two separate assets, and per-plane slice
+# metadata must reflect the real uploaded volume, never a hardcoded count.
+# --------------------------------------------------------------------------- #
+
+class TestPredictViewerContract:
+    def test_base_image_and_gradcam_overlay_are_different_assets(
+        self, live_client: TestClient, dummy_slice_2d: np.ndarray,
+    ):
+        response = live_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["base_image"]
+        assert payload["gradcam_overlay"]
+        assert payload["base_image"] != payload["gradcam_overlay"]
+
+        import base64
+        assert base64.b64decode(payload["base_image"])[:8] == b"\x89PNG\r\n\x1a\n"
+        assert base64.b64decode(payload["gradcam_overlay"])[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_axial_plane_slice_count_matches_the_real_uploaded_volume(self, live_client: TestClient):
+        rng = np.random.default_rng(21)
+        volume = rng.integers(0, 255, size=(9, 64, 64), dtype=np.uint8)
+
+        response = live_client.post(
+            "/predict",
+            files={"file": ("volume.npy", _npy_bytes(volume), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["planes"]["axial"]["available"] is True
+        assert payload["planes"]["axial"]["num_slices"] == 9
+        assert len(payload["planes"]["axial"]["slices"]) == 9
+
+    def test_slice_count_is_not_hardcoded_and_tracks_a_different_volume_size(self, live_client: TestClient):
+        rng = np.random.default_rng(22)
+        volume = rng.integers(0, 255, size=(17, 64, 64), dtype=np.uint8)
+
+        response = live_client.post(
+            "/predict",
+            files={"file": ("volume.npy", _npy_bytes(volume), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        assert response.json()["planes"]["axial"]["num_slices"] == 17
+
+    def test_single_slice_upload_reports_exactly_one_slice(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
+        response = live_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["planes"]["axial"]["num_slices"] == 1
+        assert payload["primary_slice_index"] == 0
+        assert payload["gradcam_slice_index"] == 0
+
+    def test_coronal_and_sagittal_are_reported_unavailable_not_fabricated(
+        self, live_client: TestClient, dummy_slice_2d: np.ndarray,
+    ):
+        response = live_client.post(
+            "/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        for plane in ("coronal", "sagittal"):
+            assert payload["planes"][plane]["available"] is False
+            assert payload["planes"][plane]["num_slices"] == 0
+            assert payload["planes"][plane]["slices"] == []
+
+    def test_gradcam_overlay_identifies_the_exact_slice_it_belongs_to(self, live_client: TestClient):
+        rng = np.random.default_rng(23)
+        volume = rng.integers(0, 255, size=(11, 64, 64), dtype=np.uint8)
+
+        response = live_client.post(
+            "/predict",
+            files={"file": ("volume.npy", _npy_bytes(volume), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["gradcam_plane"] == "axial"
+        assert payload["gradcam_slice_index"] == 11 // 2
+        assert payload["primary_slice_index"] == 11 // 2
+
+
+# --------------------------------------------------------------------------- #
 # 1b. /explain payload shape/contents
 # --------------------------------------------------------------------------- #
 

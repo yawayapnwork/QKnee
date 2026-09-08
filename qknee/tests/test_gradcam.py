@@ -23,6 +23,7 @@ from qknee.xai.gradcam import (
     COLORMAP_OPTIONS,
     GradCAM,
     VolumetricGradCAMResult,
+    colorize_heatmap_rgba,
     compute_volumetric_gradcam,
     get_default_target_layer,
     overlay_heatmap,
@@ -184,6 +185,46 @@ class TestOverlayHeatmap:
 
         gray_from_overlay = overlay[..., 0]  # B=G=R since source was grayscale broadcast to BGR
         np.testing.assert_allclose(gray_from_overlay, original, atol=1)
+
+
+class TestColorizeHeatmapRgba:
+    """`colorize_heatmap_rgba` — the standalone, transparent Grad-CAM layer
+    (AUDIT.md P0 #3: `/predict`'s `gradcam_overlay`) — must never be the
+    same asset as any base/original slice image, and its alpha channel must
+    track the heatmap's own saliency rather than being uniformly opaque."""
+
+    def test_returns_bgra_resized_to_target(self):
+        heatmap = np.random.default_rng(0).uniform(0, 1, size=(7, 7)).astype(np.float32)
+
+        overlay = colorize_heatmap_rgba(heatmap, target_size=(64, 48))
+
+        assert overlay.shape == (64, 48, 4)
+        assert overlay.dtype == np.uint8
+
+    def test_low_saliency_regions_are_more_transparent_than_high_saliency_regions(self):
+        heatmap = np.zeros((8, 8), dtype=np.float32)
+        heatmap[0, 0] = 0.0
+        heatmap[7, 7] = 1.0
+
+        overlay = colorize_heatmap_rgba(heatmap, target_size=(8, 8))
+
+        assert overlay[7, 7, 3] > overlay[0, 0, 3]
+
+    def test_never_identical_to_a_plain_grayscale_composite(self):
+        """Regression guard for AUDIT.md B2/P0 #3: the overlay this function
+        builds must never collapse into being the same bytes as a plain
+        opaque composite (`overlay_heatmap`'s output) for the same input —
+        the whole point of a separate RGBA layer is the caller-controlled,
+        per-pixel-transparent compositing `overlay_heatmap` doesn't offer."""
+        heatmap = np.random.default_rng(5).uniform(0, 1, size=(16, 16)).astype(np.float32)
+        original = np.random.default_rng(6).integers(0, 255, size=(16, 16), dtype=np.uint8)
+
+        rgba_overlay = colorize_heatmap_rgba(heatmap, target_size=(16, 16))
+        opaque_composite = overlay_heatmap(heatmap, original)
+
+        assert rgba_overlay.shape[-1] == 4
+        assert opaque_composite.shape[-1] == 3
+        assert not np.array_equal(rgba_overlay[..., :3], opaque_composite)
 
 
 class TestGetDefaultTargetLayer:

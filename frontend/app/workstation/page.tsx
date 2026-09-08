@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth-context";
 import { ApiError, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
+import { volumeViewFromPrediction } from "@/lib/viewer";
 import type { DiagnosticResult, PresetCase } from "@/lib/types";
 
 export default function WorkstationPage() {
@@ -40,10 +41,10 @@ export default function WorkstationPage() {
         riskScore: prediction.risk_score,
         diagnosis: prediction.diagnosis,
         severity: severityFromRisk(prediction.risk_score),
-        heatmap: prediction.gradcam_heatmap,
         backend: prediction.backend,
         latencyMs: prediction.latency_ms,
         quantumTelemetry: quantumTelemetryFromPrediction(prediction),
+        volume: volumeViewFromPrediction(prediction),
         source: "live",
       });
     } catch (err) {

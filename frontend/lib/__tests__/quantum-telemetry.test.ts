@@ -1,21 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { quantumTelemetryFromPrediction, quantumTelemetryFromPreset } from "../quantum-telemetry";
 import { PRESET_CASES } from "../mock-data";
-import type { PredictionResponse } from "../types";
-
-function livePrediction(overrides: Partial<PredictionResponse> = {}): PredictionResponse {
-  return {
-    risk_score: 0.42,
-    diagnosis: "Normal",
-    gradcam_heatmap: "",
-    backend: "live",
-    latency_ms: 12.3,
-    quantum_expectations: [-0.31, 0.05, 0.77, -0.62],
-    n_qubits: 4,
-    quantum_backend: "default.qubit",
-    ...overrides,
-  };
-}
+import { livePrediction } from "./fixtures";
 
 describe("quantumTelemetryFromPrediction", () => {
   it("AUDIT.md P0 #2 regression: never returns a preset's own qubit values for a live response", () => {

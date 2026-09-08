@@ -1,0 +1,31 @@
+import type { PredictionResponse } from "../types";
+
+/** A realistic `backend === "live"` /predict response, for tests to override piecemeal. */
+export function livePrediction(overrides: Partial<PredictionResponse> = {}): PredictionResponse {
+  return {
+    risk_score: 0.42,
+    diagnosis: "Normal",
+    gradcam_heatmap: "",
+    backend: "live",
+    latency_ms: 12.3,
+    quantum_expectations: [-0.31, 0.05, 0.77, -0.62],
+    n_qubits: 4,
+    quantum_backend: "default.qubit",
+    base_image: "AXIAL_SLICE_12_BASE64",
+    gradcam_overlay: "AXIAL_SLICE_12_OVERLAY_BASE64",
+    gradcam_plane: "axial",
+    gradcam_slice_index: 12,
+    planes: {
+      axial: {
+        available: true,
+        num_slices: 24,
+        slices: Array.from({ length: 24 }, (_, i) => `AXIAL_SLICE_${i}_BASE64`),
+      },
+      coronal: { available: false, num_slices: 0, slices: [] },
+      sagittal: { available: false, num_slices: 0, slices: [] },
+    },
+    primary_plane: "axial",
+    primary_slice_index: 12,
+    ...overrides,
+  };
+}
