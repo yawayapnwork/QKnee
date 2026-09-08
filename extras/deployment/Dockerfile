@@ -3,7 +3,7 @@
 # Q-Knee container image.
 #
 # One shared multi-stage image serves BOTH the FastAPI backend
-# (qknee/api/server.py) and the Streamlit frontend (qknee/ui/dashboard.py) —
+# (extras/api/server.py) and the Streamlit frontend (qknee/ui/dashboard.py) —
 # they share the exact same heavy ML dependency stack (PyTorch, PennyLane,
 # OpenCV, scikit-learn), so building two separate images would just
 # duplicate multiple GB of identical layers for no benefit.
@@ -48,6 +48,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 COPY requirements.txt .
+# The FastAPI/auth stack (fastapi, uvicorn, PyJWT, argon2-cffi, ...) was
+# deliberately excluded from the root `requirements.txt` when the API was
+# quarantined to `extras/api/` (see that file's own comment) — this image
+# runs the API (see the CMD below), so its build must install both files,
+# not just the root one alone (AUDIT.md P1 #9/A2's exact bug, for Docker
+# rather than Render).
+COPY extras/api/requirements.txt extras/api/requirements.txt
 
 # pip itself: split into its own layer so a `requirements.txt`/torch-version
 # edit below never re-triggers a pip self-upgrade, and vice versa.
@@ -77,9 +84,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Remaining Python dependencies, last — this is the layer most likely to
 # change from build to build (a new package, a version bump), so it's
 # ordered after the much larger, much more stable torch/torchvision layer
-# above rather than before it.
+# above rather than before it. Both requirements files: the ML stack
+# (requirements.txt) and the FastAPI/auth stack (extras/api/requirements.txt)
+# — see the COPY comment above.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install -r requirements.txt -r extras/api/requirements.txt
 
 
 # --------------------------------------------------------------------------- #
@@ -158,4 +167,4 @@ EXPOSE 8000 8501
 #
 # docker-compose.yml overrides this with the Streamlit `command:` for the
 # frontend service.
-CMD uvicorn qknee.api.server:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD uvicorn extras.api.server:app --host 0.0.0.0 --port ${PORT:-8000}

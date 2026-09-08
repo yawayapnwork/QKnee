@@ -4,7 +4,7 @@ Q-Knee REST API: FastAPI wrapper exposing `qknee.models.pipeline.PipelineRunner`
 (qknee/ui) or any other HTTP client.
 
 Run with:
-    uvicorn qknee.api.server:app --reload --port 8000
+    uvicorn extras.api.server:app --reload --port 8000
 
 Endpoints:
     GET  /health              - liveness/readiness probe, reports whether the
@@ -34,7 +34,7 @@ Endpoints:
 Startup memory/latency: torch, torchvision, pennylane, matplotlib, and
 reportlab are all deliberately kept out of this module's top-level
 imports — see `get_backend()`'s docstring and the `TYPE_CHECKING` block
-below. `uvicorn qknee.api.server:app` reaches "Application startup
+below. `uvicorn extras.api.server:app` reaches "Application startup
 complete" without importing any of them; the first `/predict`, `/explain`,
 or `/report` request pays their one-time import + model-load cost instead,
 which is what keeps a cold boot under Render's free-tier 512MB ceiling.
@@ -72,10 +72,10 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from qknee.api.auth import INFERENCE_ROLES, UserResponse, require_role
-from qknee.api.auth import limiter as auth_limiter
-from qknee.api.auth import router as auth_router
-from qknee.api.auth import user_store
+from extras.api.auth import INFERENCE_ROLES, UserResponse, require_role
+from extras.api.auth import limiter as auth_limiter
+from extras.api.auth import router as auth_router
+from extras.api.auth import user_store
 from qknee.config.loader import load_config, redact_connection_string
 from qknee.config.logging_config import get_logger, setup_logging
 from qknee.observability import provenance as provenance_module
@@ -90,7 +90,7 @@ from qknee.observability import provenance as provenance_module
 # blows Render's free-tier 512MB ceiling well before any real request
 # arrives. Every one of them is deferred to inside the function/method that
 # actually needs it (`get_backend()` below for the ML stack; the `/report`
-# handler for reportlab), so `uvicorn qknee.api.server:app` reaches
+# handler for reportlab), so `uvicorn extras.api.server:app` reaches
 # "Application startup complete" having imported none of them — see
 # `get_backend()`'s docstring for the lazy-singleton that triggers the
 # import on first `/predict`/`/explain` request instead.
@@ -1210,7 +1210,7 @@ app.include_router(auth_router)
 # import time. `get_backend()` below builds (and caches) the one
 # process-wide instance on the FIRST call, which only ever happens from
 # inside `/predict`/`/explain`/`/report` — never from `/health`, and never
-# from simply importing this module — so `uvicorn qknee.api.server:app`
+# from simply importing this module — so `uvicorn extras.api.server:app`
 # reaches "Application startup complete" having paid none of that cost.
 BackendType = Any  # QKneeBackend | ProxyBackend | CachedFallbackBackend — see get_backend()
 backend: Optional[BackendType] = None
@@ -1799,8 +1799,8 @@ if __name__ == "__main__":
     # subprocess that re-imports this module in a child process — harmless
     # for local dev, but an unnecessary extra failure mode in production
     # (and the actual Render/Docker deployment invokes the `uvicorn` CLI
-    # directly against `qknee.api.server:app`, never `python
-    # qknee/api/server.py`, so this block is a defense-in-depth fallback
+    # directly against `extras.api.server:app`, never `python
+    # extras/api/server.py`, so this block is a defense-in-depth fallback
     # for any start command that does call this file directly).
     port = int(os.getenv("PORT", 10000))
-    uvicorn.run("qknee.api.server:app", host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("extras.api.server:app", host="0.0.0.0", port=port, log_level="info")

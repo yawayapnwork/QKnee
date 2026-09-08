@@ -16,8 +16,14 @@
 #   - Shortens healthcheck intervals so `docker compose up` reflects
 #     container readiness faster during iterative dev.
 #   - Points MLflow at a local, host-visible SQLite/artifact directory
-#     (`./mlflow-data`) instead of the production named volume, so a
-#     developer can poke at run data directly on disk.
+#     (repo-root `mlflow-data/`) instead of the production named volume,
+#     so a developer can poke at run data directly on disk.
+#
+# All bind-mount paths below are relative to the REPO ROOT (`../../...`),
+# not this file's own directory — `docker compose` resolves relative
+# volume host paths against the compose file's location, and this file
+# lives in `extras/deployment/`, two levels below the repo root that
+# `qknee/`, `extras/`, `scripts/`, and `mlflow-data/` actually live in.
 #
 # Usage:
 #   docker compose up --build                 # base + this override (default)
@@ -27,7 +33,7 @@ services:
   api:
     command:
       - "uvicorn"
-      - "qknee.api.server:app"
+      - "extras.api.server:app"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -35,9 +41,12 @@ services:
       - "--reload"
       - "--reload-dir"
       - "/app/qknee"
+      - "--reload-dir"
+      - "/app/extras"
     volumes:
-      - ./qknee:/app/qknee
-      - ./scripts:/app/scripts
+      - ../../qknee:/app/qknee
+      - ../../extras:/app/extras
+      - ../../scripts:/app/scripts
     environment:
       - LOG_LEVEL=DEBUG
     healthcheck:
@@ -55,7 +64,7 @@ services:
       - "--server.address=0.0.0.0"
       - "--server.runOnSave=true"
     volumes:
-      - ./qknee:/app/qknee
+      - ../../qknee:/app/qknee
     healthcheck:
       interval: 10s
       timeout: 3s
@@ -64,4 +73,4 @@ services:
 
   mlflow:
     volumes:
-      - ./mlflow-data:/mlflow
+      - ../../mlflow-data:/mlflow

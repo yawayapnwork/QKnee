@@ -22,7 +22,7 @@ User store:
     NOT in `qknee/models/user.py` (even though that's the more obvious
     location): `qknee/models/__init__.py` eagerly imports
     `qknee.models.vqc_data_reuploading`, which imports torch/pennylane at
-    module-import time. `qknee/api/server.py` goes to considerable
+    module-import time. `extras/api/server.py` goes to considerable
     documented lengths (see its own module docstring and `get_backend()`)
     to keep torch/pennylane out of the API's cold-start/import path, so a
     free-tier host's boot stays fast and under its memory ceiling. Adding

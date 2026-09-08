@@ -5,6 +5,6 @@
   "devCommand": "next dev",
   "installCommand": "npm install",
   "env": {
-    "NEXT_PUBLIC_API_URL": "https://qknee.onrender.com"
+    "NEXT_PUBLIC_API_URL": "https://qknee-api.onrender.com"
   }
 }

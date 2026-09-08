@@ -4,7 +4,7 @@
 # from a `requirements.txt` directly into the function's deployment
 # artifact — there is no lazy-install step at request time, so a *runtime*
 # `try/except ImportError` around torch/pennylane/etc (see
-# qknee/api/server.py) does nothing to shrink the bundle; only never
+# extras/api/server.py) does nothing to shrink the bundle; only never
 # listing those packages in the file the builder actually installs from
 # does. That is what blew through Vercel's 500MB per-function limit here
 # (torch + torchvision + pennylane + SimpleITK + nibabel alone run into
@@ -15,12 +15,14 @@
 # `requirements.txt` and `Dockerfile`), and must keep meaning "everything
 # `qknee.models`/`qknee.data`/`qknee.xai` need" for that target. Vercel's
 # builder resolves the nearest `requirements.txt` to the entrypoint file
-# declared in `vercel.json` (`qknee/api/server.py`) — so the actual file it
-# installs from is `qknee/api/requirements.txt`, which mirrors this one
-# exactly. Keep both in sync; this root copy exists as the documented,
-# easy-to-find source of truth for what "lightweight" means here.
+# declared in `extras/deployment/vercel.json` (`extras/api/server.py`) —
+# so the actual file it installs from is `extras/api/requirements.txt`,
+# which mirrors this one exactly. Keep both in sync; this file (in
+# `extras/deployment/`, alongside `vercel.json`/`render.yaml`/`Dockerfile`)
+# exists as the documented, easy-to-find source of truth for what
+# "lightweight" means here.
 #
-# On Vercel, `qknee/api/server.py` runs as a thin router/mock/proxy layer
+# On Vercel, `extras/api/server.py` runs as a thin router/mock/proxy layer
 # only: `/health` and auth endpoints work locally; `/predict`, `/explain`,
 # and `/report` either proxy to the full Render backend (`$BACKEND_API_URL`)
 # or serve deterministic responses from the precomputed inference cache

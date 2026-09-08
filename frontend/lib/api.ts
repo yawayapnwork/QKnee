@@ -6,7 +6,12 @@ import type {
   Token,
 } from "./types";
 
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "https://qknee.onrender.com").replace(/\/$/, "");
+// AUDIT.md P1 #9: matches extras/deployment/render.yaml's `name: qknee-api`
+// (Render derives the service URL from that field as `<name>.onrender.com`)
+// -- the old default here (`qknee.onrender.com`) named a Render service
+// that render.yaml never actually configures. Override via
+// $NEXT_PUBLIC_API_URL (see frontend/vercel.json) for any other deployment.
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "https://qknee-api.onrender.com").replace(/\/$/, "");
 
 export class ApiError extends Error {
   status: number;

@@ -83,10 +83,33 @@ entirely). Before running `extras/api/server.py` (directly, via
    leaves `QKNEE_JWT_SECRET_KEY` as `sync: false` (must be entered manually
    in the Render dashboard — Render never auto-populates or defaults it).
 
-See `qknee.api.auth.resolve_jwt_secret`'s docstring for the exact
+See `extras.api.auth.resolve_jwt_secret`'s docstring for the exact
 precedence/validation rules (minimum length, rejected placeholder values,
 the two-opt-in local-dev escape hatch), and `extras/tests/test_jwt_security.py`
 for the regression tests covering every branch of that logic.
+
+## Deployment targets (AUDIT.md P1 #9)
+
+This directory's own multi-service deploy config previously referenced the
+pre-quarantine `qknee/api/...` module path and a `requirements.txt` that
+doesn't contain FastAPI — both bugs are fixed (see
+`extras/tests/test_deployment_config.py` for the regression tests), but
+**only one deployment target is actually exercised by this project's CI/
+this repo's own test suite: Streamlit Community Cloud / Hugging Face
+Spaces**, via the repo-root `streamlit_app.py` (`scripts/verify_deployment.py`
+is its pre-deploy sanity check). Everything below this line is quarantined,
+exploratory config that has been made internally consistent and import-
+clean, but **has not been deployed/exercised against a live Render/Vercel
+account as part of this work** — do not represent it as "verified working
+in production" without actually deploying it first.
+
+| Target | Entrypoint | Status |
+|---|---|---|
+| Streamlit (Community Cloud / HF Spaces) | `streamlit_app.py` -> `qknee.ui.dashboard.main` | **Supported, judged PRD scope.** Exercised by `scripts/verify_deployment.py`. |
+| Render (`extras/deployment/render.yaml`) | `uvicorn extras.api.server:app` | Quarantined/exploratory. Config now points at the real module, installs both requirement files, and `extras/tests/test_deployment_config.py` proves the app imports cleanly and `/health` is real — but this blueprint has not itself been deployed to a live Render account here. |
+| Vercel API (`extras/deployment/vercel.json`) | `extras/api/server.py` (thin proxy/cache-fallback; see `requirements-vercel.txt`) | Quarantined/exploratory, same caveat as Render. |
+| Vercel frontend (`frontend/vercel.json`) | `next build` / `next start` | Quarantined/exploratory (see AUDIT.md H1 — `frontend/` isn't referenced by either README's project structure). `NEXT_PUBLIC_API_URL` now matches `render.yaml`'s actual service name (`qknee-api` -> `https://qknee-api.onrender.com`). |
+| Docker Compose (`extras/deployment/docker-compose.yml`) | `uvicorn extras.api.server:app` (api) + `streamlit run qknee/ui/dashboard.py` (ui) | Quarantined/exploratory, local-only. `docker compose config` (run from `extras/deployment/`) confirms the merged config is valid and every `build.context`/bind-mount path resolves to a real repo-root directory (this surfaced and fixed a second, previously-undiscovered bug: `context: .` and every `volumes:` entry resolved relative to `extras/deployment/` itself, not the repo root the Dockerfile/`.dockerignore` assume — now `../..`-relative). `pip install --dry-run` on the combined requirements files shows no conflicts, and `python -c "import extras.api.server"` imports cleanly. The image itself was not built and run end-to-end (no Docker daemon available in this environment). |
 
 ## What was requested but deliberately NOT moved (see PR discussion)
 
