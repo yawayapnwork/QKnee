@@ -1,0 +1,43 @@
+[{"stream_name":"stderr","time":5.969985644,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":5.970073234,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":5.970077844,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":5.970080384,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":6.511496052,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":6.5115335519999995,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":6.511538752,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":6.511542742,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":8.584161474,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":8.584192904,"data":"  File \"\u003cstring\u003e\", line 1, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":8.584198104,"data":"  File \"/usr/local/lib/python3.12/dist-packages/papermill/execute.py\", line 131, in execute_notebook\n"}
+,{"stream_name":"stderr","time":8.584203884,"data":"    raise_for_execution_errors(nb, output_path)\n"}
+,{"stream_name":"stderr","time":8.584215574,"data":"  File \"/usr/local/lib/python3.12/dist-packages/papermill/execute.py\", line 251, in raise_for_execution_errors\n"}
+,{"stream_name":"stderr","time":8.584420684,"data":"    raise error\n"}
+,{"stream_name":"stderr","time":8.584542184,"data":"papermill.exceptions.PapermillExecutionError: \n"}
+,{"stream_name":"stderr","time":8.584568064,"data":"---------------------------------------------------------------------------\n"}
+,{"stream_name":"stderr","time":8.584572254,"data":"Exception encountered at \"In [2]\":\n"}
+,{"stream_name":"stderr","time":8.584575434,"data":"---------------------------------------------------------------------------\n"}
+,{"stream_name":"stderr","time":8.584579444,"data":"FileNotFoundError                         Traceback (most recent call last)\n"}
+,{"stream_name":"stderr","time":8.584583224,"data":"/tmp/ipykernel_16/1125853706.py in \u003ccell line: 0\u003e()\n"}
+,{"stream_name":"stderr","time":8.584587674,"data":"     29 \n"}
+,{"stream_name":"stderr","time":8.584591224,"data":"     30 \n"}
+,{"stream_name":"stderr","time":8.584594884,"data":"---\u003e 31 COMPETITION_ROOT = find_competition_root(INPUT_ROOT)\n"}
+,{"stream_name":"stderr","time":8.584598934,"data":"     32 print(f\"competition data: {COMPETITION_ROOT}\")\n"}
+,{"stream_name":"stderr","time":8.584602354,"data":"\n"}
+,{"stream_name":"stderr","time":8.584633234,"data":"/tmp/ipykernel_16/1125853706.py in find_competition_root(input_root)\n"}
+,{"stream_name":"stderr","time":8.584637724,"data":"     22                 if has_data(nested):\n"}
+,{"stream_name":"stderr","time":8.584641374,"data":"     23                     return nested\n"}
+,{"stream_name":"stderr","time":8.584644604,"data":"---\u003e 24     raise FileNotFoundError(\n"}
+,{"stream_name":"stderr","time":8.584647974,"data":"     25         f\"no directory under {input_root} (including one level under any \"\n"}
+,{"stream_name":"stderr","time":8.584651414,"data":"     26         \"competitions/ subfolder) has both train.csv and train_series/ — \"\n"}
+,{"stream_name":"stderr","time":8.584655394,"data":"\n"}
+,{"stream_name":"stderr","time":8.584673224,"data":"FileNotFoundError: no directory under /kaggle/input (including one level under any competitions/ subfolder) has both train.csv and train_series/ — did you attach the rsna-knee-abnormality-detection competition data?\n"}
+,{"stream_name":"stderr","time":8.584678954,"data":"\n"}
+,{"stream_name":"stderr","time":10.705865666,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":10.705911216,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":10.848813032,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":10.848859292,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":11.466543228,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to notebook\n"}
+,{"stream_name":"stderr","time":11.722190602,"data":"[NbConvertApp] Writing 66919 bytes to __notebook__.ipynb\n"}
+,{"stream_name":"stderr","time":14.074644859,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to html\n"}
+,{"stream_name":"stderr","time":14.798420692,"data":"[NbConvertApp] Writing 371401 bytes to __results__.html\n"}
+]
