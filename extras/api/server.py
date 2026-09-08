@@ -445,9 +445,10 @@ class PredictionResponse(BaseModel):
         description="Unified prediction-provenance category -- one of 'live', 'precomputed_demo', "
                     "'mock_fallback', 'cached', 'proxy'. See qknee.observability.provenance.classify -- this is "
                     "the single authoritative signal a caller should badge/gate UI behavior on, since `backend` "
-                    "(above) is a free-form legacy tag kept only for backwards compatibility. AUDIT.md P1 #5/#7: "
-                    "a real forward pass through untrained/randomly-initialized weights is reported here as "
-                    "'mock_fallback', never as 'live', even though `backend` still says 'live' for that case.",
+                    "(above) is a free-form legacy tag kept only for backwards compatibility. AUDIT.md P1 #5/#6/#7: "
+                    "QKneeBackend refuses to run a real forward pass through untrained/randomly-initialized "
+                    "weights at all -- when the primary VQC checkpoint isn't loaded, `backend` itself is 'mock' "
+                    "(never 'live'), so this never silently claims LIVE provenance for a random-weight result.",
     )
     provenance_label: str = Field(
         ..., description="Human-readable label for `provenance` (e.g. 'LIVE', 'MOCK/FALLBACK') -- the exact "
@@ -503,6 +504,17 @@ class HealthResponse(BaseModel):
         None,
         description="Most recent `scripts/run_benchmark.py` measurement for the VQC head "
                     "(latency_ms_per_sample, roc_auc), or null if no benchmark has been run yet.",
+    )
+    model_status: Dict[str, str] = Field(
+        default_factory=dict,
+        description="AUDIT.md P1 #6: per-head checkpoint status -- 'available' | 'unavailable' -- for "
+                    "'primary' (the single unified VQC `/predict` actually serves, `config.paths.model_checkpoint`) "
+                    "and the Streamlit dashboard's separate 'acl'/'meniscus'/'mcl' triad heads. 'mcl' is always "
+                    "'unavailable' -- no checkpoint path is configured for it; it is a permanent research "
+                    "placeholder, not a temporarily-missing artifact (AUDIT.md B3). This is a cheap, "
+                    "existence-only check (see qknee.observability.model_health.quick_status) -- 'available' here "
+                    "means a checkpoint FILE is present, not that it has been architecture-validated; "
+                    "`/predict`'s own `model_source` field is the fully-validated, per-response signal.",
     )
 
 
@@ -770,7 +782,17 @@ class QKneeBackend:
         # perf_counter()'s float-seconds precision starts rounding away
         # real signal; the nanosecond counter doesn't.
         t0_ns = time.perf_counter_ns()
-        if self.backend_ready:
+        # AUDIT.md P1 #6: `self.backend_ready` only means "PipelineRunner
+        # constructed successfully" (ResNet18 + a fitted PCA artifact) —
+        # it says nothing about whether the VQC classifier that actually
+        # produces `risk_score` has trained weights. Gating on
+        # `vqc_checkpoint_loaded` too means a missing/invalid VQC
+        # checkpoint routes to the SAME honest, clearly-labeled
+        # `_predict_mock` path a missing PCA artifact already does, rather
+        # than silently running a real forward pass through randomly-
+        # initialized weights and only relabeling the result afterward.
+        live_ready = self.backend_ready and bool(getattr(self.runner, "vqc_checkpoint_loaded", False))
+        if live_ready:
             parts = self._predict_live(raw_array)
             backend = "live"
         else:
@@ -1273,6 +1295,23 @@ def _artifact_availability() -> Dict[str, bool]:
         return {}
 
 
+def _model_status() -> Dict[str, str]:
+    """AUDIT.md P1 #6: cheap, existence-only per-head checkpoint status for
+    `/health` — see `qknee.observability.model_health.quick_status`'s
+    docstring for why this deliberately does NOT do full torch-based
+    architecture validation (that would force a torch import on every
+    health probe, defeating this endpoint's fast-cold-start design).
+    Wrapped so a misconfigured `config.paths` entry degrades this one
+    field to empty rather than 500ing the whole health probe."""
+    try:
+        from qknee.observability import model_health
+
+        return model_health.quick_status(_config)
+    except Exception as exc:  # noqa: BLE001 - a health probe must never itself 500
+        logger.warning("Model status check failed: %s", exc)
+        return {}
+
+
 def _quantum_simulator_status() -> Dict[str, Any]:
     """Verifies PennyLane's NISQ simulator is actually importable and can
     stand up a `default.qubit` device at the configured qubit count —
@@ -1507,6 +1546,7 @@ def health() -> HealthResponse:
     artifacts = _artifact_availability()
     quantum_simulator = _quantum_simulator_status()
     latency_benchmark = _latency_benchmark_status()
+    model_status = _model_status()
 
     if backend is None:
         return HealthResponse(
@@ -1519,6 +1559,7 @@ def health() -> HealthResponse:
             artifacts=artifacts,
             quantum_simulator=quantum_simulator,
             latency_benchmark=latency_benchmark,
+            model_status=model_status,
         )
     return HealthResponse(
         status="ok",
@@ -1530,6 +1571,7 @@ def health() -> HealthResponse:
         artifacts=artifacts,
         quantum_simulator=quantum_simulator,
         latency_benchmark=latency_benchmark,
+        model_status=model_status,
     )
 
 

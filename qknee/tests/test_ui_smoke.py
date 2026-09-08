@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
 pytest.importorskip("streamlit")
 
@@ -289,6 +290,38 @@ class TestDashboardProvenance:
         )
         assert info.provenance == "live"
         assert info.provenance_label == "LIVE"
+
+    def test_run_live_inference_never_scores_a_head_with_no_trained_checkpoint(
+        self, pipeline_runner, dummy_slice_2d: np.ndarray,
+    ):
+        """AUDIT.md P1 #6's core fix: `run_live_inference` must not present
+        a numeric risk score for any head `checkpoint_status` marks as
+        `False` -- MCL here stands in for "permanently untrained", ACL for
+        "has a checkpoint", meniscus for "checkpoint missing on this
+        checkout". A random VQCClassifier is still passed in for MCL/
+        meniscus (mirroring `load_backend()`'s real construction, which
+        always builds all three heads regardless of checkpoint
+        availability) -- the gating must come entirely from
+        `checkpoint_status`, never from whether the head object itself
+        happens to be trained."""
+        from qknee.models.vqc import VQCClassifier
+
+        torch.manual_seed(0)
+        acl_model = VQCClassifier(n_qubits=4, n_layers=3)
+        mcl_model = VQCClassifier(n_qubits=4, n_layers=3)
+        meniscus_model = VQCClassifier(n_qubits=4, n_layers=3)
+        for model in (acl_model, mcl_model, meniscus_model):
+            model.eval()
+
+        checkpoint_status = {"acl": True, "mcl": False, "meniscus": False}
+        result = dashboard.run_live_inference(
+            dummy_slice_2d, pipeline_runner, acl_model, mcl_model, meniscus_model, checkpoint_status,
+        )
+
+        assert result.acl_risk is not None
+        assert result.mcl_risk is None
+        assert result.meniscus_risk is None
+        assert result.checkpoint_status == checkpoint_status
 
     def test_load_backend_return_shape_includes_checkpoint_status(self):
         """`load_backend()` must return a 5th element (`checkpoint_status`),

@@ -451,6 +451,7 @@ def run_live_inference(
     from qknee.xai.gradcam import overlay_heatmap
 
     runner, acl_model, mcl_model, meniscus_model = _runner, _acl_model, _mcl_model, _meniscus_model
+    checkpoint_status = checkpoint_status or {}
 
     t0 = time.perf_counter()
     batch = runner.ingest(slice_2d)
@@ -458,9 +459,17 @@ def run_live_inference(
     quantum_angles = runner.reduce_to_quantum_angles(features)
     t1 = time.perf_counter()
 
-    acl_score = runner.classify(quantum_angles, vqc=acl_model)
-    mcl_score = runner.classify(quantum_angles, vqc=mcl_model)
-    meniscus_score = runner.classify(quantum_angles, vqc=meniscus_model)
+    # AUDIT.md P1 #6: never present a numeric risk score computed from a
+    # head with no trained checkpoint as if it were a real prediction — a
+    # head without one (permanently for MCL, or ACL/meniscus on a checkout
+    # missing that specific artifact) gets `None` here, which
+    # `render_risk_gauge` renders as an explicit "UNAVAILABLE" badge
+    # instead of a plausible-looking number.
+    acl_score = runner.classify(quantum_angles, vqc=acl_model) if checkpoint_status.get("acl") else None
+    mcl_score = runner.classify(quantum_angles, vqc=mcl_model) if checkpoint_status.get("mcl") else None
+    meniscus_score = (
+        runner.classify(quantum_angles, vqc=meniscus_model) if checkpoint_status.get("meniscus") else None
+    )
     t2 = time.perf_counter()
 
     pauli_z_expectations = get_pauli_z_expectations(acl_model, quantum_angles)
@@ -727,16 +736,51 @@ def render_provenance_badge(result: InferenceResult) -> None:
         st.error("This result did not come from a real inference call — no score above is clinically meaningful.")
 
 
-def render_risk_gauge(label: str, value: Optional[float], checkpoint_loaded: Optional[bool] = None) -> None:
-    """`checkpoint_loaded`: `True`/`False` when this head's own checkpoint
-    status is known (live backend only — see `InferenceResult.checkpoint_status`),
-    `None` for a backend where that's not applicable (mock/api). `False`
-    renders an unmistakable "MODEL FALLBACK" tag next to the gauge — this is
-    what makes AUDIT.md B3 (MCL always random) and C4b (a missing ACL/
-    meniscus checkpoint silently degrading the score) visible in the UI
-    instead of only a `logger.warning`."""
+_MODEL_STATUS_BADGE_CSS_CLASS = {"available": "low", "unavailable": "neutral", "unknown": "moderate"}
+
+
+def render_model_health_sidebar() -> None:
+    """AUDIT.md P1 #6: "The application should expose something like
+    `model_status: {acl: available, meniscus: available, mcl:
+    unavailable}`" — this is that surface for the Streamlit dashboard.
+    Uses `qknee.observability.model_health.full_status`, not the cheap
+    `quick_status` `/health` uses, since torch is already resident in this
+    process by the time the sidebar renders (Streamlit has already
+    imported it via `load_backend()`), so the fuller architecture-
+    validated + checkpoint-identity report costs nothing extra here."""
+    from qknee.observability import model_health
+
+    st.sidebar.markdown("### Model Health")
+    try:
+        status = model_health.full_status(_config)
+    except Exception as exc:  # noqa: BLE001 - a sidebar widget must never crash the whole app
+        st.sidebar.caption(f"Model health check failed: {exc}")
+        return
+
+    labels = {"primary": "Primary (API)", "acl": "ACL", "meniscus": "Meniscus", "mcl": "MCL"}
+    for key, info in status.items():
+        css_class = _MODEL_STATUS_BADGE_CSS_CLASS.get(info.status, "neutral")
+        identity = f" · checkpoint `{info.checkpoint_id}`" if info.checkpoint_id else ""
+        st.sidebar.markdown(
+            f'<span class="qknee-badge qknee-badge-{css_class}">{info.status.upper()}</span> '
+            f"**{labels[key]}**{identity}",
+            unsafe_allow_html=True,
+        )
+        if info.reason:
+            st.sidebar.caption(info.reason)
+
+
+def render_risk_gauge(label: str, value: Optional[float], unavailable_reason: Optional[str] = None) -> None:
+    """AUDIT.md P1 #6: `value` must already be `None` for any head with no
+    trained checkpoint (see `run_live_inference`'s `checkpoint_status`
+    gating) — this function never itself decides to hide/show a score, it
+    only renders whatever it's given. `unavailable_reason` customizes the
+    "N/A" caption so a viewer can tell "MCL is a permanent research
+    placeholder" apart from "ACL/meniscus checkpoint missing on this
+    checkout" apart from "unavailable in API mode", instead of one
+    generic message for every reason a score might be missing."""
     if value is None:
-        st.metric(label=f"{label} Tear Risk", value="N/A", delta="unavailable in API mode")
+        st.metric(label=f"{label} Tear Risk", value="N/A", delta=unavailable_reason or "unavailable in API mode")
         st.markdown('<span class="qknee-badge qknee-badge-neutral">UNAVAILABLE</span>', unsafe_allow_html=True)
         st.progress(0.0)
         return
@@ -744,12 +788,6 @@ def render_risk_gauge(label: str, value: Optional[float], checkpoint_loaded: Opt
     _, tier = theme.risk_tier(value)
     st.metric(label=f"{label} Tear Risk", value=f"{value * 100:.1f}%", delta=tier)
     st.markdown(theme.risk_badge_html(label, value), unsafe_allow_html=True)
-    if checkpoint_loaded is False:
-        st.markdown(
-            f'<span class="qknee-badge qknee-badge-moderate">'
-            f'{provenance_module.MODEL_SOURCE_LABELS["random_fallback"]}</span>',
-            unsafe_allow_html=True,
-        )
     st.markdown(f'<div class="qknee-ci">{theme.format_confidence_interval(value)}</div>', unsafe_allow_html=True)
     st.progress(min(max(value, 0.0), 1.0))
 
@@ -1336,6 +1374,8 @@ def render_diagnostic_tab() -> None:
     use_api = bool(api_url) and api_is_reachable(api_url)
     mode = "api" if use_api else ("live" if backend_ready else "mock")
     render_quantum_status(mode, backend_ready, api_url)
+    if backend_ready:
+        render_model_health_sidebar()
 
     # The NISQ Acceleration Cache / Cached Case Replay toggles serve
     # static, precomputed data — no live model/QNode execution — while
@@ -1460,9 +1500,23 @@ def render_diagnostic_tab() -> None:
         st.markdown("#### Diagnostic Triage Card")
         render_provenance_badge(result)
         head_checkpoint_status = result.checkpoint_status or {}
-        render_risk_gauge("ACL", result.acl_risk, head_checkpoint_status.get("acl"))
-        render_risk_gauge("MCL", result.mcl_risk, head_checkpoint_status.get("mcl"))
-        render_risk_gauge("Medial Meniscus", result.meniscus_risk, head_checkpoint_status.get("meniscus"))
+        render_risk_gauge(
+            "ACL", result.acl_risk,
+            unavailable_reason=None if head_checkpoint_status.get("acl", True) else "no trained checkpoint found",
+        )
+        render_risk_gauge(
+            "MCL", result.mcl_risk,
+            unavailable_reason=(
+                None if head_checkpoint_status.get("mcl", True)
+                else "research placeholder — never trained (AUDIT.md B3)"
+            ),
+        )
+        render_risk_gauge(
+            "Medial Meniscus", result.meniscus_risk,
+            unavailable_reason=(
+                None if head_checkpoint_status.get("meniscus", True) else "no trained checkpoint found"
+            ),
+        )
         st.markdown("---")
         st.markdown(f"##### {theme.icon('circuit', size=15)} Quantum Circuit Diagnostics", unsafe_allow_html=True)
         render_quantum_attribution_panel(result.pauli_z_expectations)

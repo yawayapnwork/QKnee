@@ -162,6 +162,19 @@ class TestHealthEndpoint:
         assert payload["backend_ready"] is False
         assert payload["detail"] is not None
 
+    def test_health_reports_model_status_for_every_head(self, live_client: TestClient):
+        """AUDIT.md P1 #6: /health must expose per-head checkpoint
+        availability -- 'primary' (what /predict actually serves) plus the
+        Streamlit triad's acl/meniscus/mcl, with mcl always 'unavailable'."""
+        response = live_client.get("/health")
+        assert response.status_code == 200
+        model_status = response.json()["model_status"]
+
+        assert set(model_status.keys()) == {"primary", "acl", "meniscus", "mcl"}
+        assert model_status["mcl"] == "unavailable"
+        for status in model_status.values():
+            assert status in {"available", "unavailable"}
+
 
 class TestPredictEndpointPayload:
     def test_predict_with_npy_slice_live(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
@@ -350,14 +363,17 @@ class TestPredictProvenanceContract:
         assert payload["model_source"] is None
         assert payload["quantum_execution"] == "unavailable"
 
-    def test_live_backend_with_untrained_checkpoint_is_downgraded_to_mock_fallback(
+    def test_live_backend_with_untrained_checkpoint_never_runs_the_live_path_at_all(
         self, pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         dummy_slice_2d: np.ndarray,
     ):
-        """AUDIT.md C4b's exact regression: a real forward pass through
-        randomly-initialized weights (no trained checkpoint present) must
-        never report LIVE provenance, even though `backend` -- the legacy
-        field -- still literally says 'live'."""
+        """AUDIT.md P1 #6's exact regression (supersedes the old C4b
+        after-the-fact-relabeling fix): a missing/untrained VQC checkpoint
+        must stop `_predict_live` from ever running at all -- the response
+        must come from the same honest, clearly-labeled `_predict_mock`
+        path a missing PCA artifact already uses, not a real forward pass
+        through randomly-initialized weights that just gets relabeled
+        after the fact."""
         live_backend = server_module.QKneeBackend(pca_artifact_path=pca_artifact_path)
         assert live_backend.backend_ready
         # Force the "no trained checkpoint was found" branch this test is
@@ -374,10 +390,10 @@ class TestPredictProvenanceContract:
         assert response.status_code == 200
         payload = response.json()
 
-        assert payload["backend"] == "live"  # legacy field unchanged
-        assert payload["provenance"] == "mock_fallback"  # authoritative signal, downgraded
+        assert payload["backend"] == "mock"  # never "live" -- the real forward pass never ran
+        assert payload["provenance"] == "mock_fallback"
         assert payload["provenance_label"] == "MOCK/FALLBACK"
-        assert payload["model_source"] == "random_fallback"
+        assert payload["model_source"] is None  # no model ran at all, not "random_fallback"
 
     def test_cache_fallback_backend_reports_precomputed_demo_provenance(self, tmp_path: Path):
         cache_path = tmp_path / "precomputed_cache.json"

@@ -145,6 +145,26 @@ python -m qknee.models.pca_reducer     # fits on demo data, saves to qknee/artif
 
 Swap in real ResNet18 embeddings from your own MRI corpus for a production fit — see `QuantumDimReducer.fit()`. The artifact path is controlled by `qknee/config/config.yaml`'s `paths.pca_artifact` (overridable via `$PCA_ARTIFACT_PATH`).
 
+### 3b. Model checkpoints — exact requirements, and what happens when one is missing
+
+Every VQC classifier this project can serve a prediction from is a separate, independently-optional `.pt` checkpoint. **None of these are ever silently invented or trained by this app on your behalf** (`scripts/train.py` is the only thing that produces one) — a missing checkpoint always changes what the app tells you, never what it pretends to have:
+
+| Head | Config path (`qknee/config/config.yaml`) | Env var override | Used by |
+|---|---|---|---|
+| Primary (unified) | `paths.model_checkpoint` → `qknee/artifacts/qknee_model.pt`, falling back to `qknee/artifacts/checkpoints/best_checkpoint.pt` | `MODEL_CHECKPOINT_PATH` | The FastAPI `/predict`/`/explain`/`/report` endpoints (`extras/api/`) — one risk score, no separate ACL/MCL/meniscus heads. |
+| ACL | `paths.acl_checkpoint` → `qknee/artifacts/acl_vqc.pt` | `ACL_CHECKPOINT_PATH` | Streamlit dashboard's ACL gauge. |
+| Meniscus | `paths.meniscus_checkpoint` → `qknee/artifacts/meniscus_vqc.pt` | `MENISCUS_CHECKPOINT_PATH` | Streamlit dashboard's Meniscus gauge. |
+| MCL | *(none — intentionally unconfigured)* | — | Never trained. This project has never had a real MCL checkpoint; there is no `paths.mcl_checkpoint` key to eventually fill in. It is a permanent research placeholder, not a temporarily-missing artifact. |
+
+A checkpoint is a dict saved by `qknee.models.qknee_model.save_checkpoint`/`qknee.models.pipeline`'s training path, and must declare `n_qubits`/`n_layers` matching `qknee/config/config.yaml`'s `quantum.n_qubits`/`quantum.n_layers` (default 4/3) plus a `vqc_state_dict` (or a `model_state_dict` with `vqc.`-prefixed keys) — see `qknee.observability.model_health.inspect_vqc_checkpoint` for the exact validation this project runs against every checkpoint before trusting it.
+
+**If a checkpoint is missing or fails validation (AUDIT.md P1 #6), this project never silently substitutes randomly-initialized weights into a result presented as a real prediction:**
+
+- The FastAPI backend's `/predict` refuses to run its live inference path at all when the primary checkpoint isn't loaded/valid — it serves the same honest, clearly-labeled seeded-mock response a missing PCA artifact already does (`backend: "mock"`, `provenance: "mock_fallback"`), never a real forward pass through untrained weights mislabeled as live.
+- The Streamlit dashboard shows **"UNAVAILABLE"** for any head (ACL, MCL, or Meniscus) with no valid checkpoint, with a specific reason ("no trained checkpoint found" vs. MCL's "research placeholder — never trained") — never a plausible-looking risk percentage.
+- Both surfaces expose a `model_status` report — `{"primary": "available", "acl": "available", "meniscus": "unavailable", "mcl": "unavailable"}` — from `GET /health` (FastAPI, cheap existence check) or the dashboard's sidebar "Model Health" panel (fully architecture-validated, with a checkpoint content-hash identity). See `qknee.observability.model_health`.
+- `qknee.models.pipeline.PipelineRunner` itself (used directly for offline evaluation/scripting, not the live-serving path above) still gracefully falls back to randomly-initialized weights when constructed without a checkpoint — this is intentional for `python -m qknee.models.evaluate`/test/CLI usage where "run the architecture end-to-end without a trained model" is the explicit point; it is the two live-serving surfaces above, not this lower-level class, that refuse to present that fallback as a trustworthy prediction.
+
 ### 4. Run locally
 
 ```bash
