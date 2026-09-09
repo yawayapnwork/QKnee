@@ -63,7 +63,7 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-4 animate-fade-in"
+      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-4 animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div

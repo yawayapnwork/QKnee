@@ -9,8 +9,13 @@ export function FinalCta() {
           Run a study through the full pipeline.
         </h2>
         <p className="max-w-xl text-sm leading-relaxed text-ink-muted">
-          Upload a knee MRI series and see the ResNet18 → PCA → 4-qubit VQC → Grad-CAM pipeline run end to end,
-          with the real repository evaluation results alongside every prediction.
+          Try a precomputed demo case or upload a knee MRI series, and watch the ResNet18 → PCA → 4-qubit VQC →
+          Grad-CAM pipeline run end to end with an explanation workspace for every result. The repository&apos;s
+          n=58 evaluation numbers live separately, on{" "}
+          <Link href="/methods" className="text-accent hover:underline">
+            Methods
+          </Link>
+          .
         </p>
         <Link
           href="/workstation"

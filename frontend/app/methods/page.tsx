@@ -1,4 +1,4 @@
-import { ArchitectureDiagram } from "@/components/landing/ArchitectureDiagram";
+import { ArchitectureStageGrid } from "@/components/shared/ArchitectureStages";
 import { BenchmarksTable } from "@/components/methods/BenchmarksTable";
 import { ModelStatusPanel } from "@/components/methods/ModelStatusPanel";
 import { MethodsSection } from "@/components/methods/MethodsSection";
@@ -19,7 +19,7 @@ export default function MethodsPage() {
       </p>
 
       <MethodsSection title="Architecture">
-        <ArchitectureDiagram />
+        <ArchitectureStageGrid />
         <p>
           Multi-slice volumes are mean/attention/top-k pooled per slice through the same 2D ResNet18 — this is
           slice-wise feature extraction and pooling, not 3D convolution or volumetric reconstruction. Only the

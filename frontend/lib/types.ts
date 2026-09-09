@@ -94,7 +94,19 @@ export interface PredictionResponse {
 
 export type Provenance = "live" | "precomputed_demo" | "mock_fallback" | "cached" | "proxy";
 export type ModelSource = "trained_checkpoint" | "random_fallback";
+/** The backend's own wire vocabulary for `PredictionResponse.quantum_execution` — the API only
+ * ever reports one of these two values, for a request it actually served. */
 export type QuantumExecution = "quantum_simulator" | "unavailable";
+/**
+ * App-level extension of `QuantumExecution`, used only on `ProvenanceInfo.quantumExecution` —
+ * never on the wire type above. Adds `"not_verifiable"`: real per-qubit numbers are shown (a
+ * precomputed demo case's stored `qubitExpectations`), but no live circuit execution can be
+ * attested by the frontend for *this specific result*, so it must not render with the same
+ * confident "QUANTUM SIMULATOR" badge a genuine backend-attested execution gets. The backend
+ * itself never sends this value — only `provenanceForPreset` (`lib/provenance.ts`) constructs it,
+ * for demo/preset results exclusively.
+ */
+export type AppQuantumExecution = QuantumExecution | "not_verifiable";
 
 /** App-level provenance bundle threaded onto every `DiagnosticResult` — see `lib/provenance.ts`.
  * Built exactly once per result (from a live `PredictionResponse` or explicitly for a preset/demo
@@ -105,7 +117,7 @@ export interface ProvenanceInfo {
   provenanceLabel: string;
   modelSource: ModelSource | null;
   modelSourceLabel: string | null;
-  quantumExecution: QuantumExecution;
+  quantumExecution: AppQuantumExecution;
   quantumExecutionLabel: string;
   /** False whenever this result must never be presented as an ordinary successful "LIVE" result
    * (currently: `provenance === "mock_fallback"`) — the UI must render an unmistakable, high-

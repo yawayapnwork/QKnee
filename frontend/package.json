@@ -4,11 +4,15 @@
   "private": true,
   "description": "Q-Knee Diagnostic Platform — clinical workstation frontend (Next.js) for the Q-Knee hybrid quantum-classical MRI triage API.",
   "scripts": {
+    "predev": "npm run generate:benchmarks",
     "dev": "next dev",
+    "prebuild": "npm run generate:benchmarks",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run"
+    "pretest": "npm run generate:benchmarks",
+    "test": "vitest run",
+    "generate:benchmarks": "node scripts/generate-benchmarks.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

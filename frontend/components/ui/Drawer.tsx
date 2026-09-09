@@ -49,7 +49,7 @@ export function Drawer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex bg-surface-0/85 animate-fade-in"
+      className="no-print fixed inset-0 z-50 flex bg-surface-0/85 animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div

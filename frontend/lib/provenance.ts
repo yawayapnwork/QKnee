@@ -28,6 +28,12 @@ export const MODEL_SOURCE_LABELS: Record<ModelSource, string> = {
 export const QUANTUM_EXECUTION_LABELS = {
   quantum_simulator: "QUANTUM SIMULATOR",
   unavailable: "QUANTUM TELEMETRY UNAVAILABLE",
+  // Deliberately NOT styled or worded like the two labels above anywhere it
+  // renders (see `QuantumTelemetry.tsx`) -- this is not a third execution
+  // outcome the frontend can attest to, it is an explicit admission that it
+  // can't. Never shortened to "DEMO" or similar; a viewer must not be able
+  // to mentally file it under either "ran" or "didn't run".
+  not_verifiable: "NOT INDEPENDENTLY VERIFIABLE",
 } as const;
 
 /**
@@ -55,6 +61,19 @@ export function provenanceFromPrediction(prediction: PredictionResponse): Proven
  * Builds a preset/demo case's provenance — always "precomputed_demo"
  * (AUDIT.md P1 #7 requirement 8: preset cases may remain usable for the
  * demo, but must be explicitly marked as such, never presented as "live").
+ *
+ * `quantumExecution` is "not_verifiable", never "quantum_simulator". Preset
+ * cases carry real, stored per-qubit values (`PresetCase.qubitExpectations`
+ * / `quantumTelemetryFromPreset`) -- not randomly generated -- so they are
+ * still shown, in full, by `QuantumTelemetry`. But this module has no
+ * artifact, run ID, or backend attestation proving those specific numbers
+ * came from an actual circuit execution rather than being hand-authored to
+ * look plausible, and it must not claim more than it can prove: labeling
+ * this "QUANTUM SIMULATOR" -- the exact badge a genuine, backend-attested
+ * execution gets -- would assert something this function cannot verify.
+ * "not_verifiable" is the honest middle state between "verified execution"
+ * and "no data at all". Do not invent a device, backend, circuit depth,
+ * run ID, or timestamp to make this state look more complete than it is.
  */
 export function provenanceForPreset(): ProvenanceInfo {
   return {
@@ -62,14 +81,8 @@ export function provenanceForPreset(): ProvenanceInfo {
     provenanceLabel: PROVENANCE_LABELS.precomputed_demo,
     modelSource: null,
     modelSourceLabel: null,
-    // Preset cases carry real, precomputed per-qubit values (see
-    // PresetCase.qubitExpectations / quantumTelemetryFromPreset) -- not
-    // random placeholders -- so a real circuit execution genuinely
-    // happened at some point, just not for this request. Marking this
-    // "unavailable" would contradict the non-empty telemetry the panel
-    // displays right next to this badge.
-    quantumExecution: "quantum_simulator",
-    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.quantum_simulator,
+    quantumExecution: "not_verifiable",
+    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.not_verifiable,
     isTrustworthy: true,
   };
 }

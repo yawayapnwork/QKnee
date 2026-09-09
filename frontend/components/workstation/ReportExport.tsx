@@ -2,6 +2,7 @@
 
 import { Download, Printer } from "lucide-react";
 import { Button } from "@/components/ui/Button";
+import { hasQuantumTelemetry } from "@/lib/quantum-telemetry";
 import { formatLatency, formatPercent } from "@/lib/utils";
 import type { DiagnosticResult } from "@/lib/types";
 
@@ -17,8 +18,11 @@ import type { DiagnosticResult } from "@/lib/types";
 function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
   const timestamp = new Date().toISOString();
   const telemetry = result.quantumTelemetry;
-  const quantumAvailable = result.provenance.quantumExecution === "quantum_simulator" && telemetry.expectations.length > 0;
-  const telemetrySection = quantumAvailable
+  // Same "does data exist" question `QuantumTelemetry.tsx` asks -- a
+  // precomputed demo case's real, stored per-qubit values are still
+  // exported (never hidden), just under the honest "NOT INDEPENDENTLY
+  // VERIFIABLE" label rather than "QUANTUM SIMULATOR".
+  const telemetrySection = hasQuantumTelemetry(telemetry)
     ? `| Qubit | Expectation |\n|-------|-------------|\n${telemetry.expectations
         .map((v, i) => `| q${i} | ${v.toFixed(4)} |`)
         .join("\n")}`
@@ -30,7 +34,7 @@ function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
 **Generated:** ${timestamp}
 **Provenance:** ${result.provenance.provenanceLabel}
 **Model:** ${result.provenance.modelSourceLabel ?? "n/a"}
-**Quantum backend:** ${result.provenance.quantumExecutionLabel}
+**Quantum execution:** ${result.provenance.quantumExecutionLabel}
 
 ## Diagnostic Summary
 
@@ -64,7 +68,7 @@ function downloadFile(filename: string, content: string, mime: string) {
 
 export function ReportExport({ result, caseLabel }: { result: DiagnosticResult; caseLabel: string }) {
   return (
-    <div className="flex gap-2">
+    <div className="no-print flex gap-2">
       <Button
         variant="secondary"
         size="sm"

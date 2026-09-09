@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { StudyHeader } from "@/components/workstation/StudyHeader";
 import { CaseNav } from "@/components/workstation/CaseNav";
 import { MRIViewer } from "@/components/workstation/MRIViewer";
@@ -8,11 +9,19 @@ import { PredictionPanel } from "@/components/workstation/PredictionPanel";
 import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
 import { ExplanationPanel } from "@/components/workstation/ExplanationPanel";
 import { StatusBar } from "@/components/workstation/StatusBar";
+import { PrintReport } from "@/components/workstation/PrintReport";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { ErrorState } from "@/components/shared/ErrorState";
 import { EmptyState } from "@/components/shared/EmptyState";
-import { AuthModal } from "@/components/auth/AuthModal";
 import { Drawer } from "@/components/ui/Drawer";
+
+// Same code-split rationale as `AppShell.tsx`'s "Sign In" trigger: most
+// visits never hit the "upload without being signed in" path, so the auth
+// form's JS shouldn't be part of the workstation page's initial bundle.
+const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) => m.AuthModal), {
+  ssr: false,
+  loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
+});
 import { useAuth } from "@/lib/auth-context";
 import { ApiError, fetchHealth, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
@@ -161,7 +170,7 @@ export default function WorkstationPage() {
           width the brief calls out as a floor. Widening back up at `xl`
           keeps the more generous columns for viewports that have the
           room to spare. */}
-      <div className="grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px]">
+      <div className="no-print grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px]">
         <aside className="hidden lg:block lg:border-r lg:border-surface-3" aria-label="Case navigation">
           <CaseNav
             activeCaseId={activeCase.id}
@@ -213,7 +222,14 @@ export default function WorkstationPage() {
 
       <StatusBar result={visibleResult} />
 
-      <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+      {/* The one thing `window.print()` (see `ReportExport.tsx`) actually
+          shows -- hidden on screen, revealed only under `@media print`
+          (see `.print-only` in `app/globals.css`). Rendered only when
+          there is a real result to report; an error/empty state has
+          nothing honest to print. */}
+      {visibleResult && <PrintReport result={visibleResult} caseLabel={activeCase.label} />}
+
+      {authOpen && <AuthModal open onClose={() => setAuthOpen(false)} />}
     </div>
   );
 }

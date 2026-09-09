@@ -15,10 +15,12 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components/ui/Switch";
 import { Surface } from "@/components/ui/Surface";
+import { PipelineStepBadge } from "@/components/ui/PipelineStepBadge";
 import { ProvenanceBadge } from "@/components/workstation/ProvenanceBadge";
 import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
 import { PLANE_LABELS, sliceImageSrc, toImageSrc } from "@/lib/viewer";
 import { cn, formatLatency, formatPercent } from "@/lib/utils";
+import { GRADCAM_DISCLAIMER, LIMITATIONS } from "@/lib/explanation-copy";
 import type { DiagnosticResult } from "@/lib/types";
 
 const SEVERITY_CLASS: Record<DiagnosticResult["severity"], string> = {
@@ -107,7 +109,7 @@ export function ExplanationWorkspace({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-3 animate-fade-in sm:p-6"
+      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-3 animate-fade-in sm:p-6"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
@@ -153,9 +155,7 @@ export function ExplanationWorkspace({
               onClick={() => jumpTo(section.id)}
               className="flex shrink-0 items-center gap-1.5 rounded-sm px-2.5 py-1.5 text-2xs font-medium text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink-primary"
             >
-              <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border border-surface-4 font-mono text-[9px] text-ink-faint">
-                {section.index}
-              </span>
+              <PipelineStepBadge index={section.index} size="xs" className="text-ink-faint" />
               {section.label}
             </button>
           ))}
@@ -183,7 +183,7 @@ export function ExplanationWorkspace({
                       style={{ opacity: opacity / 100 }}
                     />
                   )}
-                  <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
+                  <div className="pointer-events-none absolute left-3 top-3 rounded-sm bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
                     <div>
                       Explained slice {numSlicesAtPlane > 0 ? gradcamSliceIndex + 1 : 0} / {numSlicesAtPlane}
                     </div>
@@ -219,17 +219,18 @@ export function ExplanationWorkspace({
 
                   <div>
                     <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Legend</p>
-                    <div
-                      className="h-2 w-full rounded-full"
-                      style={{ background: "linear-gradient(to right, #38bdf8, #facc15, #ef4444)" }}
-                      aria-hidden="true"
-                    />
-                    <div className="mt-1 flex justify-between text-2xs text-ink-faint">
-                      <span>Low attention</span>
-                      <span>High attention</span>
-                    </div>
-                    <p className="mt-1 text-2xs text-ink-faint">
-                      Relative within this slice only — not calibrated to a fixed intensity scale across cases.
+                    {/* No color gradient bar here on purpose: the overlay's
+                        actual colormap is chosen server-side, and this
+                        frontend has no metadata describing it. A drawn
+                        blue-yellow-red bar would assert a specific,
+                        calibrated color scale this app cannot verify
+                        matches the pixels above it -- exactly the kind of
+                        "looks real, isn't backed by anything" claim a
+                        hostile review is built to catch. */}
+                    <p className="text-2xs leading-relaxed text-ink-muted">
+                      Grad-CAM intensity indicates relative model attention within this visualization, not a
+                      calibrated intensity scale — this frontend does not read back the overlay&apos;s colormap from
+                      the backend.
                     </p>
                   </div>
 
@@ -247,12 +248,7 @@ export function ExplanationWorkspace({
                   <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5">
                     <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-muted">
                       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
-                      <span>
-                        This is a <strong className="text-ink-primary">model attention visualization</strong> — it
-                        shows which image regions most influenced the ResNet18 embedding, computed for one
-                        representative slice only. It is not a segmentation and does not prove a lesion exists;
-                        independent radiologist review is required.
-                      </span>
+                      <span>{GRADCAM_DISCLAIMER}</span>
                     </p>
                   </div>
                 </div>
@@ -283,12 +279,28 @@ export function ExplanationWorkspace({
             <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5 mb-4">
               <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-muted">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
-                <span>
-                  This architecture&apos;s classical readout is a linear layer + sigmoid applied directly to these
-                  four Pauli-Z expectation values — so they are, architecturally, the exact numeric inputs the risk
-                  score above was computed from. That is the extent of what this design supports claiming; no single
-                  qubit or gate is individually credited with &quot;causing&quot; the diagnosis.
-                </span>
+                {/* Branches on provenance, not just wording -- for a live
+                    result the causal claim is real (the backend's own
+                    linear+sigmoid readout runs on exactly these values);
+                    for a precomputed demo, `riskScore` and
+                    `qubitExpectations` are two independently stored
+                    constants (see `mock-data.ts`) with no code path
+                    computing one from the other, so the claim would be
+                    false, not just unproven. */}
+                {result.provenance.quantumExecution === "quantum_simulator" ? (
+                  <span>
+                    This architecture&apos;s classical readout is a linear layer + sigmoid applied directly to these
+                    four Pauli-Z expectation values — so, for this live result, they are the exact numeric inputs the
+                    risk score above was computed from. That is the extent of what this design supports claiming; no
+                    single qubit or gate is individually credited with &quot;causing&quot; the diagnosis.
+                  </span>
+                ) : (
+                  <span>
+                    Illustrative quantum outputs shown with this precomputed demo result. Their relationship to the
+                    displayed risk score is not recomputed by the frontend for this result — both values are stored
+                    with the demo case, not derived from one another live.
+                  </span>
+                )}
               </p>
             </div>
             <QuantumTelemetry telemetry={result.quantumTelemetry} provenance={result.provenance} latencyMs={result.latencyMs} />
@@ -308,22 +320,9 @@ export function ExplanationWorkspace({
 
           <Section id="limitations" refs={sectionRefs} index={5} title="Limitations" icon={AlertTriangle} last>
             <ul className="space-y-2.5 rounded-md border border-warning/30 bg-warning/10 px-4 py-3.5">
-              <LimitationItem
-                title="Small research dataset"
-                detail="Evaluated on real RSNA Knee data, n=58 studies — not large enough to establish generalization."
-              />
-              <LimitationItem
-                title="No clinical validation"
-                detail="This has not undergone clinical trials and is not a validated diagnostic tool."
-              />
-              <LimitationItem
-                title="Simulator-based quantum execution"
-                detail="The quantum circuit runs on PennyLane's default.qubit classical simulator, not physical quantum hardware."
-              />
-              <LimitationItem
-                title="Research prototype"
-                detail="Investigational output only. Findings require independent review by a licensed radiologist or orthopedic clinician."
-              />
+              {LIMITATIONS.map((item) => (
+                <LimitationItem key={item.title} title={item.title} detail={item.detail} />
+              ))}
             </ul>
           </Section>
         </div>
@@ -358,9 +357,7 @@ function Section({
       className={cn("scroll-mt-3 px-5 py-6 sm:px-6", !last && "border-b border-surface-3")}
     >
       <div className="mb-4 flex items-center gap-2">
-        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border border-surface-4 font-mono text-xs text-ink-muted">
-          {index}
-        </span>
+        <PipelineStepBadge index={index} size="md" />
         <Icon className="h-4 w-4 text-accent" aria-hidden="true" />
         <h3 className="text-sm font-semibold uppercase tracking-wide text-ink-primary">{title}</h3>
       </div>

@@ -76,6 +76,38 @@ describe("preset provenance is always explicitly marked, never disguised as live
   });
 });
 
+describe("hostile-review regression: a precomputed demo case cannot claim unverifiable quantum execution", () => {
+  // The frontend has no artifact, run ID, or backend attestation proving
+  // `PresetCase.qubitExpectations` came from an actual circuit execution
+  // for THIS result -- only that the numbers are real, stored values (see
+  // `provenanceForPreset`'s doc comment). Claiming "QUANTUM SIMULATOR" --
+  // the same badge a genuine backend-attested execution earns -- would be
+  // exactly the "unverifiable claim presented as fact" a hostile review
+  // caught live (the badge said QUANTUM SIMULATOR while "Quantum Details"
+  // simultaneously said every device/depth/execution-time field was "not
+  // reported"). This test locks the fix in from the data-model side.
+  it("provenanceForPreset never returns 'quantum_simulator'", () => {
+    const info = provenanceForPreset();
+    expect(info.quantumExecution).not.toBe("quantum_simulator");
+    expect(info.quantumExecution).toBe("not_verifiable");
+    expect(info.quantumExecutionLabel).not.toBe("QUANTUM SIMULATOR");
+    expect(info.quantumExecutionLabel).toBe("NOT INDEPENDENTLY VERIFIABLE");
+  });
+
+  it("every preset case's DiagnosticResult carries the same not-verifiable quantum execution state", () => {
+    for (const preset of PRESET_CASES) {
+      const result = mockDiagnosticResult(preset);
+      expect(result.provenance.quantumExecution).toBe("not_verifiable");
+    }
+  });
+
+  it("a live prediction's genuinely attested quantum_simulator execution is unaffected", () => {
+    const prediction = livePrediction({ quantum_execution: "quantum_simulator", quantum_execution_label: "QUANTUM SIMULATOR" });
+    const info = provenanceFromPrediction(prediction);
+    expect(info.quantumExecution).toBe("quantum_simulator");
+  });
+});
+
 describe("execution mandate rule 13: a failed live call never silently becomes a mock prediction", () => {
   it("there is no client-side constructor for a 'failed live call' provenance -- mock_fallback can only ever come from the backend's own response", async () => {
     // `provenanceForFailedLiveFallback` used to exist specifically so a

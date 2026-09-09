@@ -1,10 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const FRONTEND_ROOT = join(__dirname, "..", "..");
 const HERO = join(FRONTEND_ROOT, "components", "landing", "Hero.tsx");
-const ARCHITECTURE_DIAGRAM = join(FRONTEND_ROOT, "components", "landing", "ArchitectureDiagram.tsx");
+// `ArchitectureDiagram.tsx` (the old, second, independently-maintained
+// architecture description) is deleted -- `ArchitectureStages.tsx` is now
+// the ONE source both the landing page and `/methods` render from. See
+// `benchmark-claims.test.ts`'s "no stale duplicate" test below.
+const ARCHITECTURE_STAGES = join(FRONTEND_ROOT, "components", "shared", "ArchitectureStages.tsx");
 const BENCHMARKS_TABLE = join(FRONTEND_ROOT, "components", "methods", "BenchmarksTable.tsx");
 
 function allSourceFiles(dir: string): string[] {
@@ -101,12 +105,27 @@ describe("AUDIT.md C4a / ARCHITECTURE.md / FRONTEND_REDESIGN.md regression: no f
     expect(offenders.map((o) => o.path)).toEqual([]);
   });
 
-  it("architecture diagram describes only implemented stages, in the mandated wording", () => {
-    const source = stripComments(readFileSync(ARCHITECTURE_DIAGRAM, "utf-8"));
+  it("architecture stage grid describes only implemented stages, in the mandated wording", () => {
+    const source = stripComments(readFileSync(ARCHITECTURE_STAGES, "utf-8"));
     expect(source).toMatch(/Knee MRI/);
-    expect(source).toMatch(/Visual Feature Extraction/);
-    expect(source).toMatch(/Feature Compression/);
-    expect(source).toMatch(/Variational Quantum Classifier/);
+    expect(source).toMatch(/ResNet18 feature extraction/);
+    expect(source).toMatch(/Feature compression/);
+    expect(source).toMatch(/4-qubit VQC/);
     expect(source).not.toMatch(/3D\s+(sagittal|coronal)/i);
+  });
+
+  it("hostile-review regression: no second, independently-maintained architecture-stage description survives", () => {
+    // `ArchitectureDiagram.tsx` used to be a SECOND five-stage pipeline
+    // description, independently maintained from `ArchitectureSection.tsx`
+    // (which claimed, falsely, that the first had already been deleted).
+    // Both are gone now -- `ArchitectureStages.tsx` is the only place
+    // stage names/details are written down, and both the landing page and
+    // Methods render its `ArchitectureStageGrid` component rather than
+    // their own copy.
+    const offenders = ALL_SOURCE.filter(
+      ({ path, content }) => path !== ARCHITECTURE_STAGES && /"5\.\s*Risk score \+ Grad-CAM"/.test(content),
+    );
+    expect(offenders.map((o) => o.path)).toEqual([]);
+    expect(existsSync(join(FRONTEND_ROOT, "components", "landing", "ArchitectureDiagram.tsx"))).toBe(false);
   });
 });

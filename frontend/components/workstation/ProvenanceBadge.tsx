@@ -14,10 +14,15 @@ import type { ProvenanceInfo } from "@/lib/types";
  * `mock_fallback` could resolve to `StatusIndicator`'s `"live"` tone.
  *
  * `provenance` (LIVE / PRECOMPUTED DEMO / MOCK-FALLBACK / CACHED / PROXY)
- * and `quantumExecution` (QUANTUM SIMULATOR / UNAVAILABLE) are two
- * independent facts, not opposites -- a genuinely LIVE result normally
- * pairs with "QUANTUM SIMULATOR": a real VQC executed on a simulator
- * backend, this project's correct, expected, non-degraded state.
+ * and `quantumExecution` (QUANTUM SIMULATOR / NOT INDEPENDENTLY VERIFIABLE /
+ * QUANTUM TELEMETRY UNAVAILABLE) are two independent facts, not opposites --
+ * a genuinely LIVE result normally pairs with "QUANTUM SIMULATOR": a real
+ * VQC executed on a simulator backend, this project's correct, expected,
+ * non-degraded state. A PRECOMPUTED DEMO result pairs with "NOT
+ * INDEPENDENTLY VERIFIABLE" -- real stored per-qubit numbers are still
+ * shown, but this frontend has no artifact proving a circuit produced them
+ * for this specific result, so it must not borrow the confident
+ * "QUANTUM SIMULATOR" wording a backend-attested execution earns.
  */
 const PROVENANCE_TONE: Record<ProvenanceInfo["provenance"], { tone: StatusTone; icon: typeof Radio }> = {
   live: { tone: "live", icon: Radio },
@@ -39,7 +44,7 @@ export function ProvenanceBadge({ provenance, compact = false }: { provenance: P
       <StatusIndicator tone={tone} label={provenance.provenanceLabel} icon={icon} />
       <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-2xs text-ink-faint">
         {provenance.modelSourceLabel && <span>Model: {provenance.modelSourceLabel}</span>}
-        <span>Quantum backend: {provenance.quantumExecutionLabel}</span>
+        <span>Quantum execution: {provenance.quantumExecutionLabel}</span>
       </div>
     </div>
   );

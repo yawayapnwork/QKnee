@@ -32,3 +32,20 @@ export function quantumTelemetryFromPreset(preset: PresetCase): QuantumTelemetry
     device: null,
   };
 }
+
+/**
+ * The ONE authoritative answer to "is there quantum telemetry data to
+ * render" -- used by both `QuantumTelemetry.tsx` (the panel) and
+ * `ReportExport.tsx` (the markdown export) so they can never disagree
+ * about whether a result's per-qubit numbers should be shown. This is
+ * deliberately independent of whether the execution is verified
+ * (`provenance.quantumExecution === "quantum_simulator"`) -- a precomputed
+ * demo case has real, non-empty `expectations` and IS shown, just labeled
+ * "NOT INDEPENDENTLY VERIFIABLE" rather than "QUANTUM SIMULATOR" (see
+ * `lib/provenance.ts#provenanceForPreset`). Only a genuinely empty
+ * `expectations` array (`quantumExecution === "unavailable"`) hides the
+ * panel/table entirely.
+ */
+export function hasQuantumTelemetry(telemetry: QuantumTelemetry): boolean {
+  return telemetry.expectations.length > 0;
+}

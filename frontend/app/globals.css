@@ -147,11 +147,38 @@ body {
   }
 }
 
-/* Print: the report export's "Print / Save as PDF" action should not
-   print the app chrome (nav, sidebar, controls) -- only the analysis
-   content that was actually visible. */
+/* Print architecture (ReportExport.tsx's "Print / Save as PDF" action):
+   deliberately class-based, not tag-based -- a prior version relied on
+   `header, aside { display: none }`, which silently failed to hide most of
+   the app because the workstation's own toolbar/status-bar/button chrome
+   never lived inside those tags (a hostile review confirmed printing
+   included the Print button itself, the zoom/brightness/contrast toolbar,
+   and every slider). Every element that should never appear on paper
+   carries `.no-print` explicitly, at the component that renders it, not
+   inferred from its tag. `.print-only` is the inverse: content (currently
+   just `PrintReport.tsx`) that exists ONLY for this media type. */
+.print-only {
+  display: none;
+}
+
 @media print {
-  header, aside, .no-print {
+  .no-print {
     display: none !important;
+  }
+  .print-only {
+    display: block;
+  }
+  body {
+    background: #ffffff !important;
+  }
+  /* The app is dark-themed for screen; forcing every descendant of the
+     print report to plain black-on-white avoids literally printing white
+     text that would be invisible on paper, and avoids wasting toner on a
+     dark background no clinical report should have. */
+  .print-only, .print-only * {
+    color: #000000 !important;
+    background: transparent !important;
+    border-color: #999999 !important;
+    box-shadow: none !important;
   }
 }

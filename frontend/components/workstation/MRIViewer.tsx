@@ -268,7 +268,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
               )}
             </div>
 
-            <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
+            <div className="pointer-events-none absolute left-3 top-3 rounded-sm bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
               <div>
                 Slice {numSlices > 0 ? sliceIndex + 1 : 0} / {numSlices}
               </div>
