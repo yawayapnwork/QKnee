@@ -1,16 +1,17 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 
 /**
  * A slide-in side panel for content that is a permanent column on wide
  * viewports but would consume too much width below `lg:` -- used by the
  * workstation's case selector (see `app/workstation/page.tsx`). Shares
- * `Modal`'s backdrop/Escape/focus-return behavior but slides from the
- * left edge instead of centering, and is explicitly a RESPONSIVE
- * accommodation, not a place to hide functionality that should just be
- * on the page.
+ * `Modal`'s backdrop/Escape/focus-return behavior (including moving focus
+ * onto the close button on open and restoring it to the trigger on close)
+ * but slides from the left edge instead of centering, and is explicitly a
+ * RESPONSIVE accommodation, not a place to hide functionality that should
+ * just be on the page.
  */
 export function Drawer({
   open,
@@ -23,6 +24,9 @@ export function Drawer({
   title: string;
   children: React.ReactNode;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(e: KeyboardEvent) {
@@ -31,6 +35,15 @@ export function Drawer({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    closeButtonRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -47,7 +60,7 @@ export function Drawer({
       >
         <div className="flex items-center justify-between border-b border-surface-3 px-4 py-3">
           <span className="text-sm font-semibold text-ink-primary">{title}</span>
-          <button onClick={onClose} aria-label="Close" className="text-ink-muted hover:text-ink-primary">
+          <button ref={closeButtonRef} onClick={onClose} aria-label="Close" className="text-ink-muted hover:text-ink-primary">
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>

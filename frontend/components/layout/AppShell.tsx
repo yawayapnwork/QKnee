@@ -1,13 +1,26 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { AuthModal } from "@/components/auth/AuthModal";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
+
+// Code-split: every route mounts `AppShell` (it's in the root layout), but
+// only a viewer who actually clicks "Sign In" needs the auth form's JS
+// (Field/SelectField, the login/register request logic). `ssr:false`
+// because it's a client-only overlay with no content to server-render
+// before the click that reveals it -- there is nothing to hydrate-mismatch
+// against. `loading` renders the same backdrop the loaded modal will use
+// so a slow connection sees an immediate, deliberate "opening" state
+// instead of the click appearing to do nothing.
+const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) => m.AuthModal), {
+  ssr: false,
+  loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
+});
 
 const NAV_LINKS = [
   { href: "/workstation", label: "Workstation" },
@@ -74,7 +87,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <main className="flex flex-1 flex-col">{children}</main>
 
-      <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+      {/* Mounted only once actually opened -- `dynamic()` above triggers
+          its chunk fetch on first mount, so gating the mount on `authOpen`
+          (rather than always rendering it with `open={false}`) is what
+          makes the code-split real instead of eager on every route. */}
+      {authOpen && <AuthModal open onClose={() => setAuthOpen(false)} />}
     </div>
   );
 }

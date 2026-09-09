@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,13 @@ import { cn } from "@/lib/utils";
  * to hand-roll all of this itself; any future modal (there is currently
  * exactly one consumer) gets this behavior for free instead of a second,
  * slightly-different reimplementation.
+ *
+ * Focus management: opening moves focus onto the dialog's close button
+ * (the one control guaranteed to exist regardless of form state) so
+ * screen-reader users land inside the dialog rather than having focus
+ * silently stay on a now-hidden trigger; closing restores focus to
+ * whatever element had it before the dialog opened, so keyboard users
+ * aren't dropped back at the top of the page.
  */
 export function Modal({
   open,
@@ -26,6 +33,9 @@ export function Modal({
   children: React.ReactNode;
   className?: string;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(e: KeyboardEvent) {
@@ -34,6 +44,20 @@ export function Modal({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    closeButtonRef.current?.focus();
+    // Cleanup (not an `open`-dependent branch) so focus is restored both
+    // when a parent keeps this mounted and flips `open` back to false,
+    // and when a parent conditionally unmounts it entirely on close (e.g.
+    // a lazily-loaded consumer that only mounts the modal while open) --
+    // React runs this on unmount either way.
+    return () => {
+      previouslyFocused.current?.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -52,7 +76,7 @@ export function Modal({
           <h2 id={titleId} className="font-semibold text-ink-primary">
             {title}
           </h2>
-          <button onClick={onClose} aria-label="Close dialog" className="text-ink-muted hover:text-ink-primary">
+          <button ref={closeButtonRef} onClick={onClose} aria-label="Close dialog" className="text-ink-muted hover:text-ink-primary">
             <X className="h-5 w-5" aria-hidden="true" />
           </button>
         </div>

@@ -50,6 +50,11 @@ export default function WorkstationPage() {
   const [casesOpen, setCasesOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
   const lastFileRef = useRef<File | null>(null);
+  // The in-flight `/predict` request, if any -- aborted whenever a newer
+  // one supersedes it (another upload, a demo-case switch, or the page
+  // unmounting) so a slow first response can never land after and clobber
+  // whatever the viewer is looking at by then.
+  const predictAbortRef = useRef<AbortController | null>(null);
 
   const canDiagnose = isReady && user?.role === "radiologist";
 
@@ -66,7 +71,14 @@ export default function WorkstationPage() {
     };
   }, []);
 
+  // Cancel any in-flight upload on unmount -- otherwise its `.then`/`.catch`
+  // could still fire after the page is gone.
+  useEffect(() => {
+    return () => predictAbortRef.current?.abort();
+  }, []);
+
   function handleSelectCase(preset: PresetCase) {
+    predictAbortRef.current?.abort();
     setActiveCase(preset);
     setStatus("idle");
     setErrorMessage(null);
@@ -76,10 +88,14 @@ export default function WorkstationPage() {
 
   async function runInference(file: File) {
     lastFileRef.current = file;
+    predictAbortRef.current?.abort();
+    const controller = new AbortController();
+    predictAbortRef.current = controller;
     setStatus("loading");
     setErrorMessage(null);
     try {
-      const prediction = await predictScanVolume(file, token!);
+      const prediction = await predictScanVolume(file, token!, controller.signal);
+      if (controller.signal.aborted) return;
       setResult({
         riskScore: prediction.risk_score,
         diagnosis: prediction.diagnosis,
@@ -92,6 +108,10 @@ export default function WorkstationPage() {
       });
       setStatus("idle");
     } catch (err) {
+      // A newer request superseded this one -- that request's own
+      // success/error handling owns the UI now, so this stale rejection
+      // (a `DOMException` named "AbortError") must render nothing.
+      if (controller.signal.aborted) return;
       // Execution mandate rule 13: a failed request must never silently
       // become a mock prediction. No `DiagnosticResult` is produced here —
       // the analysis column renders `ErrorState` instead, with an
@@ -133,7 +153,15 @@ export default function WorkstationPage() {
         onOpenCases={() => setCasesOpen(true)}
       />
 
-      <div className="grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[260px_minmax(0,1fr)_380px]">
+      {/* Column widths step twice, not once, across the 3-column range --
+          `lg` (1024px, where the case-nav column first appears) uses
+          narrower fixed columns than `xl` (1280px). At a flat 260px+380px
+          the imaging viewer -- the single most important region on this
+          screen -- would be squeezed to ~384px right at 1024px, the exact
+          width the brief calls out as a floor. Widening back up at `xl`
+          keeps the more generous columns for viewports that have the
+          room to spare. */}
+      <div className="grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px]">
         <aside className="hidden lg:block lg:border-r lg:border-surface-3" aria-label="Case navigation">
           <CaseNav
             activeCaseId={activeCase.id}

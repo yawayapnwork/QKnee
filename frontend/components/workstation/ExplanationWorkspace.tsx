@@ -66,6 +66,8 @@ export function ExplanationWorkspace({
   const [opacity, setOpacity] = useState(70);
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -75,6 +77,20 @@ export function ExplanationWorkspace({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
+
+  // Same focus-management contract as `Modal`/`Drawer`: opening moves focus
+  // onto the dialog's close button, closing restores it to whatever
+  // triggered the workspace (the sidebar's "Open Explanation Workspace"
+  // button) -- this is a bespoke overlay (not `Modal`, which caps width at
+  // `max-w-md`) so it re-implements rather than inherits that contract.
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    closeButtonRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus();
+    };
+  }, [open]);
 
   if (!open) return null;
 
@@ -116,6 +132,7 @@ export function ExplanationWorkspace({
               <ProvenanceBadge provenance={result.provenance} compact />
             </div>
             <button
+              ref={closeButtonRef}
               onClick={onClose}
               aria-label="Close explanation workspace"
               className="text-ink-muted hover:text-ink-primary"

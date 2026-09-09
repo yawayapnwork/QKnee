@@ -61,7 +61,7 @@ export function CaseNav({
                     : "border-surface-3 text-ink-muted hover:border-surface-3 hover:bg-surface-2",
                 )}
               >
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
                   <span className="font-medium">{preset.label}</span>
                   <Badge tone="neutral" className="shrink-0">
                     Precomputed Demo

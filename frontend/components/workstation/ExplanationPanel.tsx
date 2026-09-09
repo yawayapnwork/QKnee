@@ -1,11 +1,22 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { Microscope } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { ExplanationWorkspace } from "@/components/workstation/ExplanationWorkspace";
 import { sliceImageSrc, toImageSrc } from "@/lib/viewer";
 import type { DiagnosticResult } from "@/lib/types";
+
+// Code-split: the five-section workspace (plus the `QuantumTelemetry` it
+// re-renders, its own icon set, etc.) is meaningfully more JS than this
+// sidebar preview needs before anyone clicks through. Mounted only when
+// `open` (see below), so the chunk fetch happens on click, not on initial
+// page load -- `ssr:false` because it's a client-only overlay opened by a
+// client-only action.
+const ExplanationWorkspace = dynamic(
+  () => import("@/components/workstation/ExplanationWorkspace").then((m) => m.ExplanationWorkspace),
+  { ssr: false, loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" /> },
+);
 
 /**
  * Sidebar entry point into the full `ExplanationWorkspace` -- a small,
@@ -59,7 +70,7 @@ export function ExplanationPanel({ result }: { result: DiagnosticResult | null }
             Open Explanation Workspace
           </Button>
 
-          <ExplanationWorkspace open={open} onClose={() => setOpen(false)} result={result} />
+          {open && <ExplanationWorkspace open onClose={() => setOpen(false)} result={result} />}
         </>
       )}
     </div>

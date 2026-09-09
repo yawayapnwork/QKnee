@@ -74,7 +74,7 @@ export async function registerClinician(data: RegisterPayload): Promise<Token> {
  * backend didn't run a live circuit) — see `lib/quantum-telemetry.ts`,
  * which is the only place that data should be turned into UI-facing
  * `QuantumTelemetry`. */
-export async function predictScanVolume(file: File, token: string): Promise<PredictionResponse> {
+export async function predictScanVolume(file: File, token: string, signal?: AbortSignal): Promise<PredictionResponse> {
   const formData = new FormData();
   formData.append("file", file);
 
@@ -82,6 +82,7 @@ export async function predictScanVolume(file: File, token: string): Promise<Pred
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
     body: formData,
+    signal,
   });
   return parseJsonOrThrow<PredictionResponse>(res);
 }

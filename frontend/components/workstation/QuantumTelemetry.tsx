@@ -46,13 +46,13 @@ export function QuantumTelemetry({
   return (
     <div>
       <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+        <h3 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
           <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
             <span className={cn("h-2 w-2 rounded-full", available ? "bg-accent" : "bg-ink-faint")} />
           </span>
           <Atom className={available ? "h-3.5 w-3.5 text-accent" : "h-3.5 w-3.5 text-ink-faint"} aria-hidden="true" />
           Quantum Circuit
-        </div>
+        </h3>
         {available && (
           <span className="rounded border border-surface-3 bg-surface-0 px-1.5 py-0.5 font-mono text-2xs tabular-nums text-ink-primary">
             {String(qubitCount).padStart(2, "0")} {qubitCount === 1 ? "QUBIT" : "QUBITS"}

@@ -58,6 +58,14 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
 
   const dragState = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  // Pointer `move` can fire well over 60 times/second while dragging; only
+  // the latest position matters, so each move overwrites a pending
+  // coordinate rather than queuing a `setPan` per event, and the actual
+  // state update (the expensive part -- it re-renders this component and
+  // recalculates the CSS transform) happens at most once per animation
+  // frame via `requestAnimationFrame`.
+  const pendingPan = useRef<{ x: number; y: number } | null>(null);
+  const rafId = useRef<number | null>(null);
 
   useEffect(() => {
     if (!volume) return;
@@ -66,6 +74,12 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
     resetView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result, volume]);
+
+  useEffect(() => {
+    return () => {
+      if (rafId.current !== null) cancelAnimationFrame(rafId.current);
+    };
+  }, []);
 
   const plane = volume ? resolvePlane(volume, requestedPlane) : null;
   const numSlices = plane && volume ? volume.planes[plane].numSlices : 0;
@@ -107,12 +121,27 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
     if (!dragState.current) return;
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
-    setPan({ x: dragState.current.panX + dx, y: dragState.current.panY + dy });
+    pendingPan.current = { x: dragState.current.panX + dx, y: dragState.current.panY + dy };
+    if (rafId.current !== null) return;
+    rafId.current = requestAnimationFrame(() => {
+      rafId.current = null;
+      if (pendingPan.current) setPan(pendingPan.current);
+    });
   }
 
   function stopDrag() {
     dragState.current = null;
     setIsDragging(false);
+    if (rafId.current !== null) {
+      cancelAnimationFrame(rafId.current);
+      rafId.current = null;
+    }
+    // Flush the last pending position so the image doesn't visibly settle
+    // one frame short of where the pointer actually stopped.
+    if (pendingPan.current) {
+      setPan(pendingPan.current);
+      pendingPan.current = null;
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {

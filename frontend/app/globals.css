@@ -25,7 +25,12 @@
   --color-ink-primary: #e8ebef;
   --color-ink-secondary: #aab2bf;
   --color-ink-muted: #7c8697;
-  --color-ink-faint: #4d5563;
+  /* #4d5563 measured ~2.6:1 against --color-surface-0 -- well under WCAG
+     AA's 4.5:1 for the small (11px) captions/disclaimers this token is
+     used for everywhere (limitations text, provenance detail lines, axis
+     labels). #737b8c measures ~4.6:1 against the same background -- one
+     token change fixes every consumer at once. */
+  --color-ink-faint: #737b8c;
 
   /* --- Accent: ONE interactive hue. Not a gradient pair. --- */
   --color-accent: #2dd4bf;
