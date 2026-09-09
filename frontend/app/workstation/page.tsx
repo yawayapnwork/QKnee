@@ -168,7 +168,11 @@ export default function WorkstationPage() {
           {status === "idle" && result && (
             <>
               <PredictionPanel result={result} />
-              <QuantumTelemetry telemetry={result.quantumTelemetry} provenance={result.provenance} />
+              <QuantumTelemetry
+                telemetry={result.quantumTelemetry}
+                provenance={result.provenance}
+                latencyMs={result.latencyMs}
+              />
               <ExplanationPanel result={result} />
             </>
           )}
