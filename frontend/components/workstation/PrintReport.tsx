@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { ProvenanceBadge } from "@/components/workstation/ProvenanceBadge";
 import { GRADCAM_DISCLAIMER, LIMITATIONS } from "@/lib/explanation-copy";
 import { PLANE_LABELS, sliceImageSrc, toImageSrc } from "@/lib/viewer";
@@ -15,12 +18,30 @@ import type { DiagnosticResult } from "@/lib/types";
  * Every field is either a real value read off `result`/`caseLabel`, or an
  * explicit "not available" -- this file invents no clinical metadata (no
  * fabricated run ID, no invented facility name, nothing). "Generated"
- * below is the one exception worth calling out: it's `new Date()` at
- * render time, a real fact about when the report was produced, not a
- * claim about the study itself.
+ * below is the one exception worth calling out: it's a real fact about
+ * when the report was produced, not a claim about the study itself.
+ *
+ * That timestamp is deliberately NOT `new Date().toISOString()` evaluated
+ * directly in the render body -- this component participates in Next.js's
+ * normal server-render-then-hydrate cycle (it's a plain import from the
+ * `"use client"` workstation page, not behind `dynamic(..., {ssr:false})`),
+ * so a value computed at render time would differ between the server's
+ * render pass and the client's hydration pass a moment later -- two
+ * different clock reads, two different strings, one guaranteed hydration
+ * mismatch (confirmed live: this was exactly what threw "Text content
+ * does not match server-rendered HTML" in the browser console before this
+ * fix). Reading it in `useEffect` instead means the server and the
+ * client's FIRST render both produce the identical "—" placeholder --
+ * hydration diffs against that, succeeds, and only then does a normal
+ * post-hydration state update swap in the real timestamp. Printing is a
+ * client-only action (`window.print()`) triggered well after mount, so
+ * there is no real cost to the one-tick delay.
  */
 export function PrintReport({ result, caseLabel }: { result: DiagnosticResult; caseLabel: string }) {
-  const timestamp = new Date().toISOString();
+  const [timestamp, setTimestamp] = useState<string | null>(null);
+  useEffect(() => {
+    setTimestamp(new Date().toISOString());
+  }, []);
   const volume = result.volume;
   const baseImage = sliceImageSrc(volume, volume.primaryPlane, volume.primarySliceIndex);
   const hasGradcam = Boolean(volume.gradcamOverlay && volume.gradcamPlane !== null);
@@ -33,7 +54,7 @@ export function PrintReport({ result, caseLabel }: { result: DiagnosticResult; c
         <dt className="font-semibold">Case</dt>
         <dd>{caseLabel}</dd>
         <dt className="font-semibold">Generated</dt>
-        <dd>{timestamp}</dd>
+        <dd>{timestamp ?? "—"}</dd>
       </dl>
 
       <div className="mt-4">
