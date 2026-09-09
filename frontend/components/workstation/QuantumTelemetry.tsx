@@ -11,6 +11,8 @@ const ARCHITECTURE_STAGES = [
   { name: "Measurement", detail: "Pauli-Z expectation per qubit" },
 ] as const;
 
+const AXIS_TICKS = [-1, -0.5, 0, 0.5, 1] as const;
+
 /**
  * Instrument output, not a trading-app ticker and not a game HUD. Every
  * number here is either read straight from the API response or explicitly
@@ -43,14 +45,17 @@ export function QuantumTelemetry({
 
   return (
     <div>
-      <div className="mb-2 flex items-center justify-between gap-2">
+      <div className="mb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
+            <span className={cn("h-2 w-2 rounded-full", available ? "bg-accent" : "bg-ink-faint")} />
+          </span>
           <Atom className={available ? "h-3.5 w-3.5 text-accent" : "h-3.5 w-3.5 text-ink-faint"} aria-hidden="true" />
-          Quantum Telemetry
+          Quantum Circuit
         </div>
         {available && (
-          <span className="font-mono text-2xs text-ink-faint">
-            {qubitCount} {qubitCount === 1 ? "QUBIT" : "QUBITS"}
+          <span className="rounded border border-surface-3 bg-surface-0 px-1.5 py-0.5 font-mono text-2xs tabular-nums text-ink-primary">
+            {String(qubitCount).padStart(2, "0")} {qubitCount === 1 ? "QUBIT" : "QUBITS"}
           </span>
         )}
       </div>
@@ -62,19 +67,28 @@ export function QuantumTelemetry({
         </div>
       ) : (
         <>
-          <p className="mb-3 text-2xs text-ink-faint">
-            Per-qubit Pauli-Z expectation, read directly from the executed circuit. Range −1 to +1.
-          </p>
+          <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-3">
+            <div className="mb-2.5 flex items-center justify-between">
+              <p className="text-2xs text-ink-faint">Pauli-Z expectation ⟨Z⟩, per qubit</p>
+              <AxisLegend />
+            </div>
 
-          <div className="flex flex-col gap-2">
-            {telemetry.expectations.map((value, i) => (
-              <QubitRow key={i} index={i} value={value} />
-            ))}
+            <div className="flex flex-col gap-2.5">
+              {telemetry.expectations.map((value, i) => (
+                <QubitRow key={i} index={i} value={value} />
+              ))}
+            </div>
           </div>
 
-          <div className="mt-2 flex flex-wrap gap-x-3 text-[10px] text-ink-faint">
-            {telemetry.device && <span>Device: {telemetry.device}</span>}
-            <span>Backend: {provenance.quantumExecutionLabel}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink-faint">
+            {telemetry.device && (
+              <span>
+                Device: <span className="text-ink-muted">{telemetry.device}</span>
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1 rounded-sm border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-accent">
+              {provenance.quantumExecutionLabel}
+            </span>
           </div>
         </>
       )}
@@ -86,39 +100,70 @@ export function QuantumTelemetry({
   );
 }
 
+/** Tick labels for the shared −1..+1 axis every qubit row is plotted against. */
+function AxisLegend() {
+  return (
+    <div className="hidden font-mono text-[9px] text-ink-faint sm:flex sm:gap-3">
+      <span>−1</span>
+      <span>0</span>
+      <span>+1</span>
+    </div>
+  );
+}
+
 /**
- * One qubit's expectation as a zero-centered, signed horizontal bar — a
- * fill running left from center for negative values and right for
- * positive, on a fixed −1..+1 axis. The numeric value and a plain-text
- * magnitude tier (never color alone) both encode the same fact the bar
- * shows, so the row is legible without relying on hue. The fill width
- * transitions when the underlying value changes (a real state transition
- * — switching case or receiving a new result), never on a timer or hover.
+ * One qubit's expectation as a zero-centered, signed horizontal bar on a
+ * fixed −1..+1 axis (tick marks at −1, −0.5, 0, 0.5, 1), with a diamond
+ * marker at the fill's leading edge as a shape-based state indicator —
+ * never color alone. The numeric value and a plain-text magnitude tier
+ * repeat the same fact the bar shows, so the row is legible without
+ * relying on hue. The fill/marker position transitions when the
+ * underlying value changes (a real state transition — switching case or
+ * receiving a new result), never on a timer or hover.
  */
 function QubitRow({ index, value }: { index: number; value: number }) {
   const clamped = Math.max(-1, Math.min(1, value));
   const magnitude = Math.abs(clamped);
   const tier = magnitude >= 0.6 ? "strong" : magnitude >= 0.25 ? "moderate" : "weak";
   const sign = clamped > 0 ? "+" : clamped < 0 ? "−" : "";
+  const markerLeftPct = 50 + clamped * 50;
 
   return (
     <div className="flex items-center gap-2.5">
-      <span className="w-6 shrink-0 font-mono text-xs text-ink-faint">
+      <span className="w-6 shrink-0 font-mono text-xs text-ink-muted">
         Q<sub>{index}</sub>
       </span>
 
-      <div className="relative h-4 flex-1 rounded-sm bg-surface-0" aria-hidden="true">
-        <div className="absolute inset-y-0 left-1/2 w-px bg-surface-4" />
-        <div
-          className={cn(
-            "absolute inset-y-0 rounded-sm transition-[width] duration-base",
-            clamped >= 0 ? "left-1/2 bg-accent" : "right-1/2 bg-ink-muted",
-          )}
-          style={{ width: `${magnitude * 50}%` }}
-        />
+      <div className="relative h-5 flex-1" role="img" aria-label={`Qubit ${index} Pauli-Z expectation ${sign}${magnitude.toFixed(3)}`}>
+        {/* signed axis: tick marks at -1, -0.5, 0, 0.5, 1 */}
+        <div className="absolute inset-x-0 top-0 flex justify-between" aria-hidden="true">
+          {AXIS_TICKS.map((t) => (
+            <span key={t} className={cn("w-px", t === 0 ? "h-3 bg-surface-4" : "h-1.5 bg-surface-3")} />
+          ))}
+        </div>
+
+        <div className="absolute inset-x-0 bottom-0 h-1.5 rounded-sm bg-surface-0" aria-hidden="true">
+          <div className="absolute inset-y-0 left-1/2 w-px bg-surface-4" />
+          <div
+            className={cn(
+              "absolute inset-y-0 rounded-sm transition-[width] duration-base",
+              clamped >= 0 ? "left-1/2 bg-accent" : "right-1/2 bg-ink-muted",
+            )}
+            style={{ width: `${magnitude * 50}%` }}
+          />
+          {/* state marker: a small diamond at the fill's leading edge, distinct from color alone */}
+          <div
+            className={cn(
+              "absolute top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rotate-45 border transition-[left] duration-base",
+              clamped >= 0 ? "border-accent bg-accent" : "border-ink-muted bg-ink-muted",
+            )}
+            style={{ left: `${markerLeftPct}%` }}
+            aria-hidden="true"
+          />
+        </div>
       </div>
 
-      <span className="w-14 shrink-0 text-right font-mono text-xs font-semibold text-ink-primary">
+      <span className="w-14 shrink-0 text-right font-mono text-xs font-semibold tabular-nums text-ink-primary">
         {sign}
         {magnitude.toFixed(3).replace("-", "")}
       </span>
@@ -130,15 +175,20 @@ function QubitRow({ index, value }: { index: number; value: number }) {
 function CircuitArchitecture() {
   return (
     <div className="mt-4 border-t border-surface-3 pt-4">
-      <h4 className="mb-2 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Circuit Architecture</h4>
-      <ol className="flex flex-col">
+      <h4 className="mb-3 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Circuit Architecture</h4>
+      <ol className="flex flex-col rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5">
         {ARCHITECTURE_STAGES.map((stage, i) => (
           <li key={stage.name} className="flex gap-3">
             <div className="flex flex-col items-center">
-              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-surface-4 font-mono text-[10px] text-ink-muted">
-                {i + 1}
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-surface-4 font-mono text-[10px] text-ink-muted">
+                {String(i + 1).padStart(2, "0")}
               </span>
-              {i < ARCHITECTURE_STAGES.length - 1 && <span className="w-px flex-1 bg-surface-3" aria-hidden="true" />}
+              {i < ARCHITECTURE_STAGES.length - 1 && (
+                <span
+                  className="w-px flex-1 border-l border-dashed border-surface-4"
+                  aria-hidden="true"
+                />
+              )}
             </div>
             <div className="pb-3">
               <div className="text-xs font-medium text-ink-primary">{stage.name}</div>
@@ -147,7 +197,7 @@ function CircuitArchitecture() {
           </li>
         ))}
       </ol>
-      <p className="text-2xs text-ink-faint">
+      <p className="mt-2 text-2xs text-ink-faint">
         This deployment&apos;s fixed model architecture — not a per-request gate trace. The API does not report
         individual gate sequences or rotation angles for a given prediction.
       </p>
