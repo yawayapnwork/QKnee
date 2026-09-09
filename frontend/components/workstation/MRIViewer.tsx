@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Layers } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Layers, ZoomIn, ZoomOut, RotateCcw, Sun, Contrast } from "lucide-react";
 import { Tabs } from "@/components/ui/Tabs";
 import { Switch } from "@/components/ui/Switch";
 import { EmptyState } from "@/components/shared/EmptyState";
@@ -11,24 +11,37 @@ import {
   clampSliceIndex,
   isGradcamVisible,
   resolvePlane,
-  sliceCaption,
   sliceImageSrc,
+  toImageSrc,
 } from "@/lib/viewer";
+import { cn } from "@/lib/utils";
 import type { AnatomicalPlane, DiagnosticResult } from "@/lib/types";
 
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const ZOOM_STEP = 0.5;
+const PAN_STEP = 24;
+
 /**
- * CENTER zone: the imaging surface. Every control here either changes what
- * is rendered, or does not exist -- per FRONTEND_REDESIGN.md Part "MRI
- * viewer UX" and the execution mandate's rule 10/11: no fabricated
+ * CENTER zone: the imaging surface, deliberately the dominant region of
+ * the screen (the flex-1 image area below the toolbar/plane strip
+ * consumes whatever height the 3-zone grid gives it). Every control here
+ * either changes what is rendered, or does not exist — no fabricated
  * Window/Level values, no permanent decorative animation, no claim of a
  * plane/slice count the backend didn't actually report.
  *
- * `lib/viewer.ts` is unmodified data-layer logic (audited, correct):
+ * Zoom/pan/window-level are pure client-side VIEWER transforms (CSS
+ * transform + filter) applied on top of the real slice image — they never
+ * alter, re-render, or recompute the underlying pixel data, and "Window /
+ * Level" here is a brightness/contrast filter on the already-rendered PNG,
+ * not a recomputation from raw intensities. That's stated in the control's
+ * own label rather than left ambiguous.
+ *
+ * `lib/viewer.ts` is unmodified data-layer logic (audited, tested):
  * `resolvePlane` never invents an unavailable plane, `sliceImageSrc`
- * returns `null` rather than a substitute image, and the base slice
- * (`sliceImageSrc`) and Grad-CAM overlay (`volume.gradcamOverlay`) are
- * always two distinct assets -- this component never blends them into one
- * image or lets one stand in for the other.
+ * returns `null` rather than a substitute image, and the base slice and
+ * Grad-CAM overlay are always two distinct assets — this component never
+ * blends them into one image or lets one stand in for the other.
  */
 export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
   const volume = result?.volume ?? null;
@@ -38,10 +51,20 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
   const [heatmapOn, setHeatmapOn] = useState(true);
   const [opacity, setOpacity] = useState(65);
 
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [brightness, setBrightness] = useState(100);
+  const [contrast, setContrast] = useState(100);
+
+  const dragState = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
   useEffect(() => {
     if (!volume) return;
     setRequestedPlane(volume.primaryPlane);
     setSlice(volume.primarySliceIndex);
+    resetView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result, volume]);
 
   const plane = volume ? resolvePlane(volume, requestedPlane) : null;
@@ -50,13 +73,59 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
   const baseImageSrc = plane && volume ? sliceImageSrc(volume, plane, sliceIndex) : null;
   const gradcamSrc =
     plane && volume && volume.gradcamOverlay && isGradcamVisible(volume, plane, sliceIndex)
-      ? volume.gradcamOverlay
+      ? toImageSrc(volume.gradcamOverlay)
       : null;
   const gradcamExistsElsewhere = Boolean(plane && volume?.gradcamOverlay && !gradcamSrc);
 
   function selectPlane(next: AnatomicalPlane) {
     setRequestedPlane(next);
     if (volume) setSlice(clampSliceIndex(volume, next, slice));
+    resetView();
+  }
+
+  function resetView() {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setBrightness(100);
+    setContrast(100);
+  }
+
+  function applyZoom(next: number) {
+    const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+    setZoom(clamped);
+    if (clamped === MIN_ZOOM) setPan({ x: 0, y: 0 });
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (zoom <= MIN_ZOOM) return;
+    (e.target as Element).setPointerCapture(e.pointerId);
+    dragState.current = { startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y };
+    setIsDragging(true);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragState.current) return;
+    const dx = e.clientX - dragState.current.startX;
+    const dy = e.clientY - dragState.current.startY;
+    setPan({ x: dragState.current.panX + dx, y: dragState.current.panY + dy });
+  }
+
+  function stopDrag() {
+    dragState.current = null;
+    setIsDragging(false);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "+" || e.key === "=") applyZoom(zoom + ZOOM_STEP);
+    else if (e.key === "-" || e.key === "_") applyZoom(zoom - ZOOM_STEP);
+    else if (e.key === "0") resetView();
+    else if (zoom > MIN_ZOOM && e.key.startsWith("Arrow")) {
+      e.preventDefault();
+      setPan((p) => ({
+        x: p.x + (e.key === "ArrowLeft" ? PAN_STEP : e.key === "ArrowRight" ? -PAN_STEP : 0),
+        y: p.y + (e.key === "ArrowUp" ? PAN_STEP : e.key === "ArrowDown" ? -PAN_STEP : 0),
+      }));
+    }
   }
 
   const planeTabs = PLANE_DISPLAY_ORDER.map((p) => ({
@@ -67,6 +136,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
   }));
 
   const hasUnavailablePlane = planeTabs.some((tab) => tab.disabled);
+  const viewAdjusted = zoom !== 1 || pan.x !== 0 || pan.y !== 0 || brightness !== 100 || contrast !== 100;
 
   return (
     <div className="flex h-full flex-col">
@@ -76,31 +146,105 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
             focusable at all, so its `title` tooltip is unreachable without
             a mouse. The reason must be visible unconditionally. */}
         {hasUnavailablePlane && (
-          <span className="text-2xs text-ink-faint">
-            {planeTabs.find((t) => t.disabled)?.disabledReason}
-          </span>
+          <span className="text-2xs text-ink-faint">{planeTabs.find((t) => t.disabled)?.disabledReason}</span>
         )}
       </div>
 
-      <div className="relative flex flex-1 items-center justify-center bg-black">
+      {baseImageSrc && (
+        <div className="flex flex-wrap items-center gap-1 border-b border-surface-3 bg-surface-1 px-3 py-1.5" role="toolbar" aria-label="Viewer controls">
+          <ToolButton label="Zoom out" onClick={() => applyZoom(zoom - ZOOM_STEP)} disabled={zoom <= MIN_ZOOM}>
+            <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
+          </ToolButton>
+          <span className="w-12 text-center font-mono text-2xs text-ink-muted" aria-hidden="true">
+            {Math.round(zoom * 100)}%
+          </span>
+          <ToolButton label="Zoom in" onClick={() => applyZoom(zoom + ZOOM_STEP)} disabled={zoom >= MAX_ZOOM}>
+            <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
+          </ToolButton>
+
+          <div className="mx-1.5 h-4 w-px bg-surface-3" aria-hidden="true" />
+
+          <label className="flex items-center gap-1.5 text-2xs text-ink-muted">
+            <Sun className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="sr-only">Window / Level — brightness</span>
+            <input
+              type="range"
+              min={40}
+              max={160}
+              value={brightness}
+              onChange={(e) => setBrightness(Number(e.target.value))}
+              aria-label="Window / Level — brightness"
+              className="w-16 accent-accent"
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-2xs text-ink-muted">
+            <Contrast className="h-3.5 w-3.5" aria-hidden="true" />
+            <span className="sr-only">Window / Level — contrast</span>
+            <input
+              type="range"
+              min={40}
+              max={200}
+              value={contrast}
+              onChange={(e) => setContrast(Number(e.target.value))}
+              aria-label="Window / Level — contrast"
+              className="w-16 accent-accent"
+            />
+          </label>
+
+          <div className="mx-1.5 h-4 w-px bg-surface-3" aria-hidden="true" />
+
+          <ToolButton label="Reset view" onClick={resetView} disabled={!viewAdjusted}>
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+          </ToolButton>
+        </div>
+      )}
+
+      <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-black">
         {baseImageSrc ? (
-          <div className="relative h-full w-full">
-            {/* eslint-disable-next-line @next/next/no-img-element -- base64 data URIs, not a static/optimizable asset */}
-            <img src={baseImageSrc} alt="MRI slice" className="absolute inset-0 h-full w-full object-contain" />
-            {heatmapOn && gradcamSrc && (
-              // eslint-disable-next-line @next/next/no-img-element
+          <div
+            role="img"
+            aria-label={`MRI slice, ${PLANE_LABELS[plane as AnatomicalPlane]} plane, slice ${sliceIndex + 1} of ${numSlices}. Use plus/minus to zoom, arrow keys to pan when zoomed, 0 to reset.`}
+            tabIndex={0}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={stopDrag}
+            onPointerLeave={stopDrag}
+            onKeyDown={handleKeyDown}
+            className={cn(
+              "relative h-full w-full outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent",
+              zoom > 1 && (isDragging ? "cursor-grabbing" : "cursor-grab"),
+            )}
+          >
+            <div
+              className="absolute inset-0 h-full w-full transition-transform duration-fast"
+              style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- base64 data URIs, not a static/optimizable asset */}
               <img
-                src={gradcamSrc}
-                alt="Grad-CAM model-attention overlay"
+                src={baseImageSrc}
+                alt="MRI slice"
+                draggable={false}
                 className="absolute inset-0 h-full w-full object-contain"
-                style={{ opacity: opacity / 100 }}
+                style={{ filter: `brightness(${brightness}%) contrast(${contrast}%)` }}
               />
-            )}
-            {plane && (
-              <div className="absolute left-3 top-3 rounded bg-surface-0/85 px-2 py-1 font-mono text-[11px] text-ink-primary">
-                {sliceCaption(plane, sliceIndex, numSlices)}
+              {heatmapOn && gradcamSrc && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={gradcamSrc}
+                  alt="Grad-CAM model-attention overlay"
+                  draggable={false}
+                  className="absolute inset-0 h-full w-full object-contain"
+                  style={{ opacity: opacity / 100 }}
+                />
+              )}
+            </div>
+
+            <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
+              <div>
+                Slice {numSlices > 0 ? sliceIndex + 1 : 0} / {numSlices}
               </div>
-            )}
+              <div className="text-ink-faint">Plane: {plane ? PLANE_LABELS[plane] : "—"}</div>
+            </div>
           </div>
         ) : (
           <EmptyState
@@ -174,5 +318,30 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
         )}
       </div>
     </div>
+  );
+}
+
+function ToolButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className="rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+    >
+      {children}
+    </button>
   );
 }

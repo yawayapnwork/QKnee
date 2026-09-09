@@ -21,10 +21,11 @@ export function QuantumTelemetry({
 
   return (
     <div>
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-ink-muted">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
         <Atom className={available ? "h-3.5 w-3.5 text-accent" : "h-3.5 w-3.5 text-ink-faint"} aria-hidden="true" />
-        Quantum circuit telemetry — Pauli-Z expectations
+        Quantum Telemetry
       </div>
+      {available && <p className="mb-2 text-2xs text-ink-faint">Per-qubit Pauli-Z expectation values, read directly from the executed circuit.</p>}
 
       {!available ? (
         <div className="flex items-center gap-2 rounded-md border border-surface-3 bg-surface-0 px-3 py-4 text-xs text-ink-muted">

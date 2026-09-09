@@ -1,21 +1,20 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { StudyHeader } from "@/components/workstation/StudyHeader";
-import { StudySelector } from "@/components/workstation/StudySelector";
+import { CaseNav } from "@/components/workstation/CaseNav";
 import { MRIViewer } from "@/components/workstation/MRIViewer";
 import { PredictionPanel } from "@/components/workstation/PredictionPanel";
 import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
 import { ExplanationPanel } from "@/components/workstation/ExplanationPanel";
-import { TechnicalDetails } from "@/components/workstation/TechnicalDetails";
-import { ReportExport } from "@/components/workstation/ReportExport";
+import { StatusBar } from "@/components/workstation/StatusBar";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { ErrorState } from "@/components/shared/ErrorState";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { AuthModal } from "@/components/auth/AuthModal";
 import { Drawer } from "@/components/ui/Drawer";
 import { useAuth } from "@/lib/auth-context";
-import { ApiError, predictScanVolume } from "@/lib/api";
+import { ApiError, fetchHealth, predictScanVolume } from "@/lib/api";
 import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
 import { provenanceFromPrediction } from "@/lib/provenance";
@@ -23,7 +22,24 @@ import { volumeViewFromPrediction } from "@/lib/viewer";
 import type { DiagnosticResult, PresetCase } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error";
+type ApiHealth = "checking" | "online" | "offline";
 
+/**
+ * Full rebuild of the workstation shell (not a cosmetic pass over the
+ * prior grid) around a real 5-region desktop layout: a TOP identity/
+ * provenance/actions bar, a LEFT case-navigation column, a CENTER imaging
+ * surface that dominates the available space, a RIGHT AI-analysis column
+ * (divided by rules, not stacked cards), and a BOTTOM technical-status
+ * strip. Below `lg:` the left column moves into a `Drawer`; below `md:`
+ * center and right stack vertically into a single scrollable analysis
+ * flow — see the grid template below.
+ *
+ * `apiHealth` is fetched exactly once, here, and threaded down to both
+ * `StudyHeader` (the reachability indicator) and `CaseNav` (whether the
+ * upload control may honestly say "Live Analysis") — one fetch, one
+ * source of truth, instead of each component polling `/health` on its
+ * own and risking two different answers on screen at once.
+ */
 export default function WorkstationPage() {
   const { token, user, isReady } = useAuth();
   const [activeCase, setActiveCase] = useState<PresetCase>(PRESET_CASES[0]);
@@ -32,9 +48,23 @@ export default function WorkstationPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [casesOpen, setCasesOpen] = useState(false);
+  const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
   const lastFileRef = useRef<File | null>(null);
 
   const canDiagnose = isReady && user?.role === "radiologist";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    fetchHealth(controller.signal)
+      .then(() => setApiHealth("online"))
+      .catch(() => setApiHealth("offline"))
+      .finally(() => clearTimeout(timeout));
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, []);
 
   function handleSelectCase(preset: PresetCase) {
     setActiveCase(preset);
@@ -92,29 +122,43 @@ export default function WorkstationPage() {
     setResult(mockDiagnosticResult(activeCase));
   }
 
+  const visibleResult = status === "error" ? null : result;
+
   return (
     <div className="flex flex-1 flex-col">
       <StudyHeader
         caseLabel={activeCase.label}
-        result={status === "error" ? null : result}
-        onUpload={handleUpload}
+        result={visibleResult}
+        apiHealth={apiHealth}
         onOpenCases={() => setCasesOpen(true)}
       />
 
-      <div className="grid flex-1 grid-cols-1 lg:grid-cols-[220px_1.6fr_1fr]">
-        <aside className="hidden lg:block lg:border-r lg:border-surface-3">
-          <StudySelector activeCaseId={activeCase.id} onSelectCase={handleSelectCase} canDiagnose={Boolean(canDiagnose)} />
+      <div className="grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[260px_minmax(0,1fr)_380px]">
+        <aside className="hidden lg:block lg:border-r lg:border-surface-3" aria-label="Case navigation">
+          <CaseNav
+            activeCaseId={activeCase.id}
+            onSelectCase={handleSelectCase}
+            canDiagnose={Boolean(canDiagnose)}
+            apiHealth={apiHealth}
+            onUpload={handleUpload}
+          />
         </aside>
 
-        <Drawer open={casesOpen} onClose={() => setCasesOpen(false)} title="Demo Cases">
-          <StudySelector activeCaseId={activeCase.id} onSelectCase={handleSelectCase} canDiagnose={Boolean(canDiagnose)} />
+        <Drawer open={casesOpen} onClose={() => setCasesOpen(false)} title="Demo Cases & Upload">
+          <CaseNav
+            activeCaseId={activeCase.id}
+            onSelectCase={handleSelectCase}
+            canDiagnose={Boolean(canDiagnose)}
+            apiHealth={apiHealth}
+            onUpload={handleUpload}
+          />
         </Drawer>
 
-        <section className="min-h-[420px] border-b border-surface-3 lg:border-b-0 lg:border-r" aria-label="MRI viewer">
-          <MRIViewer result={status === "error" ? null : result} />
+        <section className="min-h-[480px] border-b border-surface-3 md:border-b-0 md:border-r" aria-label="MRI viewer">
+          <MRIViewer result={visibleResult} />
         </section>
 
-        <section className="flex flex-col gap-6 p-4 sm:p-6" aria-label="AI analysis">
+        <section className="flex flex-col divide-y divide-surface-3 [&>*]:px-4 [&>*]:py-5 sm:[&>*]:px-6" aria-label="AI analysis">
           {status === "loading" && <LoadingState />}
 
           {status === "error" && (
@@ -125,9 +169,7 @@ export default function WorkstationPage() {
             <>
               <PredictionPanel result={result} />
               <QuantumTelemetry telemetry={result.quantumTelemetry} provenance={result.provenance} />
-              <ExplanationPanel volume={result.volume} />
-              <TechnicalDetails result={result} />
-              <ReportExport result={result} caseLabel={activeCase.label} />
+              <ExplanationPanel result={result} />
             </>
           )}
 
@@ -136,6 +178,8 @@ export default function WorkstationPage() {
           )}
         </section>
       </div>
+
+      <StatusBar result={visibleResult} />
 
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
     </div>
