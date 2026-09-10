@@ -1,4 +1,4 @@
-import type { AnatomicalPlane, PlaneInfo, PredictionResponse, PresetCase, RawPlaneInfo, VolumeView } from "./types";
+import type { AnatomicalPlane, PlaneInfo, PredictionResponse, RawPlaneInfo, VolumeView } from "./types";
 
 export const PLANE_LABELS: Record<AnatomicalPlane, string> = {
   axial: "Axial",
@@ -35,55 +35,12 @@ export function volumeViewFromPrediction(prediction: PredictionResponse): Volume
   };
 }
 
-/** Deterministic 1x1-pixel-scaled placeholder heatmap (soft radial gradient encoded as SVG data URI). */
-export function placeholderImageDataUri(seedHex: string): string {
-  // Reads the WHOLE seed string, not just its first byte -- two seeds that
-  // only differ past the first two hex characters (e.g. "01" vs "01ff",
-  // as `volumeViewFromPreset` passes for its base/overlay pair) must still
-  // produce visibly different images, otherwise the base-image/overlay
-  // separation this module exists to guarantee would be a no-op for
-  // preset/demo data.
-  const hue = (parseInt(seedHex, 16) || 0) % 360;
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'>
-    <defs>
-      <radialGradient id='g' cx='50%' cy='50%' r='60%'>
-        <stop offset='0%' stop-color='hsl(${hue},85%,55%)' stop-opacity='0.85'/>
-        <stop offset='60%' stop-color='hsl(${hue + 20},80%,45%)' stop-opacity='0.35'/>
-        <stop offset='100%' stop-color='#0f172a' stop-opacity='0'/>
-      </radialGradient>
-    </defs>
-    <rect width='320' height='320' fill='#0f172a'/>
-    <circle cx='160' cy='160' r='150' fill='url(#g)'/>
-  </svg>`;
-  return `data:image/svg+xml;base64,${btoa(svg)}`;
-}
-
-/**
- * Builds a preset/demo case's `VolumeView` — a single synthetic "axial"
- * slice (presets carry one illustrative image, not a real multi-slice
- * volume), with Coronal/Sagittal correctly marked unavailable rather than
- * pretending a preset has real multi-plane data. Base image and overlay are
- * two DIFFERENT generated placeholders (different seeds), never the same
- * asset — the base-image/overlay separation this module exists to
- * guarantee applies to demo data too, not just live results.
- */
-export function volumeViewFromPreset(preset: PresetCase): VolumeView {
-  const seed = preset.id.replace(/\D/g, "").padStart(2, "0");
-  const baseImage = placeholderImageDataUri(seed);
-  const overlay = placeholderImageDataUri(`${seed}ff`);
-  return {
-    planes: {
-      axial: { available: true, numSlices: 1, slices: [baseImage] },
-      coronal: { available: false, numSlices: 0, slices: [] },
-      sagittal: { available: false, numSlices: 0, slices: [] },
-    },
-    primaryPlane: "axial",
-    primarySliceIndex: 0,
-    gradcamOverlay: overlay,
-    gradcamPlane: "axial",
-    gradcamSliceIndex: 0,
-  };
-}
+// `placeholderImageDataUri`/`volumeViewFromPreset` (synthetic gradient
+// images standing in for a preset's non-existent MRI data) are deleted --
+// demo cases are now real RSNA Knee studies scored once offline (see
+// `scripts/build_real_demo_cases.py`), with real slice images, and served
+// via `GET /api/cases/{id}` as an ordinary `PredictionResponse`, so they go
+// through `volumeViewFromPrediction` above like any other result.
 
 /** Normalizes a raw base64 PNG or an already-prefixed data URI into a `<img src>`-ready data URI. */
 export function toImageSrc(base64OrDataUri: string): string {

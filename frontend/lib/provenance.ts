@@ -57,34 +57,12 @@ export function provenanceFromPrediction(prediction: PredictionResponse): Proven
   };
 }
 
-/**
- * Builds a preset/demo case's provenance — always "precomputed_demo"
- * (AUDIT.md P1 #7 requirement 8: preset cases may remain usable for the
- * demo, but must be explicitly marked as such, never presented as "live").
- *
- * `quantumExecution` is "not_verifiable", never "quantum_simulator". Preset
- * cases carry real, stored per-qubit values (`PresetCase.qubitExpectations`
- * / `quantumTelemetryFromPreset`) -- not randomly generated -- so they are
- * still shown, in full, by `QuantumTelemetry`. But this module has no
- * artifact, run ID, or backend attestation proving those specific numbers
- * came from an actual circuit execution rather than being hand-authored to
- * look plausible, and it must not claim more than it can prove: labeling
- * this "QUANTUM SIMULATOR" -- the exact badge a genuine, backend-attested
- * execution gets -- would assert something this function cannot verify.
- * "not_verifiable" is the honest middle state between "verified execution"
- * and "no data at all". Do not invent a device, backend, circuit depth,
- * run ID, or timestamp to make this state look more complete than it is.
- */
-export function provenanceForPreset(): ProvenanceInfo {
-  return {
-    provenance: "precomputed_demo",
-    provenanceLabel: PROVENANCE_LABELS.precomputed_demo,
-    modelSource: null,
-    modelSourceLabel: null,
-    quantumExecution: "not_verifiable",
-    quantumExecutionLabel: QUANTUM_EXECUTION_LABELS.not_verifiable,
-    isTrustworthy: true,
-  };
-}
-
+// `provenanceForPreset` (hand-authored fake-case provenance) is deleted --
+// demo cases are now real RSNA Knee studies scored once offline (see
+// `scripts/build_real_demo_cases.py`) and served via `GET /api/cases/{id}`
+// as an ordinary `PredictionResponse`, so they go through
+// `provenanceFromPrediction` above like any other result. Their
+// `provenance` comes back `"precomputed_demo"` from the backend itself
+// (real model, real quantum circuit, computed offline and replayed), not
+// from a frontend-side constructor.
 

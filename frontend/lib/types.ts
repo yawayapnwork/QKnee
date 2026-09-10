@@ -99,12 +99,13 @@ export type ModelSource = "trained_checkpoint" | "random_fallback";
 export type QuantumExecution = "quantum_simulator" | "unavailable";
 /**
  * App-level extension of `QuantumExecution`, used only on `ProvenanceInfo.quantumExecution` —
- * never on the wire type above. Adds `"not_verifiable"`: real per-qubit numbers are shown (a
- * precomputed demo case's stored `qubitExpectations`), but no live circuit execution can be
- * attested by the frontend for *this specific result*, so it must not render with the same
- * confident "QUANTUM SIMULATOR" badge a genuine backend-attested execution gets. The backend
- * itself never sends this value — only `provenanceForPreset` (`lib/provenance.ts`) constructs it,
- * for demo/preset results exclusively.
+ * never on the wire type above. `"not_verifiable"` was reserved for a frontend-constructed
+ * demo/preset provenance the backend never produces. No current code path constructs it — real
+ * demo cases now come from `GET /api/cases/{id}` (an ordinary `PredictionResponse`, backend-
+ * attested `provenance`), so `QUANTUM_EXECUTION_LABELS.not_verifiable`'s rendering in
+ * `ProvenanceBadge.tsx`/`QuantumTelemetry.tsx` is defensive, not reachable. Kept (not deleted)
+ * because it costs nothing and documents the invariant those components still guard: never label
+ * an unattested result "QUANTUM SIMULATOR".
  */
 export type AppQuantumExecution = QuantumExecution | "not_verifiable";
 
@@ -152,11 +153,11 @@ export interface PlaneInfo {
 }
 
 /** App-level (camelCase) per-result volume/viewer state, derived from a
- * `PredictionResponse` (`lib/viewer.ts#volumeViewFromPrediction`) or a
- * `PresetCase` (`lib/viewer.ts#volumeViewFromPreset`) — never assembled by
- * hand at a call site, so a live result's viewer data can't accidentally
- * mix in preset/other-result data (mirrors `quantum-telemetry.ts`'s
- * single-call-site pattern for the same reason). */
+ * `PredictionResponse` (`lib/viewer.ts#volumeViewFromPrediction`) — whether
+ * that response came from a live upload or a real, offline-scored demo
+ * case (`GET /api/cases/{id}`), both the same wire shape — never assembled
+ * by hand at a call site (mirrors `quantum-telemetry.ts`'s single-call-site
+ * pattern for the same reason). */
 export interface VolumeView {
   planes: Record<AnatomicalPlane, PlaneInfo>;
   primaryPlane: AnatomicalPlane;
@@ -195,14 +196,27 @@ export interface HealthResponse {
 
 export type SeverityTag = "Normal" | "Indeterminate" | "Urgent Surgical Consult";
 
-export interface PresetCase {
-  id: string;
+/**
+ * One entry in `GET /api/cases`' listing -- a real RSNA Knee study, scored
+ * once offline by `scripts/build_real_demo_cases.py` (real ResNet18 -> PCA
+ * -> VQC -> Grad-CAM inference, never fabricated). Deliberately lightweight
+ * (no images) so listing every case stays cheap -- `GET /api/cases/{case_id}`
+ * (see `fetchCase` in `lib/api.ts`) returns the full `PredictionResponse`
+ * for one case, reusing the exact same `quantumTelemetryFromPrediction`/
+ * `volumeViewFromPrediction`/`provenanceFromPrediction` conversion a live
+ * `/predict` response uses -- there is no separate "preset" data shape.
+ */
+export interface CaseSummary {
+  case_id: string;
   label: string;
-  description: string;
-  category: "ACL Tear" | "Intact Meniscus" | "Multi-Compartment Defect";
-  riskScore: number;
-  qubitExpectations: [number, number, number, number];
+  diagnosis: string;
+  risk_score: number;
 }
+
+// `PresetCase` (hand-authored fake demo case: fabricated risk score +
+// qubit expectations) is deleted -- demo cases are now real RSNA Knee
+// studies scored once offline (see `scripts/build_real_demo_cases.py`) and
+// served via `GET /api/cases/{id}` as an ordinary `PredictionResponse`.
 
 /**
  * Raw per-qubit circuit output — nothing else. Whether this data is

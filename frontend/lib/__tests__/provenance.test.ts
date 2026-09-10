@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { provenanceForPreset, provenanceFromPrediction } from "../provenance";
-import { mockDiagnosticResult } from "../mock-data";
-import { PRESET_CASES } from "../mock-data";
+import { provenanceFromPrediction } from "../provenance";
 import { livePrediction } from "./fixtures";
 
 describe("AUDIT.md P1 #5/#7 regression: provenance survives backend -> API -> frontend", () => {
@@ -58,52 +56,31 @@ describe("AUDIT.md P1 #5/#7 regression: provenance survives backend -> API -> fr
     // from a preset case.
     expect(provenanceFromPrediction.length).toBe(1);
   });
-});
 
-describe("preset provenance is always explicitly marked, never disguised as live", () => {
-  it("provenanceForPreset always returns 'precomputed_demo'", () => {
-    const info = provenanceForPreset();
-    expect(info.provenance).toBe("precomputed_demo");
-    expect(info.provenanceLabel).toBe("PRECOMPUTED DEMO");
-    expect(info.isTrustworthy).toBe(true);
-  });
+  it("a real, offline-scored demo case (GET /api/cases/{id}) is marked precomputed_demo, exactly like any other cache-fallback response", () => {
+    // Real demo cases are ordinary PredictionResponses with
+    // backend === "cache-fallback/<study_uid>" (see
+    // scripts/build_real_demo_cases.py) -- provenanceFromPrediction needs
+    // no separate "preset" code path to classify them correctly, because
+    // qknee.observability.provenance.classify already maps that backend
+    // tag to "precomputed_demo" server-side.
+    const prediction = livePrediction({
+      backend: "cache-fallback/1.2.826.0.1.3680043.8.498.example",
+      provenance: "precomputed_demo",
+      provenance_label: "PRECOMPUTED DEMO",
+      model_source: "trained_checkpoint",
+      model_source_label: "TRAINED MODEL",
+      quantum_execution: "quantum_simulator",
+      quantum_execution_label: "QUANTUM SIMULATOR",
+    });
 
-  it("selecting any preset case yields precomputed_demo provenance, not live", () => {
-    for (const preset of PRESET_CASES) {
-      const result = mockDiagnosticResult(preset);
-      expect(result.provenance.provenance).toBe("precomputed_demo");
-    }
-  });
-});
-
-describe("hostile-review regression: a precomputed demo case cannot claim unverifiable quantum execution", () => {
-  // The frontend has no artifact, run ID, or backend attestation proving
-  // `PresetCase.qubitExpectations` came from an actual circuit execution
-  // for THIS result -- only that the numbers are real, stored values (see
-  // `provenanceForPreset`'s doc comment). Claiming "QUANTUM SIMULATOR" --
-  // the same badge a genuine backend-attested execution earns -- would be
-  // exactly the "unverifiable claim presented as fact" a hostile review
-  // caught live (the badge said QUANTUM SIMULATOR while "Quantum Details"
-  // simultaneously said every device/depth/execution-time field was "not
-  // reported"). This test locks the fix in from the data-model side.
-  it("provenanceForPreset never returns 'quantum_simulator'", () => {
-    const info = provenanceForPreset();
-    expect(info.quantumExecution).not.toBe("quantum_simulator");
-    expect(info.quantumExecution).toBe("not_verifiable");
-    expect(info.quantumExecutionLabel).not.toBe("QUANTUM SIMULATOR");
-    expect(info.quantumExecutionLabel).toBe("NOT INDEPENDENTLY VERIFIABLE");
-  });
-
-  it("every preset case's DiagnosticResult carries the same not-verifiable quantum execution state", () => {
-    for (const preset of PRESET_CASES) {
-      const result = mockDiagnosticResult(preset);
-      expect(result.provenance.quantumExecution).toBe("not_verifiable");
-    }
-  });
-
-  it("a live prediction's genuinely attested quantum_simulator execution is unaffected", () => {
-    const prediction = livePrediction({ quantum_execution: "quantum_simulator", quantum_execution_label: "QUANTUM SIMULATOR" });
     const info = provenanceFromPrediction(prediction);
+
+    expect(info.provenance).toBe("precomputed_demo");
+    expect(info.isTrustworthy).toBe(true);
+    // Unlike the old hand-authored presets, a real demo case's quantum
+    // telemetry IS backend-attested (a real circuit ran, once, offline) --
+    // it earns the genuine "QUANTUM SIMULATOR" badge, not "not_verifiable".
     expect(info.quantumExecution).toBe("quantum_simulator");
   });
 });
@@ -121,11 +98,8 @@ describe("execution mandate rule 13: a failed live call never silently becomes a
     expect(provenanceModule.provenanceForFailedLiveFallback).toBeUndefined();
   });
 
-  it("mockDiagnosticResult always yields precomputed_demo -- selecting a demo case (including after a failed live call) is never mislabeled mock_fallback", () => {
-    for (const preset of PRESET_CASES) {
-      const result = mockDiagnosticResult(preset);
-      expect(result.provenance.provenance).toBe("precomputed_demo");
-      expect(result.provenance.isTrustworthy).toBe(true);
-    }
+  it("there is no client-side constructor for demo-case provenance either -- provenanceForPreset is deleted along with the hand-authored preset data it served", async () => {
+    const provenanceModule: Record<string, unknown> = await import("../provenance");
+    expect(provenanceModule.provenanceForPreset).toBeUndefined();
   });
 });

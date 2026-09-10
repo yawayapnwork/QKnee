@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { quantumTelemetryFromPrediction, quantumTelemetryFromPreset } from "../quantum-telemetry";
+import { quantumTelemetryFromPrediction } from "../quantum-telemetry";
 import { provenanceFromPrediction } from "../provenance";
-import { PRESET_CASES } from "../mock-data";
 import { livePrediction } from "./fixtures";
 
 // This file used to test a SECOND, independent provenance vocabulary
@@ -14,16 +13,6 @@ import { livePrediction } from "./fixtures";
 // extraction only.
 
 describe("quantumTelemetryFromPrediction", () => {
-  it("AUDIT.md P0 #2 regression: never returns a preset's own qubit values for a live response", () => {
-    const prediction = livePrediction();
-    const telemetry = quantumTelemetryFromPrediction(prediction);
-
-    for (const preset of PRESET_CASES) {
-      expect(telemetry.expectations).not.toEqual(preset.qubitExpectations);
-    }
-    expect(telemetry.expectations).toEqual(prediction.quantum_expectations);
-  });
-
   it("has no parameter through which preset/activeCase data could reach it", () => {
     expect(quantumTelemetryFromPrediction.length).toBe(1);
   });
@@ -33,6 +22,18 @@ describe("quantumTelemetryFromPrediction", () => {
     expect(telemetry.expectations).toEqual([-0.31, 0.05, 0.77, -0.62]);
     expect(telemetry.nQubits).toBe(4);
     expect(telemetry.device).toBe("default.qubit");
+  });
+
+  it("extracts the same real values for a real, offline-scored demo case (GET /api/cases/{id}) -- no separate preset code path", () => {
+    // scripts/build_real_demo_cases.py tags real demo cases
+    // backend="cache-fallback/<study_uid>", but the wire shape (and this
+    // function's job) is identical to a live /predict response.
+    const prediction = livePrediction({
+      backend: "cache-fallback/1.2.826.0.1.3680043.8.498.example",
+      quantum_expectations: [0.12, -0.34, 0.56, -0.78],
+    });
+    const telemetry = quantumTelemetryFromPrediction(prediction);
+    expect(telemetry.expectations).toEqual([0.12, -0.34, 0.56, -0.78]);
   });
 
   it("this component does not decide trust/availability -- that is provenanceFromPrediction's job", () => {
@@ -72,12 +73,9 @@ describe("quantumTelemetryFromPrediction", () => {
   });
 });
 
-describe("quantumTelemetryFromPreset", () => {
-  it("returns the preset's real, precomputed per-qubit values", () => {
-    for (const preset of PRESET_CASES) {
-      const telemetry = quantumTelemetryFromPreset(preset);
-      expect(telemetry.expectations).toEqual(preset.qubitExpectations);
-      expect(telemetry.nQubits).toBe(preset.qubitExpectations.length);
-    }
+describe("no client-side constructor for demo-case telemetry", () => {
+  it("quantumTelemetryFromPreset is deleted along with the hand-authored preset data it served", async () => {
+    const telemetryModule: Record<string, unknown> = await import("../quantum-telemetry");
+    expect(telemetryModule.quantumTelemetryFromPreset).toBeUndefined();
   });
 });

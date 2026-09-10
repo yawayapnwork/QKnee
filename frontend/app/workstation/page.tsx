@@ -23,15 +23,33 @@ const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) =
   loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
 });
 import { useAuth } from "@/lib/auth-context";
-import { ApiError, fetchHealth, predictScanVolume } from "@/lib/api";
-import { PRESET_CASES, mockDiagnosticResult, severityFromRisk } from "@/lib/mock-data";
+import { ApiError, fetchCase, fetchCases, fetchHealth, predictScanVolume } from "@/lib/api";
+import { severityFromRisk } from "@/lib/severity";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
 import { provenanceFromPrediction } from "@/lib/provenance";
 import { volumeViewFromPrediction } from "@/lib/viewer";
-import type { DiagnosticResult, PresetCase } from "@/lib/types";
+import type { CaseSummary, DiagnosticResult, PredictionResponse } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error";
 type ApiHealth = "checking" | "online" | "offline";
+
+/** Builds this page's one `DiagnosticResult` shape from a `PredictionResponse`
+ * — used identically whether that response came from a live upload
+ * (`predictScanVolume`) or a real, offline-scored demo case (`fetchCase`).
+ * There is no second, "preset" conversion path: both sources return the
+ * exact same wire shape, so both go through the exact same conversion. */
+function toDiagnosticResult(prediction: PredictionResponse): DiagnosticResult {
+  return {
+    riskScore: prediction.risk_score,
+    diagnosis: prediction.diagnosis,
+    severity: severityFromRisk(prediction.risk_score),
+    backend: prediction.backend,
+    latencyMs: prediction.latency_ms,
+    quantumTelemetry: quantumTelemetryFromPrediction(prediction),
+    volume: volumeViewFromPrediction(prediction),
+    provenance: provenanceFromPrediction(prediction),
+  };
+}
 
 /**
  * Full rebuild of the workstation shell (not a cosmetic pass over the
@@ -48,22 +66,30 @@ type ApiHealth = "checking" | "online" | "offline";
  * upload control may honestly say "Live Analysis") — one fetch, one
  * source of truth, instead of each component polling `/health` on its
  * own and risking two different answers on screen at once.
+ *
+ * Demo cases: `GET /api/cases` (real RSNA Knee studies, scored once
+ * offline by `scripts/build_real_demo_cases.py`) replaces the old
+ * hand-authored fake-case constant entirely. Selecting a demo case calls
+ * `GET /api/cases/{id}` and runs its response through the exact same
+ * `toDiagnosticResult` conversion a live upload uses — there is no
+ * separate fabricated-data code path left in this page.
  */
 export default function WorkstationPage() {
   const { token, user, isReady } = useAuth();
-  const [activeCase, setActiveCase] = useState<PresetCase>(PRESET_CASES[0]);
-  const [result, setResult] = useState<DiagnosticResult | null>(() => mockDiagnosticResult(PRESET_CASES[0]));
+  const [cases, setCases] = useState<CaseSummary[]>([]);
+  const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
+  const [result, setResult] = useState<DiagnosticResult | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
   const [casesOpen, setCasesOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
   const lastFileRef = useRef<File | null>(null);
-  // The in-flight `/predict` request, if any -- aborted whenever a newer
-  // one supersedes it (another upload, a demo-case switch, or the page
-  // unmounting) so a slow first response can never land after and clobber
-  // whatever the viewer is looking at by then.
-  const predictAbortRef = useRef<AbortController | null>(null);
+  // The in-flight `/predict` or `/api/cases/{id}` request, if any -- aborted
+  // whenever a newer one supersedes it (another upload, a demo-case switch,
+  // or the page unmounting) so a slow first response can never land after
+  // and clobber whatever the viewer is looking at by then.
+  const requestAbortRef = useRef<AbortController | null>(null);
 
   const canDiagnose = isReady && user?.role === "radiologist";
 
@@ -80,41 +106,67 @@ export default function WorkstationPage() {
     };
   }, []);
 
-  // Cancel any in-flight upload on unmount -- otherwise its `.then`/`.catch`
-  // could still fire after the page is gone.
+  // Fetches the real case list once, then auto-loads the first case so the
+  // page never opens empty when real demo data exists. An empty list (no
+  // `qknee/artifacts/real_demo_cases/` built yet) or a failed fetch just
+  // leaves the page on its "No result yet" empty state -- never falls back
+  // to any fabricated data.
   useEffect(() => {
-    return () => predictAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchCases(controller.signal)
+      .then((fetched) => {
+        if (controller.signal.aborted) return;
+        setCases(fetched);
+        if (fetched.length > 0) void loadCase(fetched[0].case_id);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setCases([]);
+      });
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleSelectCase(preset: PresetCase) {
-    predictAbortRef.current?.abort();
-    setActiveCase(preset);
-    setStatus("idle");
+  // Cancel any in-flight request on unmount -- otherwise its `.then`/`.catch`
+  // could still fire after the page is gone.
+  useEffect(() => {
+    return () => requestAbortRef.current?.abort();
+  }, []);
+
+  async function loadCase(caseId: string) {
+    requestAbortRef.current?.abort();
+    const controller = new AbortController();
+    requestAbortRef.current = controller;
+    setActiveCaseId(caseId);
+    setStatus("loading");
     setErrorMessage(null);
-    setResult(mockDiagnosticResult(preset));
+    try {
+      const prediction = await fetchCase(caseId, controller.signal);
+      if (controller.signal.aborted) return;
+      setResult(toDiagnosticResult(prediction));
+      setStatus("idle");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setErrorMessage(err instanceof ApiError ? err.detail : "Failed to load this demo case.");
+      setStatus("error");
+    }
+  }
+
+  function handleSelectCase(caseId: string) {
+    void loadCase(caseId);
     setCasesOpen(false);
   }
 
   async function runInference(file: File) {
     lastFileRef.current = file;
-    predictAbortRef.current?.abort();
+    requestAbortRef.current?.abort();
     const controller = new AbortController();
-    predictAbortRef.current = controller;
+    requestAbortRef.current = controller;
     setStatus("loading");
     setErrorMessage(null);
     try {
       const prediction = await predictScanVolume(file, token!, controller.signal);
       if (controller.signal.aborted) return;
-      setResult({
-        riskScore: prediction.risk_score,
-        diagnosis: prediction.diagnosis,
-        severity: severityFromRisk(prediction.risk_score),
-        backend: prediction.backend,
-        latencyMs: prediction.latency_ms,
-        quantumTelemetry: quantumTelemetryFromPrediction(prediction),
-        volume: volumeViewFromPrediction(prediction),
-        provenance: provenanceFromPrediction(prediction),
-      });
+      setResult(toDiagnosticResult(prediction));
       setStatus("idle");
     } catch (err) {
       // A newer request superseded this one -- that request's own
@@ -146,17 +198,18 @@ export default function WorkstationPage() {
   }
 
   function handleLoadDemo() {
-    setStatus("idle");
-    setErrorMessage(null);
-    setResult(mockDiagnosticResult(activeCase));
+    const caseId = activeCaseId ?? cases[0]?.case_id;
+    if (caseId) void loadCase(caseId);
   }
 
   const visibleResult = status === "error" ? null : result;
+  const activeCase = cases.find((c) => c.case_id === activeCaseId) ?? null;
+  const caseLabel = activeCase?.label ?? (result ? "Live Upload" : "");
 
   return (
     <div className="flex flex-1 flex-col">
       <StudyHeader
-        caseLabel={activeCase.label}
+        caseLabel={caseLabel}
         result={visibleResult}
         apiHealth={apiHealth}
         onOpenCases={() => setCasesOpen(true)}
@@ -173,7 +226,8 @@ export default function WorkstationPage() {
       <div className="no-print grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px]">
         <aside className="hidden lg:block lg:border-r lg:border-surface-3" aria-label="Case navigation">
           <CaseNav
-            activeCaseId={activeCase.id}
+            cases={cases}
+            activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
@@ -183,7 +237,8 @@ export default function WorkstationPage() {
 
         <Drawer open={casesOpen} onClose={() => setCasesOpen(false)} title="Demo Cases & Upload">
           <CaseNav
-            activeCaseId={activeCase.id}
+            cases={cases}
+            activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
@@ -227,7 +282,7 @@ export default function WorkstationPage() {
           (see `.print-only` in `app/globals.css`). Rendered only when
           there is a real result to report; an error/empty state has
           nothing honest to print. */}
-      {visibleResult && <PrintReport result={visibleResult} caseLabel={activeCase.label} />}
+      {visibleResult && <PrintReport result={visibleResult} caseLabel={caseLabel} />}
 
       {authOpen && <AuthModal open onClose={() => setAuthOpen(false)} />}
     </div>

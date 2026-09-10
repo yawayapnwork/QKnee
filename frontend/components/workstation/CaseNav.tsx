@@ -1,19 +1,19 @@
 import { Upload } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
-import { PRESET_CASES } from "@/lib/mock-data";
-import type { PresetCase } from "@/lib/types";
+import type { CaseSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type ApiHealth = "checking" | "online" | "offline";
 
 /**
  * LEFT zone: case/study navigation, replacing `StudySelector.tsx`. Two
- * sections, not one — "Demo Cases" (every row tagged `PRECOMPUTED DEMO`,
- * never presented as if it were a live result) and "Upload Study" (the
- * live-analysis entry point, consolidated here instead of living
- * separately in the header, so there is exactly one place a viewer looks
- * for "how do I get a result").
+ * sections, not one — "Demo Cases" (real RSNA Knee studies, scored once
+ * offline by `scripts/build_real_demo_cases.py` — see `GET /api/cases` —
+ * every row tagged `PRECOMPUTED DEMO`, never presented as if it were a
+ * live result) and "Upload Study" (the live-analysis entry point,
+ * consolidated here instead of living separately in the header, so there
+ * is exactly one place a viewer looks for "how do I get a result").
  *
  * The upload control's label only ever says "LIVE ANALYSIS" when BOTH a
  * real model is authorized for this viewer (`canDiagnose`, a radiologist
@@ -24,14 +24,16 @@ type ApiHealth = "checking" | "online" | "offline";
  * live request is handled by `ErrorState`, never a silent downgrade here.
  */
 export function CaseNav({
+  cases,
   activeCaseId,
   onSelectCase,
   canDiagnose,
   apiHealth,
   onUpload,
 }: {
-  activeCaseId: string;
-  onSelectCase: (preset: PresetCase) => void;
+  cases: CaseSummary[];
+  activeCaseId: string | null;
+  onSelectCase: (caseId: string) => void;
   canDiagnose: boolean;
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
@@ -42,36 +44,42 @@ export function CaseNav({
     <div className="flex flex-col gap-6 p-4">
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Demo Cases</h2>
-        <p className="mt-1 text-xs text-ink-muted">Precomputed reference studies, clearly marked as demo data.</p>
+        <p className="mt-1 text-xs text-ink-muted">
+          Real RSNA Knee studies, scored once offline — clearly marked as demo data.
+        </p>
 
-        <div role="radiogroup" aria-label="Demo case" className="mt-3 flex flex-col gap-1.5">
-          {PRESET_CASES.map((preset) => {
-            const isActive = preset.id === activeCaseId;
-            return (
-              <button
-                key={preset.id}
-                type="button"
-                role="radio"
-                aria-checked={isActive}
-                onClick={() => onSelectCase(preset)}
-                className={cn(
-                  "rounded-md border px-3 py-2 text-left text-xs transition-colors",
-                  isActive
-                    ? "border-accent bg-accent/10 text-ink-primary"
-                    : "border-surface-3 text-ink-muted hover:border-surface-3 hover:bg-surface-2",
-                )}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                  <span className="font-medium">{preset.label}</span>
-                  <Badge tone="neutral" className="shrink-0">
-                    Precomputed Demo
-                  </Badge>
-                </div>
-                <div className="mt-0.5 text-ink-faint">{preset.description}</div>
-              </button>
-            );
-          })}
-        </div>
+        {cases.length === 0 ? (
+          <p className="mt-3 text-xs text-ink-faint">No demo cases available right now.</p>
+        ) : (
+          <div role="radiogroup" aria-label="Demo case" className="mt-3 flex flex-col gap-1.5">
+            {cases.map((c) => {
+              const isActive = c.case_id === activeCaseId;
+              return (
+                <button
+                  key={c.case_id}
+                  type="button"
+                  role="radio"
+                  aria-checked={isActive}
+                  onClick={() => onSelectCase(c.case_id)}
+                  className={cn(
+                    "rounded-md border px-3 py-2 text-left text-xs transition-colors",
+                    isActive
+                      ? "border-accent bg-accent/10 text-ink-primary"
+                      : "border-surface-3 text-ink-muted hover:border-surface-3 hover:bg-surface-2",
+                  )}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                    <span className="font-medium">{c.label}</span>
+                    <Badge tone="neutral" className="shrink-0">
+                      Precomputed Demo
+                    </Badge>
+                  </div>
+                  <div className="mt-0.5 text-ink-faint">{c.diagnosis}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="border-t border-surface-3 pt-4">

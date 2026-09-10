@@ -1,4 +1,5 @@
 import type {
+  CaseSummary,
   HealthResponse,
   LoginCredentials,
   PredictionResponse,
@@ -84,5 +85,25 @@ export async function predictScanVolume(file: File, token: string, signal?: Abor
     body: formData,
     signal,
   });
+  return parseJsonOrThrow<PredictionResponse>(res);
+}
+
+/** GET /api/cases — real RSNA Knee studies scored once offline (see
+ * `scripts/build_real_demo_cases.py`), never fabricated preset data.
+ * Public, no auth required — matches `CaseNav`'s "demo cases available to
+ * everyone without signing in" policy. Returns `[]` (not an error) if the
+ * backend hasn't built its case cache yet. */
+export async function fetchCases(signal?: AbortSignal): Promise<CaseSummary[]> {
+  const res = await fetch(`${API_BASE_URL}/api/cases`, { signal, cache: "no-store" });
+  return parseJsonOrThrow<CaseSummary[]>(res);
+}
+
+/** GET /api/cases/{case_id} — the full prediction payload for one real case
+ * from `fetchCases()`, in the exact same shape `predictScanVolume` returns
+ * for a live upload. Its `provenance` comes back `"precomputed_demo"`
+ * (never `"live"`): real model, real quantum circuit, computed once
+ * offline and replayed verbatim, not this request's own inference. */
+export async function fetchCase(caseId: string, signal?: AbortSignal): Promise<PredictionResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/cases/${encodeURIComponent(caseId)}`, { signal, cache: "no-store" });
   return parseJsonOrThrow<PredictionResponse>(res);
 }

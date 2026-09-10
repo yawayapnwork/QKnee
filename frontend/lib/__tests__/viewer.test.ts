@@ -9,9 +9,7 @@ import {
   sliceImageSrc,
   toImageSrc,
   volumeViewFromPrediction,
-  volumeViewFromPreset,
 } from "../viewer";
-import { PRESET_CASES } from "../mock-data";
 import { livePrediction } from "./fixtures";
 
 describe("AUDIT.md P0 #3/#4 regression: base MRI slice and Grad-CAM overlay are separate assets", () => {
@@ -24,13 +22,16 @@ describe("AUDIT.md P0 #3/#4 regression: base MRI slice and Grad-CAM overlay are 
     expect(volume.gradcamOverlay).toContain("AXIAL_SLICE_12_OVERLAY_BASE64");
   });
 
-  it("preset/demo volumes also use two distinct generated images, never the same asset twice", () => {
-    for (const preset of PRESET_CASES) {
-      const volume = volumeViewFromPreset(preset);
-      const baseSrc = sliceImageSrc(volume, "axial", 0);
-      expect(baseSrc).not.toBeNull();
-      expect(baseSrc).not.toEqual(volume.gradcamOverlay);
-    }
+  it("a real, offline-scored demo case (GET /api/cases/{id}) also carries two distinct real images, never the same asset twice", () => {
+    // scripts/build_real_demo_cases.py's cases are ordinary PredictionResponses
+    // (backend="cache-fallback/<study_uid>") -- volumeViewFromPrediction needs
+    // no separate "preset" code path to build their VolumeView.
+    const volume = volumeViewFromPrediction(
+      livePrediction({ backend: "cache-fallback/1.2.826.0.1.3680043.8.498.example" }),
+    );
+    const baseSrc = sliceImageSrc(volume, "axial", volume.gradcamSliceIndex!);
+    expect(baseSrc).not.toBeNull();
+    expect(baseSrc).not.toEqual(toImageSrc(volume.gradcamOverlay!));
   });
 
   it("gradcam overlay is null (never a substitute base image) when the backend computed none", () => {
@@ -100,11 +101,13 @@ describe("unavailable planes", () => {
     expect(sliceImageSrc(volume, "coronal", 0)).toBeNull();
   });
 
-  it("a preset/demo case only ever claims the axial plane, never Coronal/Sagittal", () => {
-    const volume = volumeViewFromPreset(PRESET_CASES[0]);
-    expect(volume.planes.axial.available).toBe(true);
-    expect(volume.planes.coronal.available).toBe(false);
-    expect(volume.planes.sagittal.available).toBe(false);
+});
+
+describe("no client-side constructor for demo-case volumes", () => {
+  it("volumeViewFromPreset is deleted along with the hand-authored preset data it served", async () => {
+    const viewerModule: Record<string, unknown> = await import("../viewer");
+    expect(viewerModule.volumeViewFromPreset).toBeUndefined();
+    expect(viewerModule.placeholderImageDataUri).toBeUndefined();
   });
 });
 

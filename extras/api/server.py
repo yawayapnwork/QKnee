@@ -47,6 +47,7 @@ import base64
 import gc
 import hashlib
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -170,6 +171,7 @@ FRONTEND_URL = (os.getenv("FRONTEND_URL") or "https://q-knee-gamma.vercel.app").
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
 BENCHMARK_RESULTS_PATH = _REPO_ROOT / "qknee" / "artifacts" / "benchmark_results.json"
+REAL_DEMO_CASES_DIR = _REPO_ROOT / "qknee" / "artifacts" / "real_demo_cases"
 
 
 # --------------------------------------------------------------------------- #
@@ -469,6 +471,19 @@ class PredictionResponse(BaseModel):
                     "'unavailable' means something is actually missing.",
     )
     quantum_execution_label: str = Field(..., description="Human-readable label for `quantum_execution`.")
+
+
+class CaseSummary(BaseModel):
+    """One entry in `GET /api/cases`' listing -- a real RSNA Knee study,
+    scored once offline by `scripts/build_real_demo_cases.py` (real
+    ResNet18 -> PCA -> VQC -> Grad-CAM inference, not fabricated numbers).
+    Deliberately lightweight (no images) so listing every case stays cheap;
+    `GET /api/cases/{case_id}` returns the full `PredictionResponse`."""
+
+    case_id: str = Field(..., description="RSNA StudyInstanceUID -- pass straight to GET /api/cases/{case_id}.")
+    label: str = Field(..., description="Short display label for a case list/picker.")
+    diagnosis: str = Field(..., description="'Tear Detected' if risk_score >= 0.5, else 'Normal'.")
+    risk_score: float = Field(..., ge=0.0, le=1.0)
 
 
 class HealthResponse(BaseModel):
@@ -1781,6 +1796,81 @@ async def report(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="qknee_diagnostic_report.pdf"'},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Real demo cases: browse actual RSNA Knee studies, scored once offline
+# (scripts/build_real_demo_cases.py) instead of the frontend's old
+# hand-authored PRESET_CASES. Public (no auth) -- same "demo cases stay
+# available to everyone without signing in" policy the frontend already
+# applied to the old fabricated presets, now backed by real inference.
+# --------------------------------------------------------------------------- #
+
+_CASE_ID_PATTERN = re.compile(r"^[0-9.]+$")
+
+
+@app.get("/api/cases", response_model=List[CaseSummary], tags=["Demo Cases"])
+async def list_cases() -> List[CaseSummary]:
+    """Real RSNA Knee studies scored offline by
+    `scripts/build_real_demo_cases.py` -- `train_series/` itself (~2.3GB of
+    raw DICOM) is `.gitignore`d and never deployed, but this small,
+    git-tracked index + the per-case JSON files under
+    `qknee/artifacts/real_demo_cases/` are, so this list is real and
+    populated on the actual deployed backend, not just localhost.
+
+    Returns an empty list (not an error) if the cache hasn't been built --
+    a fresh clone with no `qknee/artifacts/real_demo_cases/` yet gets an
+    empty case picker, not a 500."""
+    index_path = REAL_DEMO_CASES_DIR / "index.json"
+    if not index_path.exists():
+        return []
+    import json
+
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to read %s: %s", index_path, exc)
+        return []
+    return [CaseSummary(**entry) for entry in raw]
+
+
+@app.get("/api/cases/{case_id}", response_model=PredictionResponse, tags=["Demo Cases"])
+async def get_case(case_id: str) -> PredictionResponse:
+    """Full prediction payload for one real, offline-scored case from
+    `GET /api/cases` -- same `PredictionResponse` shape `/predict` returns,
+    so the frontend's existing prediction-rendering code (built for live
+    results) needs no separate code path for these. `provenance` comes back
+    as `'precomputed_demo'` (never `'live'`): real model, real quantum
+    circuit, computed once offline and replayed verbatim, not this
+    request's own inference.
+
+    404s for an unknown case_id -- never silently substitutes a different
+    case. `case_id` is validated against RSNA StudyInstanceUID's own
+    charset (digits and dots only) before touching the filesystem, so it
+    can't be used for path traversal."""
+    if not _CASE_ID_PATTERN.match(case_id):
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    case_path = REAL_DEMO_CASES_DIR / f"{case_id}.json"
+    if not case_path.exists():
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    import json
+
+    try:
+        case = json.loads(case_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read case {case_id}: {exc}") from exc
+
+    info = provenance_module.classify(
+        backend_tag=case["backend"],
+        model_checkpoint_loaded=case["model_checkpoint_loaded"],
+        quantum_expectations_present=case["quantum_expectations"] is not None,
+    )
+    return PredictionResponse(
+        **{k: v for k, v in case.items() if k != "model_checkpoint_loaded"},
+        **info.as_dict(),
     )
 
 

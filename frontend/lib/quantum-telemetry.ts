@@ -1,4 +1,4 @@
-import type { PredictionResponse, PresetCase, QuantumTelemetry } from "./types";
+import type { PredictionResponse, QuantumTelemetry } from "./types";
 
 const UNAVAILABLE: QuantumTelemetry = { expectations: [], nQubits: null, device: null };
 
@@ -24,14 +24,11 @@ export function quantumTelemetryFromPrediction(prediction: PredictionResponse): 
   };
 }
 
-/** A preset/demo case's real, precomputed per-qubit values. */
-export function quantumTelemetryFromPreset(preset: PresetCase): QuantumTelemetry {
-  return {
-    expectations: preset.qubitExpectations,
-    nQubits: preset.qubitExpectations.length,
-    device: null,
-  };
-}
+// `quantumTelemetryFromPreset` (hand-authored fake per-qubit values) is
+// deleted -- demo cases are now real RSNA Knee studies scored once offline
+// (see `scripts/build_real_demo_cases.py`) and served via
+// `GET /api/cases/{id}` as an ordinary `PredictionResponse`, so they go
+// through `quantumTelemetryFromPrediction` above like any other result.
 
 /**
  * The ONE authoritative answer to "is there quantum telemetry data to
@@ -40,11 +37,9 @@ export function quantumTelemetryFromPreset(preset: PresetCase): QuantumTelemetry
  * about whether a result's per-qubit numbers should be shown. This is
  * deliberately independent of whether the execution is verified
  * (`provenance.quantumExecution === "quantum_simulator"`) -- a precomputed
- * demo case has real, non-empty `expectations` and IS shown, just labeled
- * "NOT INDEPENDENTLY VERIFIABLE" rather than "QUANTUM SIMULATOR" (see
- * `lib/provenance.ts#provenanceForPreset`). Only a genuinely empty
- * `expectations` array (`quantumExecution === "unavailable"`) hides the
- * panel/table entirely.
+ * demo case has real, non-empty `expectations` (a real circuit ran once,
+ * offline) and IS shown. Only a genuinely empty `expectations` array
+ * (`quantumExecution === "unavailable"`) hides the panel/table entirely.
  */
 export function hasQuantumTelemetry(telemetry: QuantumTelemetry): boolean {
   return telemetry.expectations.length > 0;

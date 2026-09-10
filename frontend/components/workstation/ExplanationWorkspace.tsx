@@ -279,14 +279,14 @@ export function ExplanationWorkspace({
             <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5 mb-4">
               <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-muted">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
-                {/* Branches on provenance, not just wording -- for a live
-                    result the causal claim is real (the backend's own
-                    linear+sigmoid readout runs on exactly these values);
-                    for a precomputed demo, `riskScore` and
-                    `qubitExpectations` are two independently stored
-                    constants (see `mock-data.ts`) with no code path
-                    computing one from the other, so the claim would be
-                    false, not just unproven. */}
+                {/* Branches on provenance, not just wording -- the causal
+                    claim below is only made when quantumExecution ===
+                    "quantum_simulator", i.e. a real circuit actually ran
+                    (live, or a real demo case from GET /api/cases/{id} --
+                    see scripts/build_real_demo_cases.py -- computed once
+                    offline through the exact same linear+sigmoid readout).
+                    If quantum telemetry is ever unavailable/unverifiable
+                    for a result, this claim must not render. */}
                 {result.provenance.quantumExecution === "quantum_simulator" ? (
                   <span>
                     This architecture&apos;s classical readout is a linear layer + sigmoid applied directly to these
