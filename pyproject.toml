@@ -104,7 +104,7 @@ include = ["qknee*", "extras*"]
 qknee = ["artifacts/**/*", "config/*.yaml"]
 
 [tool.vercel]
-entrypoint = "extras/api/server.py"
+entrypoint = "extras.api.server:app"
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
