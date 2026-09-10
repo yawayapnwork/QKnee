@@ -98,13 +98,13 @@ qknee-train = "scripts.train:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qknee*"]
+include = ["qknee*", "extras*"]
 
 [tool.setuptools.package-data]
 qknee = ["artifacts/**/*", "config/*.yaml"]
 
 [tool.vercel]
-entrypoint = "extras.api.server:app"
+entrypoint = "extras/api/server.py"
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
