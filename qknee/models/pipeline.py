@@ -49,7 +49,6 @@ from qknee.models.qknee_model import DEFAULT_BEST_CHECKPOINT_PATH, PCAProjection
 from qknee.models.quantum_autoencoder import QuantumAutoencoder
 from qknee.models.resnet_extractor import ONNXFeatureExtractor, ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier, angle_encoding, variational_block
-from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 from qknee.xai.gradcam import GradCAM, TargetFn, get_default_target_layer, overlay_heatmap
 
 logger = get_logger(__name__)
@@ -209,22 +208,25 @@ class PipelineRunner:
         config: A pre-loaded `QKneeConfig`; defaults to `load_config()`.
         pca_artifact_path: Overrides `config.paths.pca_artifact`. Only used
             when `encoder_type="pca"`.
-        vqc_checkpoint_path: Optional path to a trained classifier
-            `state_dict` (works for either `classifier_backbone`, since
-            `VQCClassifier` and `DataReuploadingVQC` share the same
-            `n_qubits`/`n_layers`/`state_dict` shape); if omitted, the
-            classifier is randomly initialized (matches the pre-refactor
-            demo behavior of app.py/qknee_frontend.py).
+        vqc_checkpoint_path: Optional path to a trained `VQCClassifier`
+            `state_dict` — the two `classifier_backbone` options build the
+            same `VQCClassifier` class under two different `ansatz`
+            settings, which register different parameter tensors
+            (`weights` vs `enc_weights`/`var_weights`), so a checkpoint
+            trained under one ansatz will NOT load under the other; if
+            omitted, the classifier is randomly initialized (matches the
+            pre-refactor demo behavior of app.py/qknee_frontend.py).
         encoder_type: `"pca"` (default) loads a fitted
             `QuantumDimReducer` artifact, exactly as before.
             `"quantum_autoencoder"` instead builds a trainable
             `QuantumAutoencoder` (SWAP-test Hilbert-space compression) —
             see `qknee.models.quantum_autoencoder`.
-        classifier_backbone: `"vqc"` (default) builds a `VQCClassifier`
-            (single-shot angle encoding), exactly as before.
-            `"data_reuploading"` instead builds a `DataReuploadingVQC`
-            (re-encodes the input at every layer) — see
-            `qknee.models.vqc_data_reuploading`.
+        classifier_backbone: `"vqc"` (default) builds
+            `VQCClassifier(ansatz="angle")` (single-shot angle encoding),
+            exactly as before. `"data_reuploading"` instead builds
+            `VQCClassifier(ansatz="data_reuploading")` (re-encodes the
+            input at every layer) — see `qknee.models.vqc`'s module
+            docstring.
         quantum_autoencoder_checkpoint_path: Optional path to a trained
             `QuantumAutoencoder` `state_dict`. Only used when
             `encoder_type="quantum_autoencoder"`; if omitted (or the
@@ -345,11 +347,12 @@ class PipelineRunner:
             self.quantum_autoencoder.to(self.device)
             self.quantum_autoencoder.eval()
 
-        # --- Stage 4: classifier (VQC or Data-Re-Uploading VQC) ---
-        classifier_cls = VQCClassifier if classifier_backbone == "vqc" else DataReuploadingVQC
-        self.vqc = classifier_cls(
+        # --- Stage 4: classifier (angle-encoding or data-re-uploading ansatz) ---
+        classifier_ansatz = "angle" if classifier_backbone == "vqc" else "data_reuploading"
+        self.vqc = VQCClassifier(
             n_qubits=self.config.quantum.n_qubits,
             n_layers=self.config.quantum.n_layers,
+            ansatz=classifier_ansatz,
         )
         checkpoint_path = Path(vqc_checkpoint_path or self.config.paths.model_checkpoint)
         if not checkpoint_path.exists() and vqc_checkpoint_path is None:
@@ -362,7 +365,7 @@ class PipelineRunner:
         if checkpoint_path.exists():
             self._load_vqc_checkpoint(checkpoint_path)
             self.vqc_checkpoint_loaded = True
-            logger.info("Loaded trained %s weights from %s", classifier_cls.__name__, checkpoint_path)
+            logger.info("Loaded trained VQCClassifier weights from %s", checkpoint_path)
         else:
             self.vqc_checkpoint_loaded = False
             # Graceful missing-checkpoint handler: never raises
@@ -372,14 +375,14 @@ class PipelineRunner:
             # backed by the classical ResNet18 backbone's deterministic
             # ImageNet-pretrained weights (loaded unconditionally above,
             # regardless of this checkpoint) and a freshly, randomly
-            # initialized quantum VQC (classifier_cls(...) above already
+            # initialized quantum VQC (VQCClassifier(...) above already
             # did this — this branch only logs that fact).
             logger.warning(
                 "[WARN] Checkpoint not found. Initialized deterministic hybrid weights for "
                 "demo/eval mode. (looked for a %s checkpoint at %s — proceeding with "
                 "deterministic pretrained ResNet18 backbone weights and randomly initialized "
                 "quantum VQC parameters.)",
-                classifier_cls.__name__, checkpoint_path,
+                "VQCClassifier", checkpoint_path,
             )
         self.vqc.to(self.device)
         self.vqc.eval()  # standard PyTorch inference mode: disables dropout/BatchNorm updates
@@ -503,16 +506,17 @@ class PipelineRunner:
             )
         return angles
 
-    def classify(self, quantum_angles: np.ndarray, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> float:
+    def classify(self, quantum_angles: np.ndarray, vqc: Optional[VQCClassifier] = None) -> float:
         """Stage 4: `(1, n_qubits)` angles -> scalar risk probability in `[0, 1]`.
 
         Prefers `model.predict_fast()` (duck-typed via `hasattr`) when the
         model exposes it — `VQCClassifier`'s gradient-free, lightning.qubit
-        -backed, per-instance-cached inference path, ~5x faster cold and
-        effectively free (sub-microsecond) on a cache hit versus the
+        -backed, per-instance-cached inference path (works identically for
+        either `ansatz`), ~5x faster cold and effectively free
+        (sub-microsecond) on a cache hit versus the
         `TorchLayer`/`default.qubit`/`backprop` path `forward()` runs
-        below. `DataReuploadingVQC` and any other classifier without
-        `predict_fast` transparently use the `forward()` path unchanged."""
+        below. Any classifier without `predict_fast` transparently uses
+        the `forward()` path unchanged."""
         model = vqc or self.vqc
 
         if hasattr(model, "predict_fast"):
@@ -540,7 +544,7 @@ class PipelineRunner:
         return risk_value
 
     def get_pauli_z_expectations(
-        self, quantum_angles: np.ndarray, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None
+        self, quantum_angles: np.ndarray, vqc: Optional[VQCClassifier] = None
     ) -> Optional[np.ndarray]:
         """Raw per-qubit Pauli-Z expectation values in `[-1, 1]` -- the
         quantum circuit's own measurement output, read directly from the
@@ -548,12 +552,8 @@ class PipelineRunner:
         `Linear(n_qubits, 1)` + sigmoid readout in `classify()` collapses it
         into one risk probability. This is the real, executed-circuit data
         that backs any "live quantum telemetry" surfaced to a caller (e.g.
-        `qknee.api.server`'s `/predict`) -- never derived from `risk_score`
+        `extras.api.server`'s `/predict`) -- never derived from `risk_score`
         and never randomly generated.
-
-        Functionally mirrors `qknee.ui.dashboard.get_pauli_z_expectations`,
-        kept as an independent implementation here so non-UI callers (the
-        FastAPI server) don't have to import Streamlit/matplotlib.
 
         Returns `None` (rather than guessing) if the model doesn't expose a
         `.quantum_layer` attribute -- e.g. a custom ansatz that doesn't
@@ -628,7 +628,7 @@ class PipelineRunner:
             )
         return probabilities_np
 
-    def _risk_target_fn(self, vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None) -> TargetFn:
+    def _risk_target_fn(self, vqc: Optional[VQCClassifier] = None) -> TargetFn:
         """Builds a Grad-CAM `target_fn` that continues the forward pass from
         a ResNet embedding through the differentiable PCA layer and `vqc`
         (defaulting to `self.vqc`) to the scalar predicted risk probability —
@@ -650,7 +650,7 @@ class PipelineRunner:
     def explain(
         self,
         single_slice_tensor: torch.Tensor,
-        vqc: Optional[Union[VQCClassifier, DataReuploadingVQC]] = None,
+        vqc: Optional[VQCClassifier] = None,
         target_fn: Optional[TargetFn] = None,
     ) -> np.ndarray:
         """Stage 5: `(1, 3, 224, 224)` single-slice tensor -> `(H, W)` Grad-CAM

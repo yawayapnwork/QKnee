@@ -138,7 +138,7 @@ class QKneeModel(nn.Module):
         self.resnet = ResNet18FeatureExtractor(freeze_backbone=freeze_resnet)
         self.pca_layer = PCAProjectionLayer.from_reducer(pca_reducer)
         # `vqc` lets a caller swap in a different ansatz (e.g.
-        # `DataReuploadingVQC`, `StronglyEntanglingVQCClassifier` — see
+        # `VQCClassifier(ansatz="data_reuploading")` — see
         # `scripts/train.py --ansatz`) as long as it exposes the same
         # `(B, n_qubits) -> (B, 1)` sigmoid-probability interface
         # `VQCClassifier` does; defaults to the standard `VQCClassifier`.

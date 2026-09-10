@@ -1,3 +1,3 @@
-from qknee.models.vqc_data_reuploading import DataReuploadingVQC
+from qknee.models.vqc import VQCClassifier
 
-__all__ = ["DataReuploadingVQC"]
+__all__ = ["VQCClassifier"]

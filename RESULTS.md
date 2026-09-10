@@ -260,9 +260,92 @@ Regenerate with:
 ```bash
 for s in 0 1 2 3 4; do
   PYTHONPATH=. python scripts/run_vqc_vs_mlp_kfold.py \
-    --seed "$s" \
+    --seed "$s" --models vqc,mlp_matched \
     --output "qknee/artifacts/vqc_vs_mlp_kfold_summary_seed${s}.json"
 done
+```
+
+### 4a. A third baseline: a realistically-sized classical head (unmatched)
+
+**Status: finalized.**
+
+The comparison above deliberately equalizes parameter count to isolate
+whether the quantum circuit itself buys anything at a *fixed, tiny*
+parameter budget. It can't answer a different, practically-relevant
+question: **if you weren't using the quantum layer at all, what would you
+actually build, and how many parameters would it cost?**
+
+`scripts/run_vqc_vs_mlp_kfold.py --models mlp_large` adds `LargeMLP`
+(`Linear(512, 128, bias=True) → ReLU → Linear(128, 1, bias=True)`, **65,793
+trainable parameters** — 1,605x the VQC's 41) operating directly on the raw
+512-D ResNet18 embedding, with no PCA/quantum-angle bottleneck at all —
+the classical head a deployment that never used the quantum layer would
+actually reach for. Same 5-fold `StratifiedKFold`, same 5 seeds (0–4), same
+12-condition out-of-fold macro-AUC protocol as §4.
+
+| Model | Trainable params | Mean oof_macro_auc | Min | Max | Std |
+|---|---:|:---:|:---:|:---:|:---:|
+| VQC (`ansatz="angle"`) | 41 | 0.5242 | 0.5072 | 0.5471 | 0.0151 |
+| MLP, matched | 41 | 0.5441 | 0.5207 | 0.5845 | 0.0242 |
+| MLP, realistic (unmatched) | 65,793 | 0.5339 | 0.5243 | 0.5420 | 0.0059 |
+
+**Finding: macro-AUC is flat across a ~1,600x range of parameter counts on
+this 58-study dataset.** Throwing ~1,600x more parameters at the raw,
+uncompressed embedding does not clearly beat either 41-parameter model —
+`LargeMLP`'s mean sits *between* the VQC's and the matched MLP's, inside
+both of their min–max ranges, with all three overlapping heavily. Read
+this as a genuine parameter-*efficiency* finding, not a quantum-advantage
+claim: at this sample size, more classical capacity buys no measurable
+accuracy, so the VQC's 41-parameter circuit is not leaving performance on
+the table relative to a head three orders of magnitude larger. Whether
+that gap opens up at a larger study count than 58 is an open question this
+dataset cannot answer either way.
+
+Regenerate with:
+
+```bash
+for s in 0 1 2 3 4; do
+  PYTHONPATH=. python scripts/run_vqc_vs_mlp_kfold.py \
+    --seed "$s" --models mlp_large \
+    --output "qknee/artifacts/vqc_vs_mlp_kfold_summary_mlplarge_seed${s}.json"
+done
+```
+
+### 4b. Sample-efficiency sweep (single seed, ACL condition)
+
+**Status: preliminary — single seed (0), one condition (ACL). Flagged as
+noisy below rather than smoothed over; do not over-read individual cells.**
+
+`run_sample_efficiency_analysis` retrains each model on a class-stratified
+25% / 50% / 100% subsample of each fold's *training* split (test folds
+always stay full-size) and reports the final-epoch test AUC on ACL, mean
+± std across the same 5 folds used above:
+
+| Train fraction | VQC (41 params) | MLP matched (41 params) | MLP realistic (65,793 params) |
+|:---:|:---:|:---:|:---:|
+| 25% | 0.3657 ± 0.1633 | 0.4595 ± 0.1652 | 0.4105 ± 0.1194 |
+| 50% | 0.5090 ± 0.2635 | 0.4814 ± 0.1732 | 0.5938 ± 0.0779 |
+| 100% | 0.4652 ± 0.1749 | 0.2667 ± 0.1196 | 0.4757 ± 0.1045 |
+
+Reported honestly, not selectively: single-condition ACL AUC on ~12
+training studies per fold at 25% is extremely noisy (std routinely exceeds
+half the mean), and none of the three models shows a clean, monotonic
+"more data → better AUC" curve — `mlp_matched` at 100% is actually its
+*worst* row here. This is a real artifact of n≈58 with a single train/test
+split per fraction, not a hidden pattern being obscured. The honest
+takeaway is that a single-seed, single-condition sample-efficiency sweep
+at this sample size is underpowered to support a directional claim either
+way; a multi-seed, macro-averaged version of this sweep is the natural
+next step before citing a sample-efficiency result as evidence rather than
+as a diagnostic.
+
+Regenerate (all three models, one seed) with:
+
+```bash
+PYTHONPATH=. python scripts/run_vqc_vs_mlp_kfold.py --seed 0 \
+  --models vqc,mlp_matched,mlp_large \
+  --sample-efficiency-fractions 0.25,0.5,1.0 \
+  --output qknee/artifacts/vqc_vs_mlp_kfold_summary_seed0_full.json
 ```
 
 ---

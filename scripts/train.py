@@ -57,7 +57,6 @@ from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import QKneeModel, load_checkpoint, save_checkpoint
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
 from qknee.models.vqc import VQCClassifier
-from qknee.models.vqc_data_reuploading import DataReuploadingVQC
 
 logger = get_logger(__name__)
 
@@ -88,7 +87,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Anatomical plane subdirectory to train on: <dataset_dir>/<plane>/train/... "
                               "if that subdirectory exists, else --dataset_dir is used as-is.")
     parser.add_argument("--ansatz", choices=ANSATZ_CHOICES, default="basic",
-                         help="VQC ansatz: 'basic' (VQCClassifier) or 'data_reuploading' (DataReuploadingVQC).")
+                         help="VQC ansatz: 'basic' (VQCClassifier(ansatz='angle')) or "
+                              "'data_reuploading' (VQCClassifier(ansatz='data_reuploading')).")
     parser.add_argument("--epochs", type=int, default=None,
                          help="Full-batch gradient steps (default: config.yaml's training.n_epochs).")
     parser.add_argument("--batch_size", type=int, default=None,
@@ -204,9 +204,9 @@ def build_vqc(ansatz: str, n_qubits: int, n_layers: int) -> nn.Module:
     `(B, n_qubits) -> (B, 1)` sigmoid-probability interface, so either
     plugs directly into `QKneeModel`'s `vqc=` argument."""
     if ansatz == "basic":
-        return VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
+        return VQCClassifier(n_qubits=n_qubits, n_layers=n_layers, ansatz="angle")
     elif ansatz == "data_reuploading":
-        return DataReuploadingVQC(n_qubits=n_qubits, n_layers=n_layers)
+        return VQCClassifier(n_qubits=n_qubits, n_layers=n_layers, ansatz="data_reuploading")
     raise TrainingError(f"Unknown --ansatz '{ansatz}'; expected one of {ANSATZ_CHOICES}")
 
 

@@ -54,9 +54,8 @@ DICOM_EXTENSIONS = {".dcm", ".dicom"}
 AnatomicalPlane = Literal["axial", "coronal", "sagittal"]
 
 # A (D, H, W) volume's three axes correspond to the three standard
-# radiological planes in this fixed order — matches
-# `qknee.ui.dashboard.get_slice`'s convention, centralized here so both the
-# dashboard and any offline data pipeline (this module) agree on which axis
+# radiological planes in this fixed order — centralized here so both the
+# frontend and any offline data pipeline (this module) agree on which axis
 # is which plane.
 _PLANE_AXIS: dict = {"axial": 0, "coronal": 1, "sagittal": 2}
 

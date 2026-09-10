@@ -10,8 +10,8 @@ one of the Streamlit dashboard's three risk heads was, until this module
 existed, silently scoring real ResNet18/PCA features through a randomly-
 initialized quantum classifier and presenting the result with the exact
 same visual weight as a genuinely trained prediction. This module is the
-single source of truth `qknee/ui/dashboard.py` and `extras/api/server.py`
-both call to decide whether a head may present a numeric score at all, or
+single source of truth `extras/api/server.py`
+calls to decide whether a head may present a numeric score at all, or
 must instead show "UNAVAILABLE" (see `ModelStatus`/`CheckpointInfo` below).
 
 Two entry points, deliberately different costs:

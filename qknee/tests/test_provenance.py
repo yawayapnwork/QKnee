@@ -1,7 +1,7 @@
 """
-Tests for `qknee.observability.provenance` -- the single shared module both
-`extras/api/server.py` (Next.js/FastAPI contract) and `qknee/ui/dashboard.py`
-(Streamlit) derive their prediction-provenance badges from.
+Tests for `qknee.observability.provenance` -- the shared module
+`extras/api/server.py` (Next.js/FastAPI contract) derives its
+prediction-provenance badges from.
 
 Covers:
     1. The five top-level `Provenance` categories `classify()` can produce,

@@ -63,7 +63,7 @@ _config = load_config()
 TargetFn = Callable[[torch.Tensor], torch.Tensor]
 
 # Colormap options for `overlay_heatmap`'s `colormap` argument — a single
-# source of truth so the UI layer (`qknee.ui.analysis_app`'s colormap
+# source of truth so the UI layer (the frontend's colormap
 # toggle) doesn't hardcode OpenCV constants of its own.
 COLORMAP_OPTIONS: Dict[str, int] = {
     "jet": cv2.COLORMAP_JET,

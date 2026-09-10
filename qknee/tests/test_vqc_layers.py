@@ -1,8 +1,9 @@
 """
-Parameterized tests across the two VQC ansatz "topologies":
+Parameterized tests across `qknee.models.vqc.VQCClassifier`'s two ansatz
+"topologies":
 
-    - qknee.models.vqc.VQCClassifier                        ("basic")
-    - qknee.models.vqc_data_reuploading.DataReuploadingVQC   ("data_reuploading")
+    - VQCClassifier(ansatz="angle")             ("basic")
+    - VQCClassifier(ansatz="data_reuploading")   ("data_reuploading")
 
 Covers:
     1. Measurement bounds: the raw Pauli-Z expectation value(s) each
@@ -40,10 +41,9 @@ import torch
 from qknee.config.loader import load_config
 from qknee.models.vqc import VQCClassifier
 from qknee.models.vqc import angle_encoding as basic_angle_encoding
+from qknee.models.vqc import reuploading_encoding
 from qknee.models.vqc import variational_block as basic_variational_block
-from qknee.models.vqc_data_reuploading import DataReuploadingVQC
-from qknee.models.vqc_data_reuploading import reuploading_encoding
-from qknee.models.vqc_data_reuploading import variational_block as reupload_variational_block
+from qknee.models.vqc import variational_block as reupload_variational_block
 
 _config = load_config()
 N_QUBITS = _config.quantum.n_qubits
@@ -98,25 +98,23 @@ def _data_reuploading_weight_args(n_qubits: int, n_layers: int, rng: np.random.G
 @dataclass(frozen=True)
 class TopologySpec:
     name: str
-    model_cls: Callable
+    ansatz: str
     probs_qnode_builder: Callable
     weight_args_builder: Callable
 
     def build_model(self) -> torch.nn.Module:
-        return self.model_cls(n_qubits=N_QUBITS, n_layers=N_LAYERS)
+        return VQCClassifier(n_qubits=N_QUBITS, n_layers=N_LAYERS, ansatz=self.ansatz)
 
     def raw_quantum_layer(self, model: torch.nn.Module):
         """Returns the bare `qml.qnn.TorchLayer` (pre-readout, pre-sigmoid)
         for `model` — both topologies expose it as `.quantum_layer`
         directly."""
-        if hasattr(model, "quantum_layer"):
-            return model.quantum_layer
-        return model.circuit.quantum_layer
+        return model.quantum_layer
 
 
 TOPOLOGIES = [
-    TopologySpec("basic", VQCClassifier, _probs_qnode_basic, _basic_weight_args),
-    TopologySpec("data_reuploading", DataReuploadingVQC, _probs_qnode_data_reuploading, _data_reuploading_weight_args),
+    TopologySpec("basic", "angle", _probs_qnode_basic, _basic_weight_args),
+    TopologySpec("data_reuploading", "data_reuploading", _probs_qnode_data_reuploading, _data_reuploading_weight_args),
 ]
 TOPOLOGY_IDS = [t.name for t in TOPOLOGIES]
 
@@ -270,3 +268,135 @@ class TestGradientFlow:
         for param in trainable_params:
             assert param.grad is not None
             assert torch.isfinite(param.grad).all()
+
+
+# --------------------------------------------------------------------------- #
+# 6. Parameter-shift-rule gradients
+# --------------------------------------------------------------------------- #
+#
+# `config.yaml`'s `quantum.diff_method` is "backprop" by default — fast
+# because it differentiates through the simulator's own statevector
+# arithmetic, but NOT something a real NISQ device can do (a physical QPU
+# has no statevector to backprop through). The parameter-shift rule
+# (Mitarai et al. 2018 / Schuld et al. 2019) is the standard
+# hardware-realizable alternative: for a gate `exp(-i*theta/2 * G)` with a
+# two-eigenvalue generator (true of every RX/RY/RZ this ansatz uses), the
+# exact analytic gradient is `0.5 * (f(theta + pi/2) - f(theta - pi/2))` —
+# two extra circuit evaluations per parameter, no simulator internals
+# required. These tests confirm two things a "we used backprop because
+# it's fast, not because we checked" implementation wouldn't necessarily
+# have: (1) parameter-shift gradients agree with backprop's (both are
+# exact for this gate set, so they must match to float precision, not just
+# "be close"), and (2) the circuit is trainable end-to-end under
+# parameter-shift alone — i.e. nothing here silently depends on backprop's
+# simulator internals in a way that would break on real hardware.
+class TestParameterShiftGradients:
+    @pytest.mark.parametrize("topology", TOPOLOGIES, ids=TOPOLOGY_IDS)
+    def test_parameter_shift_matches_backprop(self, topology: TopologySpec):
+        """Builds the exact same gate sequence twice, once per
+        `diff_method`, seeds identical weights into both, and asserts the
+        loss gradient each produces agrees to numerical precision."""
+        rng = np.random.default_rng(7)
+        weight_args_np = topology.weight_args_builder(N_QUBITS, N_LAYERS, rng)
+        inputs_np = rng.uniform(0, 2 * np.pi, size=N_QUBITS).astype(np.float32)
+
+        def make_qnode(diff_method: str):
+            device = qml.device(_config.quantum.device, wires=N_QUBITS)
+            wires = list(range(N_QUBITS))
+
+            @qml.qnode(device, interface="torch", diff_method=diff_method)
+            def circuit(inputs, *weights):
+                if topology.ansatz == "angle":
+                    basic_angle_encoding(inputs, wires)
+                    for layer in range(N_LAYERS):
+                        basic_variational_block(weights[0][layer], wires)
+                else:
+                    enc_weights, var_weights = weights
+                    for layer in range(N_LAYERS):
+                        reuploading_encoding(inputs, enc_weights[layer], wires)
+                        reupload_variational_block(var_weights[layer], wires)
+                return qml.expval(qml.PauliZ(0))
+
+            return circuit
+
+        def run(diff_method: str) -> List[torch.Tensor]:
+            qnode = make_qnode(diff_method)
+            inputs = torch.from_numpy(inputs_np)
+            weights = [w.clone().detach().requires_grad_(True) for w in weight_args_np]
+            loss = qnode(inputs, *weights)
+            loss.backward()
+            return [w.grad.clone() for w in weights]
+
+        backprop_grads = run("backprop")
+        param_shift_grads = run("parameter-shift")
+
+        for g_backprop, g_shift in zip(backprop_grads, param_shift_grads):
+            assert torch.allclose(g_backprop, g_shift, atol=1e-5), (
+                f"parameter-shift gradient diverged from backprop's for topology "
+                f"{topology.name!r}: max abs diff = {(g_backprop - g_shift).abs().max().item()}"
+            )
+
+    @pytest.mark.parametrize("topology", TOPOLOGIES, ids=TOPOLOGY_IDS)
+    def test_trains_end_to_end_under_parameter_shift(self, topology: TopologySpec):
+        """Confirms this ansatz is provably trainable under
+        `diff_method="parameter-shift"` (loss actually decreases, not just
+        "gradients are non-null") — the hardware-realizable gradient rule,
+        as opposed to only ever having been exercised under the production
+        default (`diff_method="backprop"`, simulator-only).
+
+        Bypasses `qml.qnn.TorchLayer`/`VQCClassifier.forward` deliberately:
+        PennyLane's parameter-shift transform doesn't yet support
+        differentiating a broadcasted/batched tape (raises
+        `NotImplementedError`, see pennylane#4462), and `TorchLayer` always
+        broadcasts even a single-sample `(1, n_qubits)` input. A real QPU
+        executes one circuit at a time regardless, so training via
+        single-sample (unbatched) qnode calls — accumulating gradients into
+        the SAME parameter tensors the model already registers via
+        `topology.raw_quantum_layer` — is the realistic shape a
+        parameter-shift training loop on actual hardware would take, and
+        still proves the same thing: the model's real, registered
+        parameters converge under this gradient rule."""
+        rng = np.random.default_rng(3)
+        model = topology.build_model()
+        quantum_layer = topology.raw_quantum_layer(model)
+        weight_names = [name for name, _ in quantum_layer.named_parameters()]
+
+        device = qml.device(_config.quantum.device, wires=N_QUBITS)
+        wires = list(range(N_QUBITS))
+
+        @qml.qnode(device, interface="torch", diff_method="parameter-shift")
+        def circuit(inputs, *weights):
+            if topology.ansatz == "angle":
+                basic_angle_encoding(inputs, wires)
+                for layer in range(N_LAYERS):
+                    basic_variational_block(weights[0][layer], wires)
+            else:
+                enc_weights, var_weights = weights
+                for layer in range(N_LAYERS):
+                    reuploading_encoding(inputs, enc_weights[layer], wires)
+                    reupload_variational_block(var_weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
+
+        x = torch.from_numpy(rng.uniform(0, 2 * np.pi, size=N_QUBITS)).float()
+        label = torch.tensor([1.0 if rng.uniform() < 0.5 else 0.0])
+        loss_fn = torch.nn.BCELoss()
+
+        def forward_loss() -> torch.Tensor:
+            weight_tensors = [getattr(quantum_layer, name) for name in weight_names]
+            expvals = torch.stack(circuit(x, *weight_tensors)).float()
+            logit = model.readout(expvals.unsqueeze(0))
+            return loss_fn(model.activation(logit).squeeze(0), label)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.2)
+        initial_loss = forward_loss().item()
+        for _ in range(15):
+            optimizer.zero_grad()
+            loss = forward_loss()
+            loss.backward()
+            optimizer.step()
+        final_loss = forward_loss().item()
+
+        assert final_loss < initial_loss, (
+            f"Expected loss to decrease under parameter-shift training for topology "
+            f"{topology.name!r}: {initial_loss:.4f} -> {final_loss:.4f}"
+        )

@@ -2,7 +2,7 @@
 Tests for `qknee.models.pipeline.PipelineRunner` — the canonical
 DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM orchestration class.
 
-Covers six things:
+Covers five things:
     1. End-to-end execution (`run()`) on single-slice and multi-slice inputs.
     2. Input boundary assertions on each individual stage method.
     3. Error handling: invalid inputs, malformed artifacts, and mismatched
@@ -13,18 +13,13 @@ Covers six things:
        multi-sample batch runs end-to-end (ResNet18 -> PCA -> PennyLane VQC)
        without exceptions, with Pauli-Z expectations and calibrated
        probabilities strictly bounded.
-    5. Offline precomputed-cache parity: `qknee.ui.analysis_app`'s Judge
-       Fast-Path cache loader reproduces `precomputed_cache.json`'s exact
-       metrics, fast enough to serve as a live-demo fallback.
-    6. Report generation validation: `ReportGenerator.build_pdf_report()`
+    5. Report generation validation: `ReportGenerator.build_pdf_report()`
        produces a valid, non-empty PDF with embedded images/tables and no
        deprecation warnings.
 """
 
 from __future__ import annotations
 
-import json
-import time
 import warnings
 from pathlib import Path
 
@@ -415,92 +410,7 @@ class TestVolumetricBatchParity:
 
 
 # --------------------------------------------------------------------------- #
-# 5. Offline precomputed-cache parity (Judge Fast-Path, qknee.ui.analysis_app)
-# --------------------------------------------------------------------------- #
-
-_CACHE_PATH = Path("qknee/artifacts/precomputed_cache.json")
-
-
-@pytest.mark.skipif(
-    not _CACHE_PATH.exists(),
-    reason=f"{_CACHE_PATH} not generated yet; run `python scripts/generate_demo_cache.py` first.",
-)
-class TestPrecomputedCacheParity:
-    """Verifies `qknee.ui.analysis_app`'s Judge Fast-Path fallback cache
-    loader reproduces exactly the prediction metrics recorded in
-    `precomputed_cache.json` (no live inference, no recomputation drift)
-    and stays fast enough to actually serve as a live-demo latency-risk
-    fallback — the entire point of the PRD's Plan B cache."""
-
-    @pytest.fixture(scope="class")
-    def analysis_app(self):
-        pytest.importorskip("streamlit")
-        import qknee.ui.analysis_app as module
-
-        return module
-
-    @pytest.fixture(scope="class")
-    def raw_cases(self):
-        with _CACHE_PATH.open("r", encoding="utf-8") as handle:
-            return json.load(handle)["cases"]
-
-    def test_load_precomputed_cache_matches_the_json_file_on_disk(self, analysis_app, raw_cases):
-        cache = analysis_app.load_precomputed_cache()
-        assert cache is not None
-        assert [case["case_id"] for case in cache["cases"]] == [case["case_id"] for case in raw_cases]
-
-    def test_fast_path_result_reproduces_exact_metrics_for_every_case(self, analysis_app, raw_cases):
-        for raw_case in raw_cases:
-            _, result = analysis_app.build_fast_path_result(raw_case)
-
-            assert result.risk_score == pytest.approx(raw_case["risk_score"])
-            expected_label = (
-                "Abnormality Detected" if raw_case["risk_score"] >= analysis_app.RISK_THRESHOLD else "Normal"
-            )
-            assert result.prediction_label == expected_label
-            assert result.quantum_latency_ms == pytest.approx(raw_case.get("quantum_latency_ms", 0.0))
-            assert result.acl_risk == pytest.approx(raw_case["risk_score"])
-
-            expected_pauli_z = raw_case.get("pauli_z_expectations")
-            if expected_pauli_z:
-                assert result.pauli_z_expectations is not None
-                np.testing.assert_allclose(
-                    result.pauli_z_expectations, expected_pauli_z, rtol=1e-6, atol=1e-6,
-                )
-
-    def test_fast_path_result_serves_each_sample_in_under_10_milliseconds(self, analysis_app, raw_cases):
-        # Warm the one-time cv2 import cost outside the timed loop — a live
-        # demo session imports cv2 once at app startup, not per case served,
-        # so per-sample timing should reflect steady-state serving cost.
-        analysis_app.build_fast_path_result(raw_cases[0])
-
-        for raw_case in raw_cases:
-            start = time.perf_counter()
-            analysis_app.build_fast_path_result(raw_case)
-            elapsed_ms = (time.perf_counter() - start) * 1000
-
-            assert elapsed_ms < 10.0, (
-                f"case '{raw_case['case_id']}' took {elapsed_ms:.2f}ms to serve from cache, "
-                "expected < 10ms"
-            )
-
-    def test_fast_path_result_does_not_invoke_the_quantum_simulator(self, analysis_app, raw_cases):
-        """Structural guarantee (not just "it happened to be fast"): the
-        fallback cache path must never re-run PennyLane circuit execution,
-        the exact failure mode this cache exists to route around."""
-        import pennylane as qml
-        from unittest.mock import patch
-
-        with patch.object(
-            qml.QNode, "__call__",
-            side_effect=AssertionError("QNode was invoked while serving the precomputed cache"),
-        ):
-            for raw_case in raw_cases:
-                analysis_app.build_fast_path_result(raw_case)
-
-
-# --------------------------------------------------------------------------- #
-# 6. Report generation validation (qknee.xai.report_generator.ReportGenerator)
+# 5. Report generation validation (qknee.xai.report_generator.ReportGenerator)
 # --------------------------------------------------------------------------- #
 
 class TestReportGenerationValidation:

@@ -5,8 +5,8 @@ Q-Knee predictions.
 Compiles the analyzed MRI slice, its risk-targeted Grad-CAM overlay,
 patient/study metadata, per-condition tear-risk scores, and (when supplied)
 the 4-qubit VQC's raw quantum measurements into a structured, multi-section
-report — the source for the Streamlit dashboards' "Download Report" button
-(`qknee.ui.dashboard.render_report_download`) and for
+report — the source for the frontend's "Download Report" action
+(`extras/api/server.py`'s `/report` endpoint) and for
 `qknee/artifacts/demo_radiology_report.pdf`.
 
 Five sections, laid out across up to two letter-size pages:
@@ -92,8 +92,8 @@ CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
 DEFAULT_CLINIC_NAME = "Q-KNEE QUANTUM DIAGNOSTICS CENTER"
 DEFAULT_CLINIC_SUBTITLE = "Quantum-Assisted Musculoskeletal MRI Screening"
 
-# Risk-tier thresholds/colors — matches qknee.ui.dashboard.render_risk_gauge's
-# LOW/MODERATE/HIGH bands, so the report and the live dashboard agree.
+# Risk-tier thresholds/colors — matches the frontend's risk-gauge
+# LOW/MODERATE/HIGH bands, so the report and the live UI agree.
 RISK_LOW_MAX = 0.33
 RISK_MODERATE_MAX = 0.66
 _TIER_COLORS = {

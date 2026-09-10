@@ -49,8 +49,8 @@ hybrid classical/quantum pipeline):
                      expectation values are rescaled from [-1, 1] to
                      [0, 2*pi], so they're a drop-in replacement for
                      `QuantumDimReducer`'s MinMax-scaled PCA output when
-                     fed into a downstream angle-encoding VQC
-                     (`vqc.VQCClassifier` / `vqc_data_reuploading.DataReuploadingVQC`).
+                     fed into a downstream `vqc.VQCClassifier` (either
+                     `ansatz`).
 
 Everything (`classical_projection` and the QNode's `weights`) is wrapped
 in ordinary `nn.Module`/`qml.qnn.TorchLayer` machinery, so both the

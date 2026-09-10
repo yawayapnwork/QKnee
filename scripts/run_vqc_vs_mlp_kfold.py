@@ -1,26 +1,44 @@
 """
-Compares the PCA->VQC pipeline against a parameter-matched classical MLP
-head — same PCA(4)-reduced ImageNet-ResNet18 features, same seeded 5-fold
-CV, same "no early stopping, track every epoch" curve protocol — on the
-same 58 fully-labeled RSNA Knee studies used by
-scripts/run_ssl_vs_imagenet_kfold.py.
+Compares the PCA->VQC pipeline against two classical baselines on the same
+58 fully-labeled RSNA Knee studies used by
+scripts/run_ssl_vs_imagenet_kfold.py — same seeded 5-fold CV, same "no
+early stopping, track every epoch" curve protocol throughout:
 
-The question this answers: does the 4-qubit variational circuit itself buy
-anything over a classical model with the *same number of trainable
-parameters* (41: `VQCClassifier(n_qubits=4, n_layers=3)`'s 36 quantum
-rotation weights + 5 in its `Linear(4, 1)` readout), or is the VQC's
-observed performance indistinguishable from what any 41-parameter
-classical model would get on 58 samples?
+    1. `MatchedMLP` — parameter-matched to the VQC exactly (41 params:
+       `VQCClassifier(n_qubits=4, n_layers=3)`'s 36 quantum rotation
+       weights + 5 in its `Linear(4, 1)` readout; `MatchedMLP`'s
+       Linear(4, 8, bias=False) -> ReLU -> Linear(8, 1, bias=True) has
+       32 + 8 + 1 = 41, verified at import time by
+       `_assert_param_counts_match`). This isolates whether the quantum
+       circuit itself buys anything over a classical model with the exact
+       same parameter budget on the exact same PCA(4)-reduced input — see
+       RESULTS.md Sec. 4: the honest answer, across 5 seeds, is "no
+       measurable difference" (statistically indistinguishable).
 
-`MatchedMLP` (Linear(4, 8, bias=False) -> ReLU -> Linear(8, 1, bias=True))
-has exactly 32 + 8 + 1 = 41 trainable parameters, matching the VQC exactly
-(verified at import time by `_assert_param_counts_match`).
+    2. `LargeMLP` — a *realistically-sized* classical head (Linear(512,
+       128) -> ReLU -> Linear(128, 1), ~66K params) operating directly on
+       the raw 512-D ResNet18 embedding, with no PCA/quantum bottleneck at
+       all. This is the question a parameter-matched comparison can't
+       answer: "if you weren't using the quantum layer at all, what would
+       you actually build, and how many parameters would it cost?" The
+       honest framing throughout is parameter *efficiency* (comparable
+       accuracy at ~1600x fewer trainable parameters in the head), never
+       an accuracy *win* — see the printed/JSON `parameter_efficiency`
+       block below and the module-level VERDICT for the real numbers.
+
+Also runs a sample-efficiency sweep (`run_sample_efficiency_analysis`):
+each model retrained at 25% / 50% / 100% of each fold's training split
+(stratified subsample of the *train* side only — test folds are always
+evaluated in full), reporting how test AUC on `--curve-condition`
+degrades as labeled data shrinks. This is the concrete, checkable form of
+the "small-sample medical dataset" argument for a low-parameter-count
+model, rather than an assertion.
 
 Reuses the same per-fold/per-condition seeding fix as
 run_ssl_vs_imagenet_kfold.py: `torch.manual_seed(init_seed)` immediately
-before constructing either model, with `init_seed` deterministically
-derived from `--seed`, so weight init is controlled and reproducible
-instead of depending on whatever state the global RNG was left in.
+before constructing any model, with `init_seed` deterministically derived
+from `--seed`, so weight init is controlled and reproducible instead of
+depending on whatever state the global RNG was left in.
 """
 from __future__ import annotations
 
@@ -56,6 +74,30 @@ class MatchedMLP(nn.Module):
         return self.sigmoid(self.fc2(self.act(self.fc1(x))))
 
 
+class LargeMLP(nn.Module):
+    """A realistically-sized classical head operating directly on the raw
+    512-D ResNet18 embedding — no PCA/quantum bottleneck. Answers "what
+    would you actually build if not using the quantum layer at all", as
+    opposed to `MatchedMLP`'s narrower "does the circuit beat a classical
+    model with an identical, artificially tiny parameter budget"."""
+
+    def __init__(self, in_features: int = 512, hidden: int = 128):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features, hidden, bias=True)
+        self.act = nn.ReLU()
+        self.fc2 = nn.Linear(hidden, 1, bias=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.sigmoid(self.fc2(self.act(self.fc1(x))))
+
+
+# Models whose input is the raw 512-D ResNet18 embedding, bypassing the
+# PCA(4)->[0, 2pi] quantum-angle reduction every other model_name goes
+# through in main() below.
+RAW_FEATURE_MODELS = ("mlp_large",)
+
+
 def _assert_param_counts_match() -> None:
     from qknee.models.vqc import VQCClassifier
 
@@ -76,7 +118,13 @@ def build_model(model_name: str, n_qubits: int, n_layers: int) -> nn.Module:
         return VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
     if model_name == "mlp_matched":
         return MatchedMLP(n_qubits=n_qubits, hidden=8)
+    if model_name == "mlp_large":
+        return LargeMLP(in_features=512, hidden=128)
     raise ValueError(f"unknown model_name: {model_name!r}")
+
+
+def count_trainable_params(model_name: str, n_qubits: int, n_layers: int) -> int:
+    return sum(p.numel() for p in build_model(model_name, n_qubits, n_layers).parameters())
 
 
 def train_with_curve(
@@ -203,6 +251,70 @@ def run_oof_macro_auc_analysis(
     return compute_macro_auc(y_true_full, y_prob_full, condition_names=condition_names)
 
 
+def _stratified_subsample(y: np.ndarray, fraction: float, rng: np.random.Generator) -> np.ndarray:
+    """Returns indices (into `y`) of a class-stratified subsample keeping
+    `fraction` of each class — at least 1 sample per class present, so a
+    small fraction never accidentally drops a class to zero (which would
+    make AUC undefined on that fold)."""
+    keep: List[int] = []
+    for class_value in np.unique(y):
+        class_idx = np.where(y == class_value)[0]
+        n_keep = max(1, int(round(len(class_idx) * fraction)))
+        keep.extend(rng.choice(class_idx, size=n_keep, replace=False).tolist())
+    return np.array(sorted(keep))
+
+
+def run_sample_efficiency_analysis(
+    features: np.ndarray, labels: Dict[str, np.ndarray], condition: str,
+    model_name: str, n_folds: int, n_epochs: int, lr: float, n_qubits: int, n_layers: int,
+    seed: int, fractions: Tuple[float, ...] = (0.25, 0.5, 1.0),
+) -> Dict[str, Dict[str, float]]:
+    """For each `fraction` in `fractions`, retrains `model_name` on that
+    stratified fraction of each fold's *training* split (test folds always
+    stay full-size) and reports the final-epoch test AUC, mean +/- std
+    across folds. Answers "how much does accuracy degrade as labeled data
+    shrinks", the concrete form of a low-parameter-count model's claimed
+    small-sample-medical-dataset advantage."""
+    from qknee.models.pca_reducer import QuantumDimReducer
+
+    y = labels[condition]
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    folds = list(skf.split(features, y))
+
+    result: Dict[str, Dict[str, float]] = {}
+    for fraction in fractions:
+        fold_final_aucs: List[float] = []
+        for fold_idx, (train_idx, test_idx) in enumerate(folds):
+            rng = np.random.default_rng(seed * 10_000 + fold_idx)
+            y_train_full = y[train_idx]
+            sub = _stratified_subsample(y_train_full, fraction, rng)
+            sub_train_idx = train_idx[sub]
+
+            if model_name in RAW_FEATURE_MODELS:
+                X_train, X_test = features[sub_train_idx], features[test_idx]
+            else:
+                # Fit the PCA(4) reducer on the (already-shrunk) training
+                # subsample only -- an equally-small-data reduction, not a
+                # full-data one, so the sample-efficiency comparison stays
+                # fair across model_names.
+                reducer = QuantumDimReducer(use_incremental_pca=False)
+                X_train = reducer.fit_transform(features[sub_train_idx])
+                X_test = reducer.transform(features[test_idx])
+            y_train, y_test = y[sub_train_idx], y[test_idx]
+            _, test_curve, _ = train_with_curve(
+                X_train, y_train, X_test, y_test, model_name=model_name, n_epochs=n_epochs, lr=lr,
+                n_qubits=n_qubits, n_layers=n_layers,
+                init_seed=seed * 1_000 + fold_idx,
+            )
+            fold_final_aucs.append(test_curve[-1])
+        arr = np.array(fold_final_aucs, dtype=np.float64)
+        result[str(fraction)] = {
+            "mean_test_auc": float(np.nanmean(arr)),
+            "std_test_auc": float(np.nanstd(arr)),
+        }
+    return result
+
+
 def _load_features(cache_path: Path, condition_names: List[str]) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Loads a pre-built real-feature cache (as written by
     `run_ssl_vs_imagenet_kfold.build_or_load_features`). This script never
@@ -246,15 +358,30 @@ def main() -> None:
     parser.add_argument("--n-layers", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--models", type=str, default="vqc,mlp_matched,mlp_large",
+        help="Comma-separated subset of {vqc, mlp_matched, mlp_large} to run.",
+    )
+    parser.add_argument(
+        "--sample-efficiency-fractions", type=str, default="0.25,0.5,1.0",
+        help="Comma-separated train-split fractions for the sample-efficiency sweep.",
+    )
+    parser.add_argument(
         "--output", type=str,
         default=str(REPO_ROOT / "qknee" / "artifacts" / "vqc_vs_mlp_kfold_summary.json"),
     )
     args = parser.parse_args()
 
     condition_names = list(RSNA_TARGET_COLUMNS)
+    model_names = [m.strip() for m in args.models.split(",") if m.strip()]
+    fractions = tuple(float(f.strip()) for f in args.sample_efficiency_fractions.split(","))
+
+    param_counts: Dict[str, int] = {
+        m: count_trainable_params(m, args.n_qubits, args.n_layers) for m in model_names
+    }
+    print("Trainable parameter counts:", param_counts)
 
     results: Dict[str, Dict] = {}
-    for model_name in ("vqc", "mlp_matched"):
+    for model_name in model_names:
         print(f"\n=== model: {model_name} ===")
         features, labels = _load_features(Path(args.features_cache), condition_names)
 
@@ -270,9 +397,16 @@ def main() -> None:
             fold_train_curves: List[List[float]] = []
             fold_test_curves: List[List[float]] = []
             for fold_idx, (train_idx, test_idx) in enumerate(skf.split(features, y)):
-                reducer = QuantumDimReducer(use_incremental_pca=False)
-                q_train = reducer.fit_transform(features[train_idx])
-                q_test = reducer.transform(features[test_idx])
+                if model_name in RAW_FEATURE_MODELS:
+                    # No PCA/quantum-angle bottleneck for the realistic
+                    # large-classical-head arm — it sees the raw 512-D
+                    # ResNet18 embedding directly, same as it would in an
+                    # actual deployment that never used the quantum layer.
+                    q_train, q_test = features[train_idx], features[test_idx]
+                else:
+                    reducer = QuantumDimReducer(use_incremental_pca=False)
+                    q_train = reducer.fit_transform(features[train_idx])
+                    q_test = reducer.transform(features[test_idx])
                 y_train, y_test = y[train_idx], y[test_idx]
                 train_curve, test_curve, _ = train_with_curve(
                     q_train, y_train, q_test, y_test, model_name=model_name,
@@ -324,9 +458,12 @@ def main() -> None:
                 skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
                 oof_probs = np.full(n_samples, np.nan, dtype=np.float64)
                 for fold_idx, (train_idx, test_idx) in enumerate(skf.split(features, y)):
-                    reducer = QuantumDimReducer(use_incremental_pca=False)
-                    q_train = reducer.fit_transform(features[train_idx])
-                    q_test = reducer.transform(features[test_idx])
+                    if model_name in RAW_FEATURE_MODELS:
+                        q_train, q_test = features[train_idx], features[test_idx]
+                    else:
+                        reducer = QuantumDimReducer(use_incremental_pca=False)
+                        q_train = reducer.fit_transform(features[train_idx])
+                        q_test = reducer.transform(features[test_idx])
                     y_train, y_test = y[train_idx], y[test_idx]
                     _, _, final_test_probs = train_with_curve(
                         q_train, y_train, q_test, y_test, model_name=model_name,
@@ -343,23 +480,48 @@ def main() -> None:
         macro_result = reduced_oof_macro_auc_analysis()
         print(f"  -> macro-AUC (out-of-fold, {len(condition_names)}-condition) = {macro_result['final_score']:.4f}")
 
+        print(f"[{time.strftime('%H:%M:%S')}] sample-efficiency sweep on '{args.curve_condition}' "
+              f"(fractions={fractions})...")
+        sample_efficiency = run_sample_efficiency_analysis(
+            features, labels, args.curve_condition, model_name=model_name,
+            n_folds=args.n_folds, n_epochs=args.macro_n_epochs, lr=args.lr,
+            n_qubits=args.n_qubits, n_layers=args.n_layers, seed=args.seed, fractions=fractions,
+        )
+        for frac, stats in sample_efficiency.items():
+            print(f"    train_fraction={frac}: mean_test_auc={stats['mean_test_auc']:.4f} "
+                  f"(+/- {stats['std_test_auc']:.4f})")
+
         results[model_name] = {
             "n_studies": features.shape[0],
+            "n_trainable_params": param_counts[model_name],
             "epoch_curve": curve_result,
             "oof_macro_auc": macro_result,
+            "sample_efficiency": sample_efficiency,
         }
 
-    vqc_curve = results["vqc"]["epoch_curve"]
-    mlp_curve = results["mlp_matched"]["epoch_curve"]
-    verdict = {
-        "curve_condition": args.curve_condition,
-        "vqc_peak_epoch": vqc_curve["peak_epoch"],
-        "mlp_matched_peak_epoch": mlp_curve["peak_epoch"],
-        "vqc_peak_test_auc": vqc_curve["peak_mean_test_auc"],
-        "mlp_matched_peak_test_auc": mlp_curve["peak_mean_test_auc"],
-        "vqc_oof_macro_auc": results["vqc"]["oof_macro_auc"]["final_score"],
-        "mlp_matched_oof_macro_auc": results["mlp_matched"]["oof_macro_auc"]["final_score"],
-    }
+    verdict: Dict[str, object] = {"curve_condition": args.curve_condition, "n_trainable_params": param_counts}
+    for model_name in model_names:
+        curve = results[model_name]["epoch_curve"]
+        macro_auc = results[model_name]["oof_macro_auc"]["final_score"]
+        verdict[f"{model_name}_peak_epoch"] = curve["peak_epoch"]
+        verdict[f"{model_name}_peak_test_auc"] = curve["peak_mean_test_auc"]
+        verdict[f"{model_name}_oof_macro_auc"] = macro_auc
+
+    # Parameter-efficiency ratio: macro-AUC delivered per trainable
+    # parameter, relative to the largest model run this call (usually
+    # mlp_large) -- e.g. a ratio of 1000x means this model gets
+    # (macro_auc / its own param count) that is 1000x higher than
+    # mlp_large's (macro_auc / its param count). Framed as *efficiency*,
+    # never as an accuracy win -- see this script's own module docstring.
+    if len(model_names) > 1:
+        efficiency = {
+            m: results[m]["oof_macro_auc"]["final_score"] / param_counts[m] for m in model_names
+        }
+        baseline = max(param_counts, key=lambda m: param_counts[m])
+        verdict["parameter_efficiency_ratio_vs_" + baseline] = {
+            m: (efficiency[m] / efficiency[baseline]) for m in model_names
+        }
+
     results["verdict"] = verdict
 
     output_path = Path(args.output)

@@ -978,8 +978,7 @@ class QKneeBackend:
 
 class CachedFallbackBackend:
     """Serves `/predict`/`/explain` from `qknee/artifacts/precomputed_cache.json`
-    — the same offline-generated "Judge Fast-Path" cache
-    `qknee.ui.dashboard`/`qknee.ui.analysis_app` use — instead of running
+    — an offline-generated demo-latency-fallback cache — instead of running
     any real inference. Selected by `get_backend()` when `$USE_MOCK_FALLBACK`
     is set, or when the heavy ML stack (numpy/cv2/torch/pennylane) isn't
     importable at all and no `$BACKEND_API_URL` is configured to proxy to.

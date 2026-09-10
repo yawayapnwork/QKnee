@@ -1,7 +1,6 @@
-"""Unified prediction-provenance vocabulary, shared by every UI surface this
-project ships (`extras/api/server.py`'s FastAPI/Next.js contract *and*
-`qknee/ui/dashboard.py`'s Streamlit app) so a prediction's origin is
-described with exactly one set of words everywhere it's shown to a viewer.
+"""Unified prediction-provenance vocabulary, used by `extras/api/server.py`'s
+FastAPI/Next.js contract so a prediction's origin is described with exactly
+one set of words everywhere it's shown to a viewer.
 
 Fixes AUDIT.md P1 #5 (D2 -- no prominent mock/live indicator on the Next.js
 workstation) and P1 #7 (B3/C4b -- a checkpoint-fallback silently downgrades
@@ -30,8 +29,8 @@ viewer might ask:
                           anywhere), so "simulator ran" and "this is
                           degraded/fake" must never share one ambiguous label.
 
-`classify()` is the single function both `extras/api/server.py` and
-`qknee/ui/dashboard.py` call to derive all three from the same raw signals
+`classify()` is the single function `extras/api/server.py` calls to
+derive all three from the same raw signals
 (a `backend` tag string, whether a trained checkpoint was actually loaded,
 and whether real per-qubit measurements exist) — see its docstring for the
 exact precedence rules, most importantly the AUDIT.md C4b fix: a real

@@ -6,30 +6,52 @@ Pipeline position: consumes the (1, 4) angle-encoded vectors produced by
 `pipeline.MRIQuantumPipeline.extract_quantum_features` (values in [0, 2*pi])
 and outputs a normalized binary classification score in [0, 1].
 
-Architecture:
-    1. Angle Encoding    - each of the 4 input scalars is encoded onto its
-                           own qubit via RX then RY rotations.
-    2. Variational block - `n_layers` repeats of per-qubit trainable
-                           RX/RY/RZ rotations followed by a ring of CNOT
-                           entangling gates.
-    3. Measurement       - Pauli-Z expectation value on each of the 4
-                           qubits, each in [-1, 1].
-    4. Classical readout - a single trainable Linear(4, 1) + Sigmoid maps
-                           the 4 expectation values to one risk score in
-                           [0, 1], so the circuit's 4 measurements are
-                           combined into one classification output.
+One ansatz, selected via the `ansatz` constructor argument — this module
+used to be split across two files (`vqc.py` / `vqc_data_reuploading.py`)
+with two separate classes; they're consolidated here because the second
+ansatz was always a drop-in `(B, n_qubits) -> (B, 1)` alternative sharing
+this module's `variational_block`, not an independently-evolving design:
 
-The quantum circuit is wrapped via `qml.qnn.TorchLayer`, so its rotation
-parameters (`self.q_weights` inside the layer) are ordinary
-`torch.nn.Parameter`s and train with any standard PyTorch optimizer
-(Adam, SGD, ...) alongside the classical readout layer.
+    "angle" (default, judged PRD path):
+        1. Angle Encoding    - each of the `n_qubits` input scalars is
+                               encoded ONCE, up front, onto its own qubit
+                               via RX then RY rotations.
+        2. Variational block - `n_layers` repeats of per-qubit trainable
+                               RX/RY/RZ rotations followed by a ring of
+                               CNOT entangling gates.
+        3. Measurement       - Pauli-Z expectation value on each qubit,
+                               each in [-1, 1].
+        4. Classical readout - a trainable Linear(n_qubits, 1) + Sigmoid
+                               maps the expectation values to one risk
+                               score in [0, 1].
+
+    "data_reuploading" (exploratory ablation — Pérez-Salinas et al. 2020,
+    "Data re-uploading for a universal quantum classifier"):
+        Re-encodes the classical input at *every* variational layer
+        instead of once. A single angle-encoding pass can only apply one
+        rotation per qubit derived from the raw input before the
+        entangling block takes over, so the circuit's expressivity in the
+        input is limited by the encoding gate count; re-uploading — each
+        layer's input pass through a different, independently trainable
+        affine remap (`scale * x + bias`) of the SAME raw input — lets the
+        circuit approximate a much richer family of non-linear functions
+        of the classical input at the same qubit count and depth, at the
+        cost of `4 * n_qubits * n_layers` extra trainable encoder
+        parameters over the "angle" ansatz. Steps per layer:
+            1. Re-uploading encoding - trainable affine remap + RX/RY.
+            2. Variational block     - identical to "angle"'s.
+        Measurement and classical readout are identical to "angle".
+
+Both ansatzes are wrapped via `qml.qnn.TorchLayer`, so their rotation
+parameters are ordinary `torch.nn.Parameter`s and train with any standard
+PyTorch optimizer (Adam, SGD, ...) alongside the classical readout layer.
 """
 
 from __future__ import annotations
 
 import threading
 from collections import OrderedDict
-from typing import List, Tuple
+from typing import Dict, List, Literal, Tuple
 
 import numpy as np
 import pennylane as qml
@@ -43,7 +65,10 @@ logger = get_logger(__name__)
 _config = load_config()
 
 N_QUBITS = _config.quantum.n_qubits
-ROTATIONS_PER_QUBIT_PER_LAYER = 3  # RX, RY, RZ
+ROTATIONS_PER_QUBIT_PER_LAYER = 3          # RX, RY, RZ in the variational block
+ENCODING_PARAMS_PER_QUBIT_PER_LAYER = 4    # (rx_scale, rx_bias, ry_scale, ry_bias) -- "data_reuploading" only
+
+Ansatz = Literal["angle", "data_reuploading"]
 
 # Preferred backend for the pure-inference (no-gradient) QNode built below:
 # `lightning.qubit` is PennyLane-Lightning's C++ statevector simulator —
@@ -89,7 +114,9 @@ def load_quantum_device(device_name: str, n_qubits: int) -> "qml.Device":
 
 def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
     """Continuous angle encoding: maps each input scalar (in [0, 2*pi]) onto
-    one qubit via RX followed by RY.
+    one qubit via RX followed by RY. Used once, up front, by the "angle"
+    ansatz — see `reuploading_encoding` for the per-layer alternative the
+    "data_reuploading" ansatz uses instead.
 
     Args:
         features: 1D tensor of length len(wires), values in [0, 2*pi].
@@ -100,10 +127,34 @@ def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
         qml.RY(features[..., i], wires=wire)
 
 
+def reuploading_encoding(features: torch.Tensor, enc_weights: torch.Tensor, wires: List[int]) -> None:
+    """One trainable re-uploading encoding pass: each input feature `x_i`
+    is remapped through a trainable affine transform (`scale * x_i + bias`)
+    before being loaded via RX then RY — the data re-uploading ansatz's key
+    departure from `angle_encoding`, which loads `x_i` unmodified and only
+    once. Called once per layer (with that layer's own `enc_weights`) by
+    the "data_reuploading" ansatz.
+
+    Args:
+        features: (..., n_qubits) tensor, values typically in [0, 2*pi]
+            (e.g. `QuantumDimReducer`'s PCA-angle output).
+        enc_weights: (n_qubits, 4) tensor of this layer's
+            (rx_scale, rx_bias, ry_scale, ry_bias) per qubit.
+        wires: Qubit indices to encode onto, one feature per wire.
+    """
+    for i, wire in enumerate(wires):
+        rx_scale = enc_weights[i, 0]
+        rx_bias = enc_weights[i, 1]
+        ry_scale = enc_weights[i, 2]
+        ry_bias = enc_weights[i, 3]
+        qml.RX(rx_scale * features[..., i] + rx_bias, wires=wire)
+        qml.RY(ry_scale * features[..., i] + ry_bias, wires=wire)
+
+
 def variational_block(weights: torch.Tensor, wires: List[int]) -> None:
     """One trainable variational layer: per-qubit RX/RY/RZ rotations
     followed by a ring of CNOT entangling gates (wire i -> wire i+1, with
-    the last wire wrapping back to the first).
+    the last wire wrapping back to the first). Shared by both ansatzes.
 
     Args:
         weights: Tensor of shape (len(wires), 3) — one (rx, ry, rz) triple
@@ -120,9 +171,49 @@ def variational_block(weights: torch.Tensor, wires: List[int]) -> None:
         qml.CNOT(wires=[wires[i], wires[(i + 1) % n]])
 
 
-def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
-    """Constructs the PennyLane QNode: angle encoding -> `n_layers`
-    variational blocks -> Pauli-Z expectation values on every qubit.
+def weight_shapes_for(ansatz: Ansatz, n_qubits: int, n_layers: int) -> Dict[str, tuple]:
+    """Returns the `qml.qnn.TorchLayer` weight-shape dict for `ansatz` —
+    one tensor (`weights`) for "angle", two (`enc_weights`, `var_weights`)
+    for "data_reuploading"."""
+    if ansatz == "angle":
+        return {"weights": (n_layers, n_qubits, ROTATIONS_PER_QUBIT_PER_LAYER)}
+    if ansatz == "data_reuploading":
+        return {
+            "enc_weights": (n_layers, n_qubits, ENCODING_PARAMS_PER_QUBIT_PER_LAYER),
+            "var_weights": (n_layers, n_qubits, ROTATIONS_PER_QUBIT_PER_LAYER),
+        }
+    raise ValueError(f"Unknown ansatz {ansatz!r}; expected 'angle' or 'data_reuploading'.")
+
+
+def _init_enc_weights(tensor: torch.Tensor) -> torch.Tensor:
+    """Initializes each layer's re-uploading affine encoder near the
+    identity map (`scale=1, bias=0`) — i.e. layer 0 starts out behaving
+    like plain angle encoding, and training is free to depart from that as
+    it discovers a more useful per-layer remap. In-place, matching
+    `qml.qnn.TorchLayer`'s `init_method` contract."""
+    with torch.no_grad():
+        tensor[..., 0].fill_(1.0)  # rx_scale
+        tensor[..., 1].fill_(0.0)  # rx_bias
+        tensor[..., 2].fill_(1.0)  # ry_scale
+        tensor[..., 3].fill_(0.0)  # ry_bias
+    return tensor
+
+
+def _init_var_weights(tensor: torch.Tensor) -> torch.Tensor:
+    """Initializes the variational block's rotation angles uniformly in
+    [0, 2*pi] — `qml.qnn.TorchLayer`'s own default for an otherwise
+    unspecified weight tensor, made explicit here since `init_method` must
+    cover every weight name once any entry is supplied."""
+    return nn.init.uniform_(tensor, a=0.0, b=2 * torch.pi)
+
+
+def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers, ansatz: Ansatz = "angle"):
+    """Constructs the PennyLane QNode for `ansatz`:
+
+        "angle":             encode once -> `n_layers` variational blocks
+        "data_reuploading":   `n_layers` repeats of (re-encode -> variational block)
+
+    -> Pauli-Z expectation values on every qubit.
 
     Uses PennyLane's `default.qubit` state-vector simulator, wired for the
     `torch` interface with `config.quantum.diff_method` (`"backprop"` by
@@ -130,31 +221,48 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_laye
     training. This is the *trainable* circuit — see `build_inference_qnode`
     below for the separate, faster, gradient-free circuit `predict_fast`
     evaluates at inference time.
+
+    Returns a QNode with signature `circuit(inputs, weights)` for "angle",
+    or `circuit(inputs, enc_weights, var_weights)` for "data_reuploading".
     """
     dev = load_quantum_device(_config.quantum.device, n_qubits)
     wires = list(range(n_qubits))
 
-    @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
-    def circuit(inputs: torch.Tensor, weights: torch.Tensor):
-        angle_encoding(inputs, wires)
-        for layer in range(n_layers):
-            variational_block(weights[layer], wires)
-        return [qml.expval(qml.PauliZ(w)) for w in wires]
+    if ansatz == "angle":
+        @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
+        def circuit(inputs: torch.Tensor, weights: torch.Tensor):
+            angle_encoding(inputs, wires)
+            for layer in range(n_layers):
+                variational_block(weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
 
-    return circuit
+        return circuit
+
+    if ansatz == "data_reuploading":
+        @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
+        def circuit(inputs: torch.Tensor, enc_weights: torch.Tensor, var_weights: torch.Tensor):
+            for layer in range(n_layers):
+                reuploading_encoding(inputs, enc_weights[layer], wires)
+                variational_block(var_weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
+
+        return circuit
+
+    raise ValueError(f"Unknown ansatz {ansatz!r}; expected 'angle' or 'data_reuploading'.")
 
 
-def build_inference_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
+def build_inference_qnode(
+    n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers, ansatz: Ansatz = "angle",
+):
     """Constructs a second, inference-only QNode for the same circuit —
-    same angle encoding / variational blocks / Pauli-Z measurement as
-    `build_qnode`, but on PennyLane-Lightning's C++ statevector simulator
-    (falling back to `default.qubit` if unavailable) with `interface=None`
-    and `diff_method=None`: no ML-framework tensor wrapping, no autograd
-    tape construction. Forward-pass-only evaluation is strictly cheaper
-    without either, since this project's inference call sites (`/predict`,
-    `/explain`, the Streamlit workstation) never need gradients through
-    the quantum layer — only training does, via `build_qnode`'s separate
-    circuit.
+    same gate sequence as `build_qnode` for the given `ansatz`, but on
+    PennyLane-Lightning's C++ statevector simulator (falling back to
+    `default.qubit` if unavailable) with `interface=None` and
+    `diff_method=None`: no ML-framework tensor wrapping, no autograd tape
+    construction. Forward-pass-only evaluation is strictly cheaper without
+    either, since this project's inference call sites (`/predict`,
+    `/explain`) never need gradients through the quantum layer — only
+    training does, via `build_qnode`'s separate circuit.
 
     Returns `None` (rather than raising) if even `default.qubit` fails to
     construct here, so `VQCClassifier` can fall back to the slower
@@ -167,14 +275,27 @@ def build_inference_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quan
         return None
     wires = list(range(n_qubits))
 
-    @qml.qnode(dev, interface=None, diff_method=None)
-    def circuit(inputs, weights):
-        angle_encoding(inputs, wires)
-        for layer in range(n_layers):
-            variational_block(weights[layer], wires)
-        return [qml.expval(qml.PauliZ(w)) for w in wires]
+    if ansatz == "angle":
+        @qml.qnode(dev, interface=None, diff_method=None)
+        def circuit(inputs, weights):
+            angle_encoding(inputs, wires)
+            for layer in range(n_layers):
+                variational_block(weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
 
-    return circuit
+        return circuit
+
+    if ansatz == "data_reuploading":
+        @qml.qnode(dev, interface=None, diff_method=None)
+        def circuit(inputs, enc_weights, var_weights):
+            for layer in range(n_layers):
+                reuploading_encoding(inputs, enc_weights[layer], wires)
+                variational_block(var_weights[layer], wires)
+            return [qml.expval(qml.PauliZ(w)) for w in wires]
+
+        return circuit
+
+    raise ValueError(f"Unknown ansatz {ansatz!r}; expected 'angle' or 'data_reuploading'.")
 
 
 class VQCClassifier(nn.Module):
@@ -184,25 +305,49 @@ class VQCClassifier(nn.Module):
         n_qubits: Number of qubits / input features (fixed at 4 by the
             feature-reduction pipeline upstream, but left configurable).
         n_layers: Number of variational block repetitions.
+        ansatz: "angle" (default, judged PRD path — single up-front
+            encoding) or "data_reuploading" (exploratory ablation —
+            re-encodes the input at every layer; see module docstring).
+            Changing this from the default changes which/how many
+            parameters `self.quantum_layer` registers, so a checkpoint
+            trained under one ansatz cannot be loaded under the other.
 
     Forward:
         x: (B, n_qubits) tensor, values in [0, 2*pi].
         returns: (B, 1) tensor, values in [0, 1] — probability-like risk score.
     """
 
-    def __init__(self, n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers):
+    def __init__(
+        self,
+        n_qubits: int = N_QUBITS,
+        n_layers: int = _config.quantum.n_layers,
+        ansatz: Ansatz = "angle",
+    ):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.ansatz: Ansatz = ansatz
 
-        circuit = build_qnode(n_qubits=n_qubits, n_layers=n_layers)
-        weight_shapes = {"weights": (n_layers, n_qubits, ROTATIONS_PER_QUBIT_PER_LAYER)}
+        circuit = build_qnode(n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz)
+        shapes = weight_shapes_for(ansatz, n_qubits, n_layers)
 
-        # qml.qnn.TorchLayer turns the QNode's `weights` argument into a
-        # torch.nn.Parameter, registered under this module for autograd/optim.
-        self.quantum_layer = qml.qnn.TorchLayer(circuit, weight_shapes)
+        # qml.qnn.TorchLayer turns the QNode's weight argument(s) into
+        # torch.nn.Parameter(s), registered under this module for
+        # autograd/optim. Only "data_reuploading" needs a non-default
+        # init_method (see _init_enc_weights/_init_var_weights); "angle"'s
+        # single `weights` tensor uses TorchLayer's own default (uniform
+        # in [0, 2*pi]), preserved exactly as before so existing "angle"
+        # checkpoints (acl_vqc.pt, meniscus_vqc.pt, qknee_model.pt) still
+        # match this module's parameter names/shapes.
+        if ansatz == "data_reuploading":
+            self.quantum_layer = qml.qnn.TorchLayer(
+                circuit, shapes,
+                init_method={"enc_weights": _init_enc_weights, "var_weights": _init_var_weights},
+            )
+        else:
+            self.quantum_layer = qml.qnn.TorchLayer(circuit, shapes)
 
-        # Combines the 4 Pauli-Z expectation values into one risk score.
+        # Combines the n_qubits Pauli-Z expectation values into one risk score.
         self.readout = nn.Linear(n_qubits, 1)
         self.activation = nn.Sigmoid()
 
@@ -214,7 +359,7 @@ class VQCClassifier(nn.Module):
         # mismatch) — `predict_fast` catches that per-call and falls back
         # to the standard `forward()` path, so this is pure speedup, never
         # a correctness risk.
-        self._inference_circuit = build_inference_qnode(n_qubits=n_qubits, n_layers=n_layers)
+        self._inference_circuit = build_inference_qnode(n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz)
         self._inference_cache: "OrderedDict[Tuple[float, ...], Tuple[float, Tuple[float, ...]]]" = OrderedDict()
         self._inference_cache_lock = threading.Lock()
 
@@ -253,7 +398,9 @@ class VQCClassifier(nn.Module):
         plain floats) on any failure — a missing/broken inference circuit,
         or any runtime error evaluating it — so this is strictly additive:
         it can only make inference faster, never less correct or less
-        available than calling `forward()` directly.
+        available than calling `forward()` directly. Works identically for
+        both ansatzes: the only branch is how many weight tensors are read
+        off `self.quantum_layer` and passed to `self._inference_circuit`.
         """
         angles = np.asarray(angles, dtype=np.float64).reshape(-1)
         if angles.shape[0] != self.n_qubits:
@@ -268,16 +415,17 @@ class VQCClassifier(nn.Module):
                 return risk_value, np.asarray(expvals_tuple, dtype=np.float32)
 
         if self._inference_circuit is None:
-            with torch.inference_mode():
-                risk_tensor = self.forward(torch.from_numpy(angles).float().unsqueeze(0))
-                expvals_tensor = self.quantum_layer(torch.from_numpy(angles).float().unsqueeze(0))
-            risk_value = float(risk_tensor.item())
-            expvals = expvals_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+            risk_value, expvals = self._forward_fallback(angles)
         else:
             try:
                 with torch.inference_mode():
-                    weights_np = self.quantum_layer.weights.detach().cpu().numpy()
-                    expvals = np.asarray(self._inference_circuit(angles, weights_np), dtype=np.float64)
+                    if self.ansatz == "data_reuploading":
+                        enc_np = self.quantum_layer.enc_weights.detach().cpu().numpy()
+                        var_np = self.quantum_layer.var_weights.detach().cpu().numpy()
+                        expvals = np.asarray(self._inference_circuit(angles, enc_np, var_np), dtype=np.float64)
+                    else:
+                        weights_np = self.quantum_layer.weights.detach().cpu().numpy()
+                        expvals = np.asarray(self._inference_circuit(angles, weights_np), dtype=np.float64)
                     readout_weight = self.readout.weight.detach().cpu().numpy().reshape(-1)  # (n_qubits,)
                     readout_bias = float(self.readout.bias.detach().cpu().item())
                     logit = float(np.dot(readout_weight, expvals) + readout_bias)
@@ -285,11 +433,7 @@ class VQCClassifier(nn.Module):
                 expvals = expvals.astype(np.float32)
             except Exception as exc:  # noqa: BLE001 - any evaluation failure degrades to the slow, always-correct path
                 logger.warning("Fast inference circuit evaluation failed (%s); falling back to forward().", exc)
-                with torch.inference_mode():
-                    risk_tensor = self.forward(torch.from_numpy(angles).float().unsqueeze(0))
-                    expvals_tensor = self.quantum_layer(torch.from_numpy(angles).float().unsqueeze(0))
-                risk_value = float(risk_tensor.item())
-                expvals = expvals_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+                risk_value, expvals = self._forward_fallback(angles)
 
         with self._inference_cache_lock:
             self._inference_cache[cache_key] = (risk_value, tuple(expvals.tolist()))
@@ -299,51 +443,65 @@ class VQCClassifier(nn.Module):
 
         return risk_value, expvals
 
+    def _forward_fallback(self, angles: np.ndarray) -> Tuple[float, np.ndarray]:
+        """The always-correct (but slower) path `predict_fast` falls back
+        to: the standard `forward()`/`quantum_layer()` TorchLayer calls,
+        converted back to plain floats/NumPy."""
+        with torch.inference_mode():
+            angles_t = torch.from_numpy(angles).float().unsqueeze(0)
+            risk_tensor = self.forward(angles_t)
+            expvals_tensor = self.quantum_layer(angles_t)
+        risk_value = float(risk_tensor.item())
+        expvals = expvals_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+        return risk_value, expvals
+
 
 if __name__ == "__main__":
     from qknee.config.logging_config import setup_logging
 
     setup_logging()
-    torch.manual_seed(0)
 
-    model = VQCClassifier(n_qubits=N_QUBITS, n_layers=3)
+    for ansatz in ("angle", "data_reuploading"):
+        torch.manual_seed(0)
+        logger.info("=== ansatz=%s ===", ansatz)
+        model = VQCClassifier(n_qubits=N_QUBITS, n_layers=3, ansatz=ansatz)
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info("Trainable parameters: %d", trainable)
-    for name, param in model.named_parameters():
-        logger.info("  %s: %s", name, tuple(param.shape))
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info("Trainable parameters: %d", trainable)
+        for name, param in model.named_parameters():
+            logger.info("  %s: %s", name, tuple(param.shape))
 
-    # --- Forward pass smoke test with a batch of angle-encoded vectors ---
-    batch_size = 6
-    dummy_input = torch.rand(batch_size, N_QUBITS) * 2 * torch.pi  # simulate pipeline output
-    scores = model(dummy_input)
-    logger.info("Input shape:  %s", tuple(dummy_input.shape))
-    logger.info("Output shape: %s", tuple(scores.shape))
-    assert scores.shape == (batch_size, 1)
-    assert torch.all(scores >= 0.0) and torch.all(scores <= 1.0)
-    logger.info("Output scores: %s", scores.detach().flatten().tolist())
+        # --- Forward pass smoke test with a batch of angle-encoded vectors ---
+        batch_size = 6
+        dummy_input = torch.rand(batch_size, N_QUBITS) * 2 * torch.pi  # simulate pipeline output
+        scores = model(dummy_input)
+        logger.info("Input shape:  %s", tuple(dummy_input.shape))
+        logger.info("Output shape: %s", tuple(scores.shape))
+        assert scores.shape == (batch_size, 1)
+        assert torch.all(scores >= 0.0) and torch.all(scores <= 1.0)
+        logger.info("Output scores: %s", scores.detach().flatten().tolist())
 
-    # --- Standard PyTorch training loop integration test ---
-    logger.info("Running a short training loop on synthetic labels...")
-    dummy_labels = torch.randint(0, 2, (batch_size, 1)).float()
+        # --- Standard PyTorch training loop integration test ---
+        logger.info("Running a short training loop on synthetic labels...")
+        dummy_labels = torch.randint(0, 2, (batch_size, 1)).float()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
-    loss_fn = nn.BCELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+        loss_fn = nn.BCELoss()
 
-    initial_loss = None
-    for epoch in range(20):
-        optimizer.zero_grad()
-        predictions = model(dummy_input)
-        loss = loss_fn(predictions, dummy_labels)
-        loss.backward()
-        optimizer.step()
+        initial_loss = None
+        for epoch in range(20):
+            optimizer.zero_grad()
+            predictions = model(dummy_input)
+            loss = loss_fn(predictions, dummy_labels)
+            loss.backward()
+            optimizer.step()
 
-        if epoch == 0:
-            initial_loss = loss.item()
-        if epoch % 5 == 0 or epoch == 19:
-            logger.debug("  epoch %2d | loss = %.4f", epoch, loss.item())
+            if epoch == 0:
+                initial_loss = loss.item()
+            if epoch % 5 == 0 or epoch == 19:
+                logger.debug("  epoch %2d | loss = %.4f", epoch, loss.item())
 
-    final_loss = loss.item()
-    logger.info("Initial loss: %.4f -> Final loss: %.4f", initial_loss, final_loss)
-    assert final_loss < initial_loss, "Expected loss to decrease after training on synthetic data"
-    logger.info("Gradients flowed through the quantum layer and loss decreased. All checks passed.")
+        final_loss = loss.item()
+        logger.info("Initial loss: %.4f -> Final loss: %.4f", initial_loss, final_loss)
+        assert final_loss < initial_loss, "Expected loss to decrease after training on synthetic data"
+        logger.info("Gradients flowed through the quantum layer and loss decreased. All checks passed.")

@@ -125,9 +125,9 @@ class TestQuantumDeviceSafetyGuard:
     every VQC ansatz's `build_qnode`/circuit-builder routes through —
     verifies it actually falls back to `default.qubit` (never crashes the
     caller) when the configured device/plugin is unavailable, memory-
-    exhausted, or otherwise broken, and that every VQC module in this
-    project (`vqc.py`, `vqc_data_reuploading.py`, `vqc_multitarget.py`)
-    actually uses it rather than calling `qml.device(...)` directly and
+    exhausted, or otherwise broken, and that every VQC circuit builder in
+    this project (`vqc.py`'s two ansatzes, `vqc_multitarget.py`) actually
+    uses it rather than calling `qml.device(...)` directly and
     unguarded."""
 
     def test_default_qubit_loads_normally(self):
@@ -184,8 +184,8 @@ class TestQuantumDeviceSafetyGuard:
     @pytest.mark.parametrize(
         "module_name, builder_name, builder_kwargs",
         [
-            ("qknee.models.vqc", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
-            ("qknee.models.vqc_data_reuploading", "build_qnode", {"n_qubits": 4, "n_layers": 1}),
+            ("qknee.models.vqc", "build_qnode", {"n_qubits": 4, "n_layers": 1, "ansatz": "angle"}),
+            ("qknee.models.vqc", "build_qnode", {"n_qubits": 4, "n_layers": 1, "ansatz": "data_reuploading"}),
             ("qknee.models.vqc_multitarget", "build_multi_observable_qnode", {"n_qubits": 4, "n_layers": 1}),
         ],
     )

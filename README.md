@@ -3,18 +3,14 @@ title: Q-Knee
 emoji: 🦵
 colorFrom: green
 colorTo: blue
-sdk: streamlit
-sdk_version: "1.62.0"
-app_file: streamlit_app.py
-pinned: false
 license: mit
 ---
 
 # Q-Knee
 
-**Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via a Streamlit clinical dashboard.**
+**Quantum-assisted ACL & meniscal tear risk triage from knee MRI — ResNet18 feature extraction, PCA-to-angle encoding, and a 4-qubit PennyLane variational quantum classifier, served via a FastAPI backend and a Next.js clinical workstation.**
 
-> This README covers the PRD-scoped pipeline: ingestion → ResNet18 → PCA → 4-qubit VQC → Streamlit UI → Grad-CAM → SVM benchmark. A FastAPI backend, clinician auth, multi-service Docker/cloud deploy config, and a few alternate model variants were quarantined (moved, not deleted) to [`extras/`](extras/README.md) — see that directory's README for what's there and why. A separate Next.js client for that quarantined FastAPI backend also exists at [`frontend/`](frontend/) — it is a secondary, exploratory interface, not part of judged scope. **See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the authoritative picture of how the Streamlit dashboard (primary) and the Next.js/FastAPI pair (secondary) relate, and why.**
+> This README covers the judged pipeline: ingestion → ResNet18 → PCA → 4-qubit VQC → Grad-CAM → SVM benchmark, served through [`extras/api/server.py`](extras/api/server.py) (FastAPI) and the [`frontend/`](frontend/) Next.js clinical workstation. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full picture, including a few alternate/exploratory model variants documented (not hidden) alongside the judged path.
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
 [![Python](https://img.shields.io/badge/python-3.11-blue)](#)
@@ -27,18 +23,16 @@ license: mit
 
 ---
 
-## Deploying the dashboard (zero-cost)
+## Deploying (zero-cost)
 
-The Streamlit clinical dashboard (`qknee/ui/dashboard.py`, wrapped by the root-level [`streamlit_app.py`](streamlit_app.py) — the `app_file` in this README's frontmatter above) deploys directly to either platform's free tier — no Docker image, no paid compute:
+The FastAPI backend and Next.js frontend deploy as two separate free-tier services — no Docker image, no paid compute required for either:
 
-- **Streamlit Community Cloud**: [share.streamlit.io](https://share.streamlit.io) → New app → point at this repo, branch, and `streamlit_app.py`. Reads `requirements.txt` and `packages.txt` from the repo root automatically.
-- **Hugging Face Spaces**: create a Space with SDK "Streamlit" and push this repo — the frontmatter block at the top of this file *is* the Space's `README.md` metadata (`sdk`, `app_file`, etc.), so no separate configuration step is needed.
+- **Backend** (`extras/api/server.py`) → [Render](https://render.com), via [`extras/deployment/render.yaml`](extras/deployment/render.yaml)'s Blueprint. Needs `$QKNEE_JWT_SECRET_KEY` set manually in the Render dashboard (see that file's comments) — the app refuses to boot without it rather than fall back to an insecure default.
+- **Frontend** (`frontend/`) → [Vercel](https://vercel.com), via [`frontend/vercel.json`](frontend/vercel.json). Needs `NEXT_PUBLIC_API_URL` pointed at the deployed backend (see [`frontend/.env.local.example`](frontend/.env.local.example)).
 
-`streamlit_app.py` exists purely so `app_file` can point at a *repo-root* script: both platforms run `streamlit run <app_file>` with only that script's own directory on `sys.path`, not the repo root, so pointing `app_file` straight at the nested `qknee/ui/dashboard.py` would break every `from qknee....` import in it (`ModuleNotFoundError: No module named 'qknee'`). The wrapper adds the repo root to `sys.path` first, then delegates to `qknee.ui.dashboard.main()`.
+A shared multi-stage `Dockerfile` ([`extras/deployment/Dockerfile`](extras/deployment/Dockerfile)) plus `docker-compose.yml` also exist for local/self-hosted deployment of just the backend (`docker compose up --build` from `extras/deployment/`) — see [`extras/README.md`](extras/README.md).
 
-Both platforms cap free-tier containers around 1GB RAM and enforce a build-time limit, so `requirements.txt` pins CPU-only PyTorch wheels (`torch==2.13.0+cpu` / `torchvision==0.28.0+cpu` via `--extra-index-url https://download.pytorch.org/whl/cpu`) instead of PyPI's default multi-GB CUDA build, and `opencv-python-headless` instead of the GUI-linked `opencv-python` — see the comments in [`requirements.txt`](requirements.txt) and [`packages.txt`](packages.txt) for the full audit. The dashboard also pre-warms `qknee/artifacts/precomputed_cache.json` into `@st.cache_resource` memory at boot and caches per-slice inference/Grad-CAM/DICOM-decode results, so a cold container's first few interactions don't pay full recomputation cost.
-
-Without a fitted PCA/VQC checkpoint (`qknee/artifacts/pca_scaler.pkl`, etc. — see [`.dockerignore`](.dockerignore)/`.gitignore` for what's excluded from the repo), the dashboard falls back to seeded mock inference automatically, so it stays fully demoable even on a from-scratch deploy.
+Without a fitted PCA/VQC checkpoint (`qknee/artifacts/pca_scaler.pkl`, etc. — see [`.dockerignore`](.dockerignore)/`.gitignore` for what's excluded from the repo), the backend falls back to seeded mock inference automatically, so it stays fully demoable even on a from-scratch deploy.
 
 ---
 
@@ -79,6 +73,56 @@ python -m qknee.models.evaluate --rsna-csv train.csv --rsna-series-dir <path/to/
 
 ---
 
+## Why the quantum layer isn't a gimmick
+
+The raw macro-AUC numbers above show the VQC trailing classical baselines
+at n=58 — we're not going to spin that into a hidden win. The honest case
+for the quantum layer here is **parameter efficiency**, not accuracy, and
+it's backed by real, reproducible runs (`scripts/run_vqc_vs_mlp_kfold.py`,
+full methodology and caveats in [`RESULTS.md`](RESULTS.md) Sec. 4/4a/4b),
+not assertion:
+
+| Model | Trainable params | Mean macro-AUC (5 seeds) |
+|---|---:|:---:|
+| `VQCClassifier(ansatz="angle")` — 4 qubits, 3 layers | **41** | 0.5242 |
+| Parameter-matched classical MLP (same 41 params) | 41 | 0.5441 |
+| Realistically-sized classical MLP (raw 512-D embedding, no PCA bottleneck) | 65,793 | 0.5339 |
+
+Macro-AUC is flat across a **~1,600x range of parameter counts** on this
+58-study dataset — more classical capacity buys no measurable accuracy
+here, so the 41-parameter quantum circuit isn't leaving performance on the
+table relative to a head three orders of magnitude larger. That's the
+claim: not "quantum beats classical," but "the same ballpark of accuracy
+is reachable with 1,600x fewer parameters in the head," which is a
+legitimate NISQ-era argument (a real quantum kernel operating in a
+4-qubit, 16-amplitude Hilbert space, not a rebrand of a classical model)
+for why the circuit belongs in a compute/parameter-constrained deployment,
+even without a speed or accuracy edge.
+
+Two things back this up beyond the headline number:
+
+- **Rigor over accuracy-claims**: `qknee/tests/test_vqc_layers.py`'s
+  `TestParameterShiftGradients` class verifies the circuit trains
+  correctly under the parameter-shift rule (Mitarai et al. 2018 / Schuld
+  et al. 2019) — the hardware-realizable analytic gradient every NISQ
+  backend actually supports — not just under the simulator-only backprop
+  `config.yaml` defaults to for speed. The two gradient rules are checked
+  to agree to float precision, and the circuit is shown to still converge
+  under parameter-shift alone.
+- **One ansatz, not a pile of unrelated experiments**:
+  [`qknee/models/vqc.py`](qknee/models/vqc.py) implements a single,
+  literature-grounded hardware-efficient ansatz (angle encoding -> RX/RY/RZ
+  + CNOT-ring entangling layers -> Pauli-Z readout), plus one clearly-
+  labeled ablation (data re-uploading, Pérez-Salinas et al. 2020) reusing
+  the exact same variational block, selected via one `ansatz=` argument —
+  not five competing, undocumented circuit files. `qknee/models/
+  vqc_multitarget.py` (the 12-condition Kaggle head) and `qknee/models/
+  quantum_autoencoder.py` (a SWAP-test compression alternative, Romero et
+  al. 2017) are separately-scoped, real ablations built on the same
+  primitives, not redundant copies.
+
+---
+
 ## System architecture
 
 ```
@@ -100,7 +144,7 @@ python -m qknee.models.evaluate --rsna-csv train.csv --rsna-series-dir <path/to/
 | **2. Spatial Feature Extraction** | [`qknee/models/resnet_extractor.py`](qknee/models/resnet_extractor.py) | A frozen, pretrained `resnet18(weights=ResNet18_Weights.DEFAULT)` with its `fc` head stripped, tapping `avgpool` directly for a 512-D embedding per slice (multi-slice volumes are mean-pooled into one embedding). |
 | **3. Dimensionality Reduction** | [`qknee/models/pca_reducer.py`](qknee/models/pca_reducer.py) | `StandardScaler → PCA(n_components=4) → MinMaxScaler(0, 2π)`, fit offline and persisted with `joblib` (`pca_scaler.pkl`) for consistent inference. |
 | **4. 4-Qubit VQC** | [`qknee/models/vqc.py`](qknee/models/vqc.py) | Continuous **angle encoding** (RX then RY per qubit) of the 4 PCA scalars, followed by 3 variational layers (RX/RY/RZ + a CNOT entangling ring), measuring PauliZ expectation values, wrapped as a `qml.qnn.TorchLayer` so it trains inside a normal PyTorch optimizer loop. |
-| **5. Explainable UI** | [`qknee/xai/gradcam.py`](qknee/xai/gradcam.py), [`qknee/ui/dashboard.py`](qknee/ui/dashboard.py) | Grad-CAM on ResNet18's `layer4` highlights the anatomical regions driving the embedding; the Streamlit dashboard surfaces this as an overlay. |
+| **5. Explainable UI** | [`qknee/xai/gradcam.py`](qknee/xai/gradcam.py), [`frontend/`](frontend/) | Grad-CAM on ResNet18's `layer4` highlights the anatomical regions driving the embedding; the Next.js workstation surfaces this as an overlay. |
 
 All five stages are chained by [`qknee/models/pipeline.py`](qknee/models/pipeline.py) (`PipelineRunner`) — the single entry point downstream consumers should use, with shape/dtype/range validation between every pair of stages. The end-to-end differentiable `nn.Module` (for joint training) is [`qknee/models/qknee_model.py`](qknee/models/qknee_model.py) (`QKneeModel`). All hyperparameters and paths are centralized in [`qknee/config/config.yaml`](qknee/config/config.yaml), loaded via `qknee/config/loader.py`.
 
@@ -152,8 +196,8 @@ Every VQC classifier this project can serve a prediction from is a separate, ind
 | Head | Config path (`qknee/config/config.yaml`) | Env var override | Used by |
 |---|---|---|---|
 | Primary (unified) | `paths.model_checkpoint` → `qknee/artifacts/qknee_model.pt`, falling back to `qknee/artifacts/checkpoints/best_checkpoint.pt` | `MODEL_CHECKPOINT_PATH` | The FastAPI `/predict`/`/explain`/`/report` endpoints (`extras/api/`) — one risk score, no separate ACL/MCL/meniscus heads. |
-| ACL | `paths.acl_checkpoint` → `qknee/artifacts/acl_vqc.pt` | `ACL_CHECKPOINT_PATH` | Streamlit dashboard's ACL gauge. |
-| Meniscus | `paths.meniscus_checkpoint` → `qknee/artifacts/meniscus_vqc.pt` | `MENISCUS_CHECKPOINT_PATH` | Streamlit dashboard's Meniscus gauge. |
+| ACL | `paths.acl_checkpoint` → `qknee/artifacts/acl_vqc.pt` | `ACL_CHECKPOINT_PATH` | Clinical workstation's ACL gauge. |
+| Meniscus | `paths.meniscus_checkpoint` → `qknee/artifacts/meniscus_vqc.pt` | `MENISCUS_CHECKPOINT_PATH` | Clinical workstation's Meniscus gauge. |
 | MCL | *(none — intentionally unconfigured)* | — | Never trained. This project has never had a real MCL checkpoint; there is no `paths.mcl_checkpoint` key to eventually fill in. It is a permanent research placeholder, not a temporarily-missing artifact. |
 
 A checkpoint is a dict saved by `qknee.models.qknee_model.save_checkpoint`/`qknee.models.pipeline`'s training path, and must declare `n_qubits`/`n_layers` matching `qknee/config/config.yaml`'s `quantum.n_qubits`/`quantum.n_layers` (default 4/3) plus a `vqc_state_dict` (or a `model_state_dict` with `vqc.`-prefixed keys) — see `qknee.observability.model_health.inspect_vqc_checkpoint` for the exact validation this project runs against every checkpoint before trusting it.
@@ -161,7 +205,7 @@ A checkpoint is a dict saved by `qknee.models.qknee_model.save_checkpoint`/`qkne
 **If a checkpoint is missing or fails validation (AUDIT.md P1 #6), this project never silently substitutes randomly-initialized weights into a result presented as a real prediction:**
 
 - The FastAPI backend's `/predict` refuses to run its live inference path at all when the primary checkpoint isn't loaded/valid — it serves the same honest, clearly-labeled seeded-mock response a missing PCA artifact already does (`backend: "mock"`, `provenance: "mock_fallback"`), never a real forward pass through untrained weights mislabeled as live.
-- The Streamlit dashboard shows **"UNAVAILABLE"** for any head (ACL, MCL, or Meniscus) with no valid checkpoint, with a specific reason ("no trained checkpoint found" vs. MCL's "research placeholder — never trained") — never a plausible-looking risk percentage.
+- The clinical workstation shows **"UNAVAILABLE"** for any head (ACL, MCL, or Meniscus) with no valid checkpoint, with a specific reason ("no trained checkpoint found" vs. MCL's "research placeholder — never trained") — never a plausible-looking risk percentage.
 - Both surfaces expose a `model_status` report — `{"primary": "available", "acl": "available", "meniscus": "unavailable", "mcl": "unavailable"}` — from `GET /health` (FastAPI, cheap existence check) or the dashboard's sidebar "Model Health" panel (fully architecture-validated, with a checkpoint content-hash identity). See `qknee.observability.model_health`.
 - `qknee.models.pipeline.PipelineRunner` itself (used directly for offline evaluation/scripting, not the live-serving path above) still gracefully falls back to randomly-initialized weights when constructed without a checkpoint — this is intentional for `python -m qknee.models.evaluate`/test/CLI usage where "run the architecture end-to-end without a trained model" is the explicit point; it is the two live-serving surfaces above, not this lower-level class, that refuse to present that fallback as a trustworthy prediction.
 
@@ -174,25 +218,19 @@ python -m qknee.models.pipeline
 # Train + evaluate against classical baselines, save ROC/confusion-matrix figures
 python -m qknee.models.evaluate
 
-# Launch the Streamlit clinical dashboard (http://localhost:8501) -- the PRIMARY,
-# judged interface. See ARCHITECTURE.md for why.
-streamlit run qknee/ui/dashboard.py
+# FastAPI backend (http://localhost:8000/docs) -- the PRIMARY, judged
+# interface. Needs both requirements files and a JWT secret; see
+# extras/README.md's "Security configuration" section.
+pip install -r extras/api/requirements.txt
+uvicorn extras.api.server:app --reload --port 8000
+
+# Next.js clinical workstation (http://localhost:3000), in a separate
+# terminal -- calls the FastAPI backend above over HTTP.
+cd frontend && npm install && npm run dev
 
 # Run the test suite (testpaths=qknee/tests, see pytest.ini)
 pytest                    # full suite
 pytest -m "not slow"      # skip the real ResNet18/PennyLane latency benchmark
-```
-
-**Secondary/exploratory interface** — a FastAPI backend + Next.js frontend also exist, quarantined out of judged scope (see [`ARCHITECTURE.md`](ARCHITECTURE.md)), calling the exact same `PipelineRunner` over HTTP instead of in-process:
-
-```bash
-# FastAPI backend (http://localhost:8000/docs) -- needs both requirements files
-# and a JWT secret; see extras/README.md's "Security configuration" section.
-pip install -r extras/api/requirements.txt
-uvicorn extras.api.server:app --reload --port 8000
-
-# Next.js frontend (http://localhost:3000), in a separate terminal
-cd frontend && npm install && npm run dev
 ```
 
 > Docker/docker-compose setup and Render/Vercel deploy config for the above also exist in [`extras/`](extras/README.md) — see that README's "Deployment targets" table for what's actually been validated vs. deployed.
@@ -249,10 +287,10 @@ qknee/
 │   ├── resnet_extractor.py        # frozen ResNet18 -> 512-D embedding (+ an optional ONNX
 │   │                               # Runtime backend, ONNXFeatureExtractor — see extras/README.md)
 │   ├── pca_reducer.py             # StandardScaler -> PCA(4) -> [0, 2pi] angle scaling
-│   ├── vqc.py                     # 4-qubit, 3-layer PennyLane VQC as a torch.nn.Module —
-│   │                               # the ansatz config.yaml's quantum.n_qubits/n_layers names
-│   ├── vqc_data_reuploading.py    # alternate classifier backbone (pipeline.py's
-│   │                               # classifier_backbone="data_reuploading" option)
+│   ├── vqc.py                     # 4-qubit, 3-layer PennyLane VQC as a torch.nn.Module --
+│   │                               # one VQCClassifier, two selectable ansatzes: "angle"
+│   │                               # (default, judged path) and "data_reuploading"
+│   │                               # (pipeline.py's classifier_backbone="data_reuploading")
 │   ├── vqc_multitarget.py         # multi-label quantum-classical head for the 12-condition
 │   │                               # RSNA Knee task (qknee_model.py's QKneeMultiTargetModel)
 │   ├── quantum_autoencoder.py     # alternate encoder (pipeline.py's
@@ -266,46 +304,40 @@ qknee/
 │   └── gradcam.py                 # Grad-CAM on ResNet18 layer4 + OpenCV overlay
 ├── observability/
 │   ├── provenance.py               # LIVE/PRECOMPUTED-DEMO/MOCK-FALLBACK/CACHED/PROXY
-│   │                                # classification -- shared by qknee/ui/dashboard.py AND
-│   │                                # extras/api/server.py, see ARCHITECTURE.md
+│   │                                # classification -- shared by extras/api/server.py and
+│   │                                # the Next.js frontend's provenance badge
 │   └── model_health.py             # per-checkpoint validation/status -- same sharing
-├── ui/
-│   ├── dashboard.py                # Streamlit clinical dashboard — opens straight into the
-│   │                                # workstation, no sign-in (tri-planar viewport, three risk
-│   │                                # heads: ACL/MCL/Medial Meniscus — see ARCHITECTURE.md)
-│   └── analysis_app.py             # Streamlit single-scan analysis app
 ├── tests/
 │   ├── conftest.py                 # shared fixtures (fitted reducer, ResNet, QKneeModel)
 │   ├── test_feature_extractor.py   # (B, 512) shape + PCA [0, 2pi] bound tests
 │   ├── test_latency_benchmark.py   # end-to-end inference latency
 │   ├── test_determinism.py         # seeded reproducibility
+│   ├── test_vqc_layers.py          # parameterized "angle"/"data_reuploading" ansatz tests --
+│   │                                # measurement bounds, unitarity, determinism, parameter-shift
+│   │                                # gradients vs. backprop
 │   └── test_quantum_simulator_mocking.py  # mocked NISQ resource-limit behavior
 └── artifacts/                      # fitted pca_scaler.pkl / qknee_model.pt (gitignored)
 
 scripts/
 ├── generate_deck_assets.py         # pitch-deck figures: ROC+efficiency chart, VQC circuit diagram, clinical case walkthrough (.png+.svg in qknee/artifacts/deck_figures/)
-└── run_benchmark.py                # SVM / linear-probe / VQC comparison, saves benchmark_results.json
+├── run_benchmark.py                # SVM / linear-probe / VQC comparison, saves benchmark_results.json
+└── run_vqc_vs_mlp_kfold.py         # VQC vs. parameter-matched MLP vs. a realistically-sized
+                                     # (unmatched) MLP -- see RESULTS.md Sec. 4
 
-extras/                              # quarantined — outside the judged PRD scope; moved, not
-│                                     # deleted. See extras/README.md for the full inventory.
-├── api/                             # FastAPI backend (was qknee/api/) + JWT/Argon2 auth
-├── ui/                              # clinician sign-in + institutional landing page
+extras/                              # See extras/README.md for the full inventory.
+├── api/                             # FastAPI backend + JWT/Argon2 auth (the judged backend)
 ├── deployment/                      # Dockerfile, docker-compose*.yml, render.yaml, vercel.json
 ├── scripts/                         # export_onnx.py, generate_kaggle_submission.py
-├── models/                          # vqc_strongly_entangling.py (alternate ansatz)
 └── tests/                           # tests for everything above
 
-frontend/                            # Next.js client for extras/api/'s FastAPI backend --
-│                                     # secondary/exploratory interface, NOT judged scope, NOT
-│                                     # quarantined into extras/ (see ARCHITECTURE.md for why it
-│                                     # gets its own top-level entry instead). Contains no ML
-│                                     # code -- lib/api.ts is a typed HTTP client only.
+frontend/                            # Next.js clinical workstation -- calls extras/api/'s
+│                                     # FastAPI backend over HTTP. Contains no ML code --
+│                                     # lib/api.ts is a typed HTTP client only.
 ├── app/workstation/                 # the diagnostic workstation page
 ├── components/workstation/          # MRI viewport, triage card, provenance badge
 ├── lib/api.ts                       # fetch() calls to the FastAPI backend's JSON contract
 └── lib/types.ts                     # TypeScript mirror of extras/api/server.py's Pydantic models
 
-.streamlit/config.toml              # dark theme config
 requirements.txt                    # runtime dependencies (+ pyyaml)
 requirements-dev.txt                # + pytest
 pytest.ini                          # slow/benchmark markers, testpaths=qknee/tests
