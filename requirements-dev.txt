@@ -7,6 +7,6 @@ pytest==9.1.1
 httpx==0.28.1  # required by fastapi.testclient.TestClient (qknee/tests/test_api_server.py)
 
 # scripts/export_onnx.py only — local, on-demand model export/validation,
-# never imported by the running API or Streamlit UI in production.
+# never imported by the running API in production.
 onnx>=1.15.0
 onnxruntime>=1.17.0

@@ -2,17 +2,12 @@
 #
 # Q-Knee container image.
 #
-# One shared multi-stage image serves BOTH the FastAPI backend
-# (extras/api/server.py) and the Streamlit frontend (qknee/ui/dashboard.py) —
-# they share the exact same heavy ML dependency stack (PyTorch, PennyLane,
-# OpenCV, scikit-learn), so building two separate images would just
-# duplicate multiple GB of identical layers for no benefit.
-# docker-compose.yml runs two containers *from this one image*, each with a
-# different `command:` override.
+# Builds the FastAPI backend (extras/api/server.py). The Next.js frontend
+# (frontend/) is deployed separately (Vercel) and is not part of this
+# image.
 #
 # Build:   docker build -t qknee:latest .
 # Run API: docker run -p 8000:8000 qknee:latest
-# Run UI:  docker run -p 8501:8501 qknee:latest streamlit run qknee/ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -153,9 +148,7 @@ ENV MPLCONFIGDIR=/tmp/matplotlib
 
 USER qknee
 
-# Both services' ports are declared here since this one image can run
-# either role; docker-compose.yml maps only the relevant port per service.
-EXPOSE 8000 8501
+EXPOSE 8000
 
 # Shell form (not the usual exec-form JSON array) is required here: only
 # the shell performs `${PORT:-8000}` parameter expansion. Render (and most
@@ -164,7 +157,4 @@ EXPOSE 8000 8501
 # silently bind the wrong port and every request would 502. Falls back to
 # 8000 (this image's own `EXPOSE`d default) when `$PORT` isn't set, e.g. a
 # plain `docker run` or the Compose-orchestrated dev stack.
-#
-# docker-compose.yml overrides this with the Streamlit `command:` for the
-# frontend service.
 CMD uvicorn extras.api.server:app --host 0.0.0.0 --port ${PORT:-8000}

@@ -1,19 +1,17 @@
-# Q-Knee orchestration: FastAPI backend, Streamlit UI, and an MLflow
-# tracking server.
+# Q-Knee orchestration: FastAPI backend and an MLflow tracking server.
+# The Next.js frontend (`frontend/`) is deployed separately (Vercel) and
+# is not part of this compose stack.
 #
-# `api` and `ui` build from the same image (see Dockerfile) since they
-# share the entire ML dependency stack (PyTorch, PennyLane, OpenCV) — only
-# the startup `command:` differs. `mlflow` runs the official MLflow image
-# instead: it's a lightweight tracking/artifact server with no dependency
-# on this project's (multi-GB) ML stack, so building it from our own
-# Dockerfile would just waste image-build time and disk for no benefit.
+# `mlflow` runs the official MLflow image: it's a lightweight
+# tracking/artifact server with no dependency on this project's
+# (multi-GB) ML stack, so building it from our own Dockerfile would just
+# waste image-build time and disk for no benefit.
 #
 # Usage:
-#   docker compose up --build       # start all three services
+#   docker compose up --build       # start both services
 #   docker compose up --build api   # start just the backend
 #
 # The backend is reachable at         http://localhost:8000  (docs at /docs)
-# The Streamlit UI is reachable at    http://localhost:8501
 # The MLflow tracking UI is reachable at http://localhost:5000
 #
 # `docker-compose.override.yml` (auto-merged by `docker compose up`, no
@@ -80,20 +78,18 @@ services:
       # Model checkpoint storage: the fitted PCA/scaler artifact and any
       # trained QKneeModel checkpoint live on the host (outside the image)
       # so a new model can be dropped in and picked up on container
-      # restart, with no image rebuild required. Shared with `ui` (below)
-      # so both services see the exact same artifacts.
+      # restart, with no image rebuild required.
       - ../../qknee/artifacts:/app/qknee/artifacts:ro
-      # Raw MRI training/eval data — read-only, since neither service
-      # writes back into the dataset itself.
+      # Raw MRI training/eval data — read-only, this service never writes
+      # back into the dataset itself.
       - ../../data:/app/data:ro
       # Grad-CAM / evaluation figures and generated deck assets written by
       # gradcam.py / evaluate.py / generate_deck_assets.py persist on the
       # host instead of vanishing when the container exits.
       - ../../eval_outputs:/app/eval_outputs
       - ../../deck_assets:/app/deck_assets
-      # Shared, host-visible log directory — both `api` and `ui` mount the
-      # same path so operators can tail/ship logs from one place regardless
-      # of which service emitted them, without shelling into a container.
+      # Host-visible log directory, so operators can tail/ship logs
+      # without shelling into the container.
       - ../../logs:/app/logs
     healthcheck:
       # No curl/wget in the slim runtime image (kept out to stay lean) —
@@ -119,62 +115,6 @@ services:
         reservations:
           cpus: "1.0"
           memory: 1g
-
-  ui:
-    build:
-      # Repo root, not this file's own directory (`docker compose`
-      # resolves a relative `context:` against the compose file's
-      # location) -- the Dockerfile's `COPY requirements.txt .` /
-      # `COPY . .` and the root `.dockerignore` both assume the build
-      # context IS the repo root. AUDIT.md P1 #9: found via an actual
-      # `docker compose config` validation run, not just a path guess.
-      context: ../..
-      dockerfile: extras/deployment/Dockerfile
-    image: qknee:latest
-    container_name: qknee-ui
-    command: ["streamlit", "run", "qknee/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
-    ports:
-      - "8501:8501"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PCA_ARTIFACT_PATH=/app/qknee/artifacts/pca_scaler.pkl
-      - MODEL_CHECKPOINT_PATH=/app/qknee/artifacts/qknee_model.pt
-      - STREAMLIT_SERVER_HEADLESS=true
-      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-      # qknee/ui/dashboard.py queries this over HTTP (POST /predict) when
-      # reachable, falling back to loading PipelineRunner in-process (and
-      # then to a seeded mock) if the API container is unavailable.
-      - QKNEE_API_URL=http://api:8000
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - OMP_NUM_THREADS=2
-      - MKL_NUM_THREADS=2
-      - TORCH_NUM_THREADS=2
-    volumes:
-      - ../../qknee/artifacts:/app/qknee/artifacts:ro
-      - ../../data:/app/data:ro
-      - ../../logs:/app/logs
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    restart: unless-stopped
-    networks:
-      - qknee-net
-    deploy:
-      resources:
-        # Bounds match this service's OMP_NUM_THREADS/MKL_NUM_THREADS/
-        # TORCH_NUM_THREADS=2 above.
-        limits:
-          cpus: "2.0"
-          memory: 2g
-        reservations:
-          cpus: "0.5"
-          memory: 512m
 
   mlflow:
     image: ghcr.io/mlflow/mlflow:v2.19.0

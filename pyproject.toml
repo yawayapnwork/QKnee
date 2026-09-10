@@ -21,7 +21,7 @@ keywords = [
     "radiology",
     "grad-cam",
     "fastapi",
-    "streamlit"
+    "nextjs"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,13 +35,14 @@ classifiers = [
 ]
 
 # Lightweight core only — this list is what installs on Vercel (mirrored
-# in `requirements-vercel.txt` / `qknee/api/requirements.txt`), where
-# `qknee/api/server.py` runs as a thin router/mock/proxy layer, never the
+# in `requirements-vercel.txt` / `extras/api/requirements.txt`), where
+# `extras/api/server.py` runs as a thin router/mock/proxy layer, never the
 # full ML pipeline. Everything the real ResNet18/PennyLane/Grad-CAM
-# pipeline and the Streamlit UI need lives under the `ml` extra below and
-# is installed separately for Render/Docker via the full root
-# `requirements.txt` (see Dockerfile) — `pip install -e .[ml]` for a local
-# dev environment that wants both.
+# pipeline needs lives under the `ml` extra below and is installed
+# separately for Render/Docker via the full root `requirements.txt` (see
+# Dockerfile) — `pip install -e .[ml]` for a local dev environment that
+# wants both. The Next.js frontend (`frontend/`) has its own separate
+# `npm install`, outside this file entirely.
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.28.0",
@@ -55,9 +56,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Full ML/imaging/UI stack — everything `qknee.models`, `qknee.data`,
-# `qknee.xai`, and `qknee.ui` need for real inference. This is what turns
-# a lightweight router into the full diagnostic pipeline (Render/Docker
+# Full ML/imaging stack — everything `qknee.models`, `qknee.data`, and
+# `qknee.xai` need for real inference. This is what turns a lightweight
+# router into the full diagnostic pipeline (Render/Docker
 # only; deliberately excluded from Vercel's function bundle, which is
 # capped at 500MB and where torch/torchvision/pennylane/SimpleITK/nibabel
 # alone would blow well past that).
@@ -77,7 +78,6 @@ ml = [
     "matplotlib>=3.8.0",
     "seaborn>=0.13.0",
     "reportlab>=4.0.0",
-    "streamlit>=1.30.0",
     "joblib>=1.3.0",
     "SQLAlchemy>=2.0.25",
     "redis>=5.0.0",
@@ -95,8 +95,6 @@ dev = [
 
 [project.scripts]
 qknee-train = "scripts.train:main"
-qknee-server = "qknee.api.server:main"
-qknee-verify = "scripts.verify_deployment:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -106,20 +104,20 @@ include = ["qknee*"]
 qknee = ["artifacts/**/*", "config/*.yaml"]
 
 [tool.vercel]
-entrypoint = "qknee.api.server:app"
+entrypoint = "extras.api.server:app"
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
 # `index-strategy = "first-index"` (uv's own default, pinned explicitly
 # here rather than relied upon) plus scoping the PyTorch CPU index to only
 # torch/torchvision via `explicit = true` + `[tool.uv.sources]` below is
-# the fix for the resolver failure this project actually hit on Streamlit
-# Community Cloud: a bare `--extra-index-url` line in requirements.txt
+# the fix for a resolver failure this project actually hit on a free-tier
+# build host: a bare `--extra-index-url` line in requirements.txt
 # applies to EVERY package being resolved, not just torch/torchvision —
 # when uv's index-strategy isn't pinned to "first-index", it can end up
 # considering download.pytorch.org's index for unrelated packages like
-# `requests`/`streamlit` too and picking an incompatible/stale candidate
-# from it. Scoping the extra index to only the two packages that actually
+# `requests` too and picking an incompatible/stale candidate from it.
+# Scoping the extra index to only the two packages that actually
 # need it removes the ambiguity entirely, while still keeping the ~150-200MB
 # CPU-only torch/torchvision wheels instead of PyPI's default 800MB-2GB+
 # CUDA-bundled build (see requirements.txt's own comment for why that

@@ -4,15 +4,11 @@
 # docker-compose.yml — no extra flag needed. What it adds over the base
 # (production-shaped) compose file:
 #
-#   - Bind-mounts the live `qknee/` and `scripts/` source trees into both
-#     containers, so an edit on the host is picked up without an image
-#     rebuild.
-#   - Runs uvicorn with `--reload` (watches `/app/qknee` for changes)
-#     instead of the production command.
-#   - Streamlit's dev server already file-watches and hot-reloads by
-#     default once it can see source changes — the bind mount above is
-#     the only thing it needs; `--server.runOnSave` just makes that
-#     explicit rather than relying on the default.
+#   - Bind-mounts the live `qknee/`, `extras/`, and `scripts/` source
+#     trees into the container, so an edit on the host is picked up
+#     without an image rebuild.
+#   - Runs uvicorn with `--reload` (watches `/app/qknee` and `/app/extras`
+#     for changes) instead of the production command.
 #   - Shortens healthcheck intervals so `docker compose up` reflects
 #     container readiness faster during iterative dev.
 #   - Points MLflow at a local, host-visible SQLite/artifact directory
@@ -49,22 +45,6 @@ services:
       - ../../scripts:/app/scripts
     environment:
       - LOG_LEVEL=DEBUG
-    healthcheck:
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
-
-  ui:
-    command:
-      - "streamlit"
-      - "run"
-      - "qknee/ui/dashboard.py"
-      - "--server.port=8501"
-      - "--server.address=0.0.0.0"
-      - "--server.runOnSave=true"
-    volumes:
-      - ../../qknee:/app/qknee
     healthcheck:
       interval: 10s
       timeout: 3s

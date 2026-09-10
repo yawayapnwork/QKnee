@@ -1,3 +1,7 @@
+# Internal-only docs (post-mortems, audit reports) — kept locally, never
+# shipped in the repo a panel/clone sees.
+/docs/internal/
+
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]

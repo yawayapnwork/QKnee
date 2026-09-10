@@ -1,7 +1,7 @@
 """
 Q-Knee REST API: FastAPI wrapper exposing `qknee.models.pipeline.PipelineRunner`
-(DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM) to the Streamlit frontend
-(qknee/ui) or any other HTTP client.
+(DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM) to the Next.js frontend
+(`frontend/`) or any other HTTP client.
 
 Run with:
     uvicorn extras.api.server:app --reload --port 8000
@@ -161,12 +161,11 @@ TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 USE_MOCK_FALLBACK = os.getenv("USE_MOCK_FALLBACK", "false").strip().lower() in ("1", "true", "yes")
 BACKEND_API_URL = (os.getenv("BACKEND_API_URL") or "").strip().rstrip("/") or None
 
-# The Streamlit Community Cloud deployment of the clinical workstation
-# (`qknee/ui/dashboard.py`) this API serves — surfaced from `GET /` so a
-# visitor hitting the bare API root gets sent to the actual UI instead of
-# a bare JSON blob with nowhere to go. Overridable for local/staging
-# frontends via `$STREAMLIT_FRONTEND_URL`.
-STREAMLIT_FRONTEND_URL = (os.getenv("STREAMLIT_FRONTEND_URL") or "https://q-knee.streamlit.app").strip()
+# The Next.js clinical workstation (`frontend/`) this API serves —
+# surfaced from `GET /` so a visitor hitting the bare API root gets sent
+# to the actual UI instead of a bare JSON blob with nowhere to go.
+# Overridable for local/staging frontends via `$FRONTEND_URL`.
+FRONTEND_URL = (os.getenv("FRONTEND_URL") or "https://q-knee-gamma.vercel.app").strip()
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
@@ -190,8 +189,8 @@ class CacheService:
           request path.
         - An in-process `dict` with per-key TTL, when `$REDIS_URL` is unset
           (the default, correct configuration for a single-node free-tier
-          deployment — Render, Streamlit Cloud, Vercel) or once Redis has
-          been given up on as above.
+          deployment — Render, Vercel) or once Redis has been given up on
+          as above.
 
     Values are pickled before being written to Redis (so a numpy Grad-CAM
     array round-trips exactly) — this cache only ever stores payloads this
@@ -452,7 +451,7 @@ class PredictionResponse(BaseModel):
     )
     provenance_label: str = Field(
         ..., description="Human-readable label for `provenance` (e.g. 'LIVE', 'MOCK/FALLBACK') -- the exact "
-                         "string every UI surface (Next.js, Streamlit) must display verbatim, never re-worded.",
+                         "string the Next.js frontend must display verbatim, never re-worded.",
     )
     model_source: Optional[str] = Field(
         None,
@@ -1383,8 +1382,8 @@ async def root(request: Request):
     route serves two audiences without a real HTTP redirect:
 
     - A **browser** (`Accept: text/html`) gets a sterile clinical-gateway
-      HTML page that meta-refreshes to the Streamlit workstation
-      (`$STREAMLIT_FRONTEND_URL`) after 2 seconds — long enough to read
+      HTML page that meta-refreshes to the Next.js workstation
+      (`$FRONTEND_URL`) after 2 seconds — long enough to read
       the system telemetry and grab a `/docs`/`/redoc` link first, short
       enough that a human visitor still lands on the real UI momentarily.
     - An **API/headless client** (`curl`, `fetch`, a monitoring probe —
@@ -1417,7 +1416,7 @@ async def root(request: Request):
             "explain": "/api/v1/explain",
             "report": "/api/v1/report",
         },
-        "frontend_workstation": STREAMLIT_FRONTEND_URL,
+        "frontend_workstation": FRONTEND_URL,
     }
 
     accept = request.headers.get("accept", "")
@@ -1429,7 +1428,7 @@ async def root(request: Request):
         <html lang="en">
         <head>
             <meta charset="utf-8">
-            <meta http-equiv="refresh" content="2; url={STREAMLIT_FRONTEND_URL}">
+            <meta http-equiv="refresh" content="2; url={FRONTEND_URL}">
             <title>Q-Knee Diagnostic Platform // Clinical Gateway</title>
             <style>
                 :root {{
@@ -1502,7 +1501,7 @@ async def root(request: Request):
                     </div>
                 </div>
                 <div class="actions">
-                    <a class="btn btn-primary" href="{STREAMLIT_FRONTEND_URL}">Launch Diagnostic Workstation (Streamlit) &rarr;</a>
+                    <a class="btn btn-primary" href="{FRONTEND_URL}">Launch Diagnostic Workstation &rarr;</a>
                     <a class="btn btn-secondary" href="/docs">Interactive OpenAPI Documentation (Swagger) &rarr;</a>
                     <a class="btn btn-tertiary" href="/redoc">ReDoc Specification &rarr;</a>
                 </div>
