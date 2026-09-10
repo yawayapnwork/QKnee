@@ -1,6 +1,5 @@
 ---
 title: Q-Knee
-emoji: 🦵
 colorFrom: green
 colorTo: blue
 license: mit
@@ -120,6 +119,67 @@ Two things back this up beyond the headline number:
   quantum_autoencoder.py` (a SWAP-test compression alternative, Romero et
   al. 2017) are separately-scoped, real ablations built on the same
   primitives, not redundant copies.
+
+### Judge Q&A: "Isn't this just buzzword padding?"
+
+**"Why use a quantum circuit here? Classical ResNet + MLP is faster, cheaper, and doesn't need quantum simulation."**
+
+**1. Parameter efficiency (measured, not claimed).** The table above is
+the whole argument: `VQCClassifier(n_qubits=4, n_layers=3)` has exactly
+**41** trainable parameters (36 rotation angles + a 5-parameter linear
+readout) — not an order of magnitude fewer than an MLP head, *three*
+orders of magnitude fewer. Against a parameter-matched 41-parameter MLP,
+macro-AUC is statistically indistinguishable (0.5242 vs. 0.5441 mean
+across 5 seeds). Against a realistically-sized MLP on the raw 512-D
+ResNet embedding — no PCA/quantum bottleneck, 65,793 parameters, the head
+you'd actually deploy if you weren't using a quantum layer at all —
+macro-AUC is still flat (0.5339 mean, range 0.5243–0.5420 across seeds).
+1,600x more classical parameters buys no measurable accuracy on this
+58-study cohort. That is the finding: not "quantum wins," but "quantum
+doesn't cost anything here, at three orders of magnitude less parameter
+footprint" — a legitimate argument for a compute/parameter-constrained
+deployment on its own, independent of any future accuracy claim.
+
+**2. The Hilbert-space argument — stated honestly, not oversold.** The
+literature motivation (Schuld & Killoran 2019; Havlíček et al. 2019) is
+real: angle-encoding `n` classical features onto `n` qubits embeds them in
+a `2^n`-dimensional Hilbert space, and a variational circuit over that
+space can realize decision boundaries a same-width classical layer
+cannot — in principle, a useful inductive bias against overfitting when
+labeled data is scarce, which describes this project's data reality
+exactly (**58** studies with real, radiologist-derived ground truth vs.
+**~3,723** weakly-labeled Effusion studies from rule-based report mining —
+see `qknee/artifacts/effusion_expanded_manifest.csv`). We are explicit
+about what this project does and does not show: our own 5-seed evaluation
+on that 58-study cohort does **not** show the VQC generalizing better than
+a parameter-matched classical model — the AUCs are statistically tied, as
+disclosed above. The Hilbert-space embedding is this design's theoretical
+motivation, not a benchmark result we're claiming to have already proven.
+A rigorous answer to "why quantum" separates the two, rather than
+borrowing the theory's credibility for a result it didn't produce.
+
+**3. The pragmatic NISQ roadmap.** Every circuit in this repo runs on
+PennyLane's `default.qubit` exact state-vector simulator — CPU-only,
+deterministic, and honest about it (`qknee/tests/test_vqc_layers.py`'s
+`TestNoHardwareQuantumBackend` asserts this explicitly; no result here is
+ever presented as having run on real quantum hardware). The deployment
+path to physical QPUs is a device swap, not a rewrite, specifically
+*because* the ansatz stays in PennyLane's hardware-agnostic `qml.device`
+abstraction: `qml.device("default.qubit", wires=4)` becomes
+`qml.device("qiskit.remote", wires=4, backend=...)` via
+[`pennylane-qiskit`](https://docs.pennylane.ai/projects/qiskit/) for IBM
+Quantum Runtime, or `qml.device("braket.aws.qubit", wires=4, device_arn=...)`
+via [`amazon-braket-pennylane-plugin`](https://amazon-braket-pennylane-plugin-python.readthedocs.io/)
+for AWS Braket — same `build_qnode`/`variational_block` code, same trained
+weights, same `qml.qnn.TorchLayer` wrapper. What changes on real hardware,
+and what we have **not** yet measured or claimed: shot noise (finite
+measurement statistics replace `default.qubit`'s exact expectation
+values), queueing/latency, and gate-fidelity-driven decoherence at circuit
+depth `n_layers=3`. `TestParameterShiftGradients` (parameter-shift vs.
+backprop agreement, see above) is this repo's evidence that the trained
+weights would remain valid under the hardware-realizable gradient rule —
+the necessary precondition for that swap to work, not a substitute for
+actually running it.
 
 ---
 
