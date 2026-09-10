@@ -1,24 +1,4 @@
-# Render Blueprint for the Q-Knee FastAPI backend (extras/api/server.py --
-# relocated here during the extras/ quarantine move; see extras/README.md
-# and AUDIT.md P1 #9/A1/A2 for that history).
-#
-# This service is deployed via Render's native Python buildpack, not the
-# repo's Dockerfile (docker-compose.yml / Dockerfile is for local dev and
-# other container targets) — which is why `.python-version` at the repo
-# root, not the Dockerfile's `FROM python:3.12-slim-bookworm`, is what
-# actually controls the interpreter Render provisions. Without it, Render's
-# buildpack defaults to the newest available CPython (3.14 as of this
-# writing), which has no prebuilt wheels yet for several packages here
-# (onnx/onnxruntime most notably — see requirements.txt's own note) and
-# falls back to compiling them from source, running the free-tier build
-# container out of memory.
-#
-# Two requirements files, both required: the root `requirements.txt` (the
-# ML stack -- torch, torchvision, pennylane, opencv, ...) does NOT contain
-# FastAPI/uvicorn/the auth stack (deliberately excluded from that file when
-# the API was quarantined to extras/ -- see requirements.txt's own
-# comment); `extras/api/requirements.txt` has those. This service needs
-# BOTH to actually serve real inference through the FastAPI app.
+# Render Blueprint for the Q-Knee FastAPI backend (extras/api/server.py)
 services:
   - type: web
     name: qknee-api
@@ -28,35 +8,19 @@ services:
     branch: main
     buildCommand: >-
       pip install --upgrade pip &&
-      (pip install --only-binary :all: -r requirements.txt -r extras/api/requirements.txt ||
-       pip install -r requirements.txt -r extras/api/requirements.txt)
-    startCommand: uvicorn extras.api.server:app --host 0.0.0.0 --port $PORT
-    # AUDIT.md P1 #9 requirement 8: point Render's own health check at the
-    # real, unauthenticated GET /health route (see extras/api/server.py) --
-    # not a guess/placeholder path.
+      pip install -r requirements.txt -r extras/api/requirements.txt &&
+      pip install -e .
+    startCommand: python -m uvicorn extras.api.server:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.14
-      # AUDIT.md P1 #8: extras.api.auth.resolve_jwt_secret() now refuses to
-      # start at all without a real, sufficiently strong secret whenever
-      # QKNEE_ENV is unset or production-like (the default) — there is no
-      # committed fallback anymore. QKNEE_JWT_SECRET_KEY (`sync: false`,
-      # i.e. must be set manually in the Render dashboard, never
-      # auto-populated or defaulted) must be a long, random, high-entropy
-      # value: generate one with
-      # `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
       - key: QKNEE_ENV
         value: production
       - key: QKNEE_JWT_SECRET_KEY
         sync: false
       - key: DATABASE_URL
         sync: false
-      # Optional; see extras/api/.env.example for the full list of env vars
-      # this service reads (REDIS_URL, QKNEE_RADIOLOGIST_INVITE_CODE,
-      # QKNEE_ALLOW_INMEMORY_DB, QKNEE_ACCESS_TOKEN_EXPIRE_MINUTES,
-      # QKNEE_REGISTER_RATE_LIMIT, QKNEE_LOGIN_RATE_LIMIT, USE_MOCK_FALLBACK,
-      # BACKEND_API_URL) and what each defaults to when unset.
       - key: QKNEE_RADIOLOGIST_INVITE_CODE
         sync: false
       - key: REDIS_URL
