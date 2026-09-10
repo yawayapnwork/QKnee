@@ -45,6 +45,7 @@ classifiers = [
 # `npm install`, outside this file entirely.
 dependencies = [
     "fastapi>=0.110.0",
+    "slowapi>=0.1.9",
     "uvicorn[standard]>=0.28.0",
     "pydantic>=2.6.0",
     "python-multipart>=0.0.9",
