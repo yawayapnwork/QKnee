@@ -207,7 +207,7 @@ export default function WorkstationPage() {
   const caseLabel = activeCase?.label ?? (result ? "Live Upload" : "");
 
   return (
-    <div className="flex flex-1 flex-col">
+    <div className="flex flex-1 flex-col min-h-0 md:h-full md:overflow-hidden">
       <StudyHeader
         caseLabel={caseLabel}
         result={visibleResult}
@@ -223,8 +223,8 @@ export default function WorkstationPage() {
           width the brief calls out as a floor. Widening back up at `xl`
           keeps the more generous columns for viewports that have the
           room to spare. */}
-      <div className="no-print grid flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px]">
-        <aside className="hidden lg:block lg:border-r lg:border-surface-3" aria-label="Case navigation">
+      <div className="no-print grid flex-1 min-h-0 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px] md:grid-rows-[minmax(0,1fr)]">
+        <aside className="hidden lg:flex lg:flex-col min-h-0 overflow-y-auto lg:border-r lg:border-surface-3" aria-label="Case navigation">
           <CaseNav
             cases={cases}
             activeCaseId={activeCaseId}
@@ -246,11 +246,11 @@ export default function WorkstationPage() {
           />
         </Drawer>
 
-        <section className="min-h-[480px] border-b border-surface-3 md:border-b-0 md:border-r" aria-label="MRI viewer">
+        <section className="flex flex-col min-h-[420px] md:min-h-0 overflow-hidden border-b border-surface-3 md:border-b-0 md:border-r" aria-label="MRI viewer">
           <MRIViewer result={visibleResult} />
         </section>
 
-        <section className="flex flex-col divide-y divide-surface-3 [&>*]:px-4 [&>*]:py-5 sm:[&>*]:px-6" aria-label="AI analysis">
+        <section className="flex flex-col min-h-0 md:overflow-y-auto divide-y divide-surface-3 [&>*]:px-4 [&>*]:py-5 sm:[&>*]:px-6" aria-label="AI analysis">
           {status === "loading" && <LoadingState />}
 
           {status === "error" && (

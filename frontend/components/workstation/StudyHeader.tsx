@@ -32,7 +32,7 @@ export function StudyHeader({
   onOpenCases: () => void;
 }) {
   return (
-    <div className="no-print flex flex-wrap items-center justify-between gap-3 border-b border-surface-3 bg-surface-1 px-4 py-3 sm:px-6">
+    <div className="no-print flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-surface-3 bg-surface-1 px-4 py-3 sm:px-6">
       <div className="flex items-center gap-3">
         <Tooltip label="Open case list">
           <Button variant="tertiary" size="sm" className="lg:hidden" onClick={onOpenCases} aria-label="Open case list">
