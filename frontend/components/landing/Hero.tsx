@@ -1,16 +1,6 @@
-"use client";
-
-import { useState } from "react";
-import dynamic from "next/dynamic";
 import Link from "next/link";
-import { ArrowRight, LogIn, UserCheck } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { PipelineVisual } from "@/components/landing/PipelineVisual";
-import { useAuth } from "@/lib/auth-context";
-
-const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) => m.AuthModal), {
-  ssr: false,
-  loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
-});
 
 /**
  * Full rebuild, not a patch of the prior Hero.tsx -- no generic
@@ -18,14 +8,11 @@ const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) =
  * decorative particle field. The headline states the actual data-flow
  * (`qknee/models/pipeline.py`'s four externally-visible stages) as the
  * hero copy itself, and `PipelineVisual` backs it with a real six-stage
- * instrument panel rather than an illustration. Dual-mode entry provides
- * both instant unauthenticated exploration ('Continue as Guest') and
- * authenticated clinician session management ('Sign In').
+ * instrument panel rather than an illustration. "What this is / is not"
+ * from the previous version is preserved as the sub-line + CTA pairing,
+ * not dropped -- a viewer still needs both facts before clicking.
  */
 export function Hero() {
-  const { continueAsGuest } = useAuth();
-  const [authOpen, setAuthOpen] = useState(false);
-
   return (
     <section id="platform" className="mx-auto max-w-6xl scroll-mt-16 px-4 py-14 sm:px-6 sm:py-20">
       <div className="grid grid-cols-1 gap-10">
@@ -63,27 +50,17 @@ export function Hero() {
             </div>
           </div>
 
-          <div className="mt-7 flex flex-wrap items-center gap-3">
+          <div className="mt-7 flex flex-col gap-2.5 sm:flex-row">
             <Link
               href="/workstation"
-              onClick={continueAsGuest}
-              className="inline-flex items-center justify-center gap-2 rounded-md bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              className="inline-flex items-center justify-center gap-2 rounded-sm bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-xs transition-colors hover:bg-accent-strong"
             >
-              <UserCheck className="h-4 w-4" aria-hidden="true" />
-              Continue as Guest
+              Open Workstation
               <ArrowRight className="h-4 w-4" aria-hidden="true" />
             </Link>
-            <button
-              type="button"
-              onClick={() => setAuthOpen(true)}
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-surface-3 bg-white px-5 py-2.5 text-sm font-semibold text-ink-primary shadow-xs transition-colors hover:bg-surface-2 hover:border-surface-4"
-            >
-              <LogIn className="h-4 w-4 text-ink-muted" aria-hidden="true" />
-              Sign In
-            </button>
             <Link
               href="#pipeline"
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 text-sm font-medium text-ink-muted hover:text-ink-primary transition-colors"
+              className="inline-flex items-center justify-center gap-2 rounded-sm border border-surface-3 bg-white px-5 py-2.5 text-sm font-medium text-ink-primary shadow-xs transition-colors hover:bg-surface-2 hover:border-surface-4"
             >
               Explore Architecture
             </Link>
@@ -92,8 +69,6 @@ export function Hero() {
 
         <PipelineVisual />
       </div>
-
-      {authOpen && <AuthModal open onClose={() => setAuthOpen(false)} />}
     </section>
   );
 }

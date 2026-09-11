@@ -94,7 +94,7 @@ export interface WorkstationError {
 }
 
 export default function WorkstationPage() {
-  const { token, user, authMode, isReady, signOut } = useAuth();
+  const { token, user, isReady, signOut } = useAuth();
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
   const [result, setResult] = useState<DiagnosticResult | null>(null);
@@ -113,7 +113,6 @@ export default function WorkstationPage() {
   // and clobber whatever the viewer is looking at by then.
   const requestAbortRef = useRef<AbortController | null>(null);
 
-  const isGuest = authMode === "guest" || !token;
   const canDiagnose = isReady && user?.role === "radiologist";
 
   useEffect(() => {
@@ -212,7 +211,7 @@ export default function WorkstationPage() {
     setStatus("loading");
     setActiveError(null);
     try {
-      const prediction = await predictScanVolume(file, token ?? undefined, controller.signal);
+      const prediction = await predictScanVolume(file, token!, controller.signal);
       if (controller.signal.aborted) return;
       setResult(toDiagnosticResult(prediction));
       setResultSource("live");
@@ -228,27 +227,16 @@ export default function WorkstationPage() {
 
       if (err instanceof ApiError) {
         if (err.status === 401) {
-          if (authMode === "authenticated") {
-            // Credential validation failure: expired or invalid token
-            signOut();
-            pendingFileRef.current = file;
-            setActiveError({
-              kind: "credentials",
-              title: "Credential Validation Failed",
-              message: "Your session has expired or credentials could not be validated. Please sign in with radiologist credentials.",
-              detail: err.detail,
-            });
-            setAuthOpen(true);
-          } else {
-            // Guest mode: the backend server requires radiologist credentials for live model inference
-            pendingFileRef.current = file;
-            setActiveError({
-              kind: "credentials",
-              title: "Radiologist Sign In Required",
-              message: "Live GPU and quantum model inference on uploaded scans requires a radiologist session. Please sign in with radiologist credentials, or explore precomputed demo cases.",
-              detail: err.detail,
-            });
-          }
+          // Credential validation failure: expired or invalid token
+          signOut();
+          pendingFileRef.current = file;
+          setActiveError({
+            kind: "credentials",
+            title: "Credential Validation Failed",
+            message: "Your session has expired or credentials could not be validated. Please sign in with radiologist credentials.",
+            detail: err.detail,
+          });
+          setAuthOpen(true);
         } else if (err.status === 403) {
           // Role restriction
           pendingFileRef.current = file;
@@ -315,20 +303,21 @@ export default function WorkstationPage() {
       return;
     }
 
-    // 3. For authenticated users, enforce radiologist role check (RBAC)
-    if (authMode === "authenticated" && !canDiagnose) {
+    // 3. Credential check at request time
+    if (!token || !canDiagnose) {
       pendingFileRef.current = file;
       setActiveError({
         kind: "credentials",
-        title: "Radiologist Access Required",
-        message: "Your current account does not have radiologist permissions for live model inference. Please sign in with an authorized account.",
+        title: !token ? "Authentication Required" : "Radiologist Access Required",
+        message: !token
+          ? "Please sign in with radiologist credentials to perform live model inference against uploaded scans."
+          : "Your current account does not have radiologist permissions for live model inference. Please sign in with an authorized account.",
       });
       setStatus("error");
       setAuthOpen(true);
       return;
     }
 
-    // Guest users and authorized radiologists proceed directly to live model inference
     setActiveError(null);
     void runInference(file);
   }
@@ -377,7 +366,6 @@ export default function WorkstationPage() {
             activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
             canDiagnose={Boolean(canDiagnose)}
-            isGuest={isGuest}
             apiHealth={apiHealth}
             onUpload={handleUpload}
             isUploading={isUploading}
@@ -390,7 +378,6 @@ export default function WorkstationPage() {
             activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
             canDiagnose={Boolean(canDiagnose)}
-            isGuest={isGuest}
             apiHealth={apiHealth}
             onUpload={handleUpload}
             isUploading={isUploading}

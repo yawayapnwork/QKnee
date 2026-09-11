@@ -34,7 +34,7 @@ const NAV_LINKS = [
  * `CommandBar.tsx`. Flat wordmark, no gradient tile.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { user, authMode, signOut, isReady } = useAuth();
+  const { user, signOut, isReady } = useAuth();
   const [authOpen, setAuthOpen] = useState(false);
   const pathname = usePathname();
 
@@ -67,7 +67,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
             ))}
 
-            {isReady && authMode === "authenticated" && user ? (
+            {isReady && user ? (
               <div className="ml-2 flex items-center gap-3">
                 <span className="hidden text-xs text-ink-muted sm:inline">
                   {user.full_name} · <span className="text-accent">{user.role}</span>
@@ -78,15 +78,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </Button>
               </div>
             ) : (
-              <div className="ml-2 flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-surface-3 bg-surface-2 px-2.5 py-1 text-xs font-medium text-ink-muted">
-                  <span className="h-1.5 w-1.5 rounded-full bg-ink-faint" aria-hidden="true" />
-                  Guest
-                </span>
-                <Button variant="secondary" size="sm" onClick={() => setAuthOpen(true)}>
-                  Sign In
-                </Button>
-              </div>
+              <Button variant="secondary" size="sm" className="ml-2" onClick={() => setAuthOpen(true)}>
+                Sign In
+              </Button>
             )}
           </nav>
         </div>
