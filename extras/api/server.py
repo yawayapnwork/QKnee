@@ -147,7 +147,7 @@ TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 #                              to pay ResNet18/PennyLane's cold-load cost.
 #   BACKEND_API_URL          - base URL of a full Render/Docker deployment
 #                              of this same API (e.g.
-#                              "https://qknee-api.onrender.com"). When set,
+#                              "https://qknee-8dv8.onrender.com"). When set,
 #                              `/predict`/`/explain`/`/report` proxy the
 #                              upload there instead of running inference
 #                              locally — the intended Vercel configuration,

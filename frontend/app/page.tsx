@@ -1,4 +1,3 @@
-import { LandingNav } from "@/components/landing/LandingNav";
 import { Hero } from "@/components/landing/Hero";
 import { EvidenceSection } from "@/components/landing/EvidenceSection";
 import { ArchitectureSection } from "@/components/landing/ArchitectureSection";
@@ -9,7 +8,6 @@ import { FinalCta } from "@/components/landing/FinalCta";
 export default function HomePage() {
   return (
     <>
-      <LandingNav />
       <Hero />
       <EvidenceSection />
       <ArchitectureSection />
