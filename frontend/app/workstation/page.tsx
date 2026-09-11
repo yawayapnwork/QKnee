@@ -100,6 +100,12 @@ export default function WorkstationPage() {
   const requestAbortRef = useRef<AbortController | null>(null);
 
   const casesLoadedRef = useRef(false);
+  const apiOnlineRef = useRef(false);
+
+  const markApiOnline = () => {
+    apiOnlineRef.current = true;
+    setApiHealth("online");
+  };
 
   // Poll health and keep status updated; automatically reload cases when backend comes online
   useEffect(() => {
@@ -121,7 +127,7 @@ export default function WorkstationPage() {
         if (!isMounted) return;
 
         if (health.status === "ok" || health.backend_ready) {
-          setApiHealth("online");
+          markApiOnline();
 
           // If demo cases have not loaded yet (e.g. backend was cold starting when page mounted), fetch them now
           if (!casesLoadedRef.current) {
@@ -141,14 +147,20 @@ export default function WorkstationPage() {
           // Periodic heartbeat every 30s while online
           pollTimer = setTimeout(() => void checkHealthAndSync(), 30000);
         } else {
-          setApiHealth("offline");
+          // Prevent an old/stale failed health-check request from overwriting a newer successful "online" state
+          if (!apiOnlineRef.current) {
+            setApiHealth("offline");
+          }
           // Fast retry every 5s while offline
           pollTimer = setTimeout(() => void checkHealthAndSync(), 5000);
         }
       } catch {
         clearTimeout(timeout);
         if (!isMounted) return;
-        setApiHealth("offline");
+        // Prevent an old/stale failed health-check request from overwriting a newer successful "online" state
+        if (!apiOnlineRef.current) {
+          setApiHealth("offline");
+        }
         // Fast retry every 5s while offline
         pollTimer = setTimeout(() => void checkHealthAndSync(), 5000);
       }
@@ -176,7 +188,10 @@ export default function WorkstationPage() {
         if (controller.signal.aborted) return;
         casesLoadedRef.current = true;
         setCases(fetched);
-        if (fetched.length > 0) void loadCase(fetched[0].case_id);
+        if (fetched.length > 0) {
+          markApiOnline();
+          void loadCase(fetched[0].case_id);
+        }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
@@ -209,6 +224,7 @@ export default function WorkstationPage() {
     try {
       const prediction = await fetchCase(caseId, controller.signal);
       if (controller.signal.aborted) return;
+      markApiOnline();
       setResult(toDiagnosticResult(prediction));
       setResultSource("demo");
       setStatus("idle");
@@ -244,7 +260,7 @@ export default function WorkstationPage() {
       setActiveCaseId(null);
       setStatus("idle");
       setIsUploading(false);
-      setApiHealth("online");
+      markApiOnline();
     } catch (err) {
       // A newer request superseded this one -- that request's own
       // success/error handling owns the UI now, so this stale rejection
