@@ -46,6 +46,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.110.0",
     "slowapi>=0.1.9",
+    "SQLAlchemy>=2.0.25",
     "uvicorn[standard]>=0.28.0",
     "pydantic>=2.6.0",
     "python-multipart>=0.0.9",

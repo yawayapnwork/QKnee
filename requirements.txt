@@ -44,7 +44,7 @@ torch>=2.2.0,<2.4.0
 torchvision>=0.17.0,<0.19.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.28.0
-
+SQLAlchemy>=2.0.25
 pyyaml>=6.0.1
 pennylane>=0.35.0
 numpy>=1.26.0,<2.0.0
