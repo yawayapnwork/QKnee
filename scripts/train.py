@@ -27,8 +27,7 @@ used as-is (already plane-specific, or plane-agnostic).
 Run with:
     python scripts/train.py --dataset_dir data --epochs 50 --learning_rate 0.02
     python scripts/train.py --dataset_dir data --plane sagittal --ansatz data_reuploading
-    python scripts/train.py --use_mock --epochs 20          # no real dataset needed
-    python scripts/train.py --dry_run                       # 1 batch, 1 epoch, synthetic tensors
+    python scripts/train.py --use_rsna_effusion               # train on the real RSNA Effusion pool
 """
 
 from __future__ import annotations
@@ -83,7 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # --- Required-by-spec flags ---
     parser.add_argument("--dataset_dir", type=str, default=None,
                          help="Root directory with train/ (and optionally val/) class subfolders "
-                              "(default: config.yaml's paths.data_root). Ignored if --use_mock/--dry_run.")
+                              "(default: config.yaml's paths.data_root). Ignored if --use_rsna_effusion.")
     parser.add_argument("--plane", choices=PLANE_CHOICES, default=None,
                          help="Anatomical plane subdirectory to train on: <dataset_dir>/<plane>/train/... "
                               "if that subdirectory exists, else --dataset_dir is used as-is.")
@@ -97,23 +96,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "(default: config.yaml's data.batch_size).")
     parser.add_argument("--learning_rate", type=float, default=None,
                          help="Adam learning rate (default: config.yaml's training.learning_rate).")
-    parser.add_argument("--use_mock", action="store_true",
-                         help="Train on an in-memory synthetic dataset instead of --dataset_dir — "
-                              "useful with no real dataset available (CI, demos). Runs the full "
-                              "configured epoch count, unlike --dry_run.")
-    parser.add_argument("--dry_run", action="store_true",
-                         help="Pipeline-integrity smoke test: 1 batch, 1 epoch, synthetic tensors. "
-                              "Overrides --epochs/--use_mock; does not require --dataset_dir. "
-                              "Mutually exclusive with --use_rsna_effusion.")
     parser.add_argument("--use_rsna_effusion", action="store_true",
                          help="Train on this project's real Effusion-labeled RSNA Knee pool "
                               "(qknee.data.dataset.RSNAEffusionTrainDataset -- the 58 ground-truth studies "
                               "plus every confidently weak-labeled study; see that class's docstring) instead of "
-                              "MRIDataset/--dataset_dir or synthetic --use_mock/--dry_run data. Runs the full "
-                              "configured epoch count with a real train/eval holdout split, same as the "
-                              "--dataset_dir path with no val/ directory. Mutually exclusive with --use_mock/"
-                              "--dry_run -- passing both is a configuration error, not a silent override, so "
-                              "nobody accidentally reproduces a synthetic-data smoke-test checkpoint again.")
+                              "MRIDataset/--dataset_dir. Runs the full configured epoch count with a real "
+                              "train/eval holdout split, same as the --dataset_dir path with no val/ directory.")
 
     # --- Supporting flags (existing behavior, kept) ---
     parser.add_argument("--pca-artifact", type=str, default=None,
@@ -222,7 +210,8 @@ def build_vqc(ansatz: str, n_qubits: int, n_layers: int) -> nn.Module:
 
 
 # --------------------------------------------------------------------------- #
-# Synthetic data (--use_mock / --dry_run)
+# Synthetic data — test-only helper, not reachable from the CLI. Real training
+# always goes through --dataset_dir or --use_rsna_effusion.
 # --------------------------------------------------------------------------- #
 
 def build_synthetic_image_dataset(
@@ -231,8 +220,8 @@ def build_synthetic_image_dataset(
     """Synthetic MRI-like (concentric-ring) `(N, 3, H, W)` image tensor +
     `(N,)` binary label tensor — the label weakly shifts the ring radius,
     so there's *some* learnable signal, not pure noise. Used by
-    `--use_mock` (full training run, no real dataset required) and
-    `--dry_run` (a 1-sample-batch pipeline-integrity check)."""
+    `qknee/tests/test_train_cli.py` to unit-test `run_training_loop` (and
+    other pipeline internals) without needing real DICOM data."""
     rng = np.random.default_rng(seed)
     height, width = image_size
     yy, xx = np.mgrid[0:height, 0:width]
@@ -607,18 +596,6 @@ def main() -> None:
     setup_logging()
     args = build_arg_parser().parse_args()
 
-    if args.use_rsna_effusion and (args.use_mock or args.dry_run):
-        raise TrainingError(
-            "--use_rsna_effusion is mutually exclusive with --use_mock/--dry_run -- pass exactly one data "
-            "source. This is a hard error rather than a silent override so nobody accidentally reproduces the "
-            "synthetic-data, single-epoch --dry_run smoke-test checkpoint (worse than random on real data) "
-            "while believing --use_rsna_effusion's real pool was actually used."
-        )
-
-    if args.dry_run:
-        args.use_mock = True
-        args.epochs = 1
-
     config = resolve_config(args)
 
     torch.manual_seed(args.seed)
@@ -628,33 +605,13 @@ def main() -> None:
     logger.info(
         "=== Q-Knee training run (device=%s, seed=%d, ansatz=%s, mode=%s) ===",
         device, args.seed, args.ansatz,
-        "dry_run" if args.dry_run else (
-            "use_mock" if args.use_mock else ("rsna_effusion" if args.use_rsna_effusion else "dataset")
-        ),
+        "rsna_effusion" if args.use_rsna_effusion else "dataset",
     )
 
     # ------------------------------------------------------------------ #
-    # Stage 0: build (or synthesize) train/eval tensors, and a corpus for
-    # the PCA fit.
+    # Stage 0: build train/eval tensors, and a corpus for the PCA fit.
     # ------------------------------------------------------------------ #
-    if args.use_mock:
-        n_samples = config.data.batch_size if args.dry_run else max(200, config.data.batch_size * 4)
-        logger.info("%s: synthesizing %d in-memory images (no --dataset_dir needed).",
-                    "Dry run" if args.dry_run else "Mock mode", n_samples)
-        all_images, all_labels = build_synthetic_image_dataset(n_samples, config.data.image_size, args.seed)
-
-        if args.dry_run:
-            # Literally 1 batch, 1 epoch: no train/eval split, everything
-            # (PCA fit corpus, training batch, eval) reuses the same tiny
-            # synthetic tensor purely to exercise every stage once.
-            train_images, train_labels = all_images, all_labels
-            eval_images, eval_labels = all_images, all_labels
-        else:
-            train_images, train_labels, eval_images, eval_labels = split_train_holdout(
-                all_images, all_labels, config.training.val_holdout_fraction, args.seed,
-            )
-        pca_fit_images = train_images
-    elif args.use_rsna_effusion:
+    if args.use_rsna_effusion:
         logger.info("Training on the real RSNA Knee Effusion pool (qknee.data.dataset.RSNAEffusionTrainDataset).")
         rsna_dataset = RSNAEffusionTrainDataset()
         rsna_loader = DataLoader(
@@ -681,7 +638,7 @@ def main() -> None:
             raise TrainingError(
                 f"Dataset directory {dataset_dir} does not exist. Expected "
                 f"{dataset_dir}/train/<class>/*.png|*.jpg|*.npy (see qknee.data.dataset.MRIDataset), "
-                "or pass --use_mock/--dry_run to train without a real dataset."
+                "or pass --use_rsna_effusion to train on the real RSNA Effusion pool instead."
             )
         logger.info("Training on dataset directory: %s", dataset_dir)
 
@@ -806,9 +763,6 @@ def main() -> None:
     if best_checkpoint_path is not None:
         logger.info("  Best (val_loss) checkpoint: %s", best_checkpoint_path.resolve())
     logger.info("  Eval accuracy: %.4f", eval_accuracy)
-
-    if args.dry_run:
-        logger.info("Dry run OK — pipeline integrity verified end-to-end.")
 
 
 if __name__ == "__main__":

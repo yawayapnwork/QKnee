@@ -9,19 +9,15 @@ Covers:
     2. `build_vqc` — all three `--ansatz` choices produce a module with
        the shared `(B, n_qubits) -> (B, 1)` interface.
     3. `resolve_dataset_dir` — `--plane` joining + graceful fallback.
-    4. `build_synthetic_image_dataset` — shape/dtype/label-range for
-       `--use_mock`/`--dry_run`.
+    4. `build_synthetic_image_dataset` — shape/dtype/label-range for the
+       synthetic tensors `TestRunTrainingLoop` below trains on.
     5. `run_training_loop` — real-time metrics (loss/accuracy/val ROC-AUC/
        gradient norm) are populated, checkpoints land in `checkpoint_dir`,
        and early stopping actually triggers on a stalled validation loss.
-    6. `--dry_run` end-to-end via subprocess: 1 batch, 1 epoch, no
-       `--dataset_dir` required, exits 0.
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -156,7 +152,7 @@ class TestResolveDatasetDir:
 
 
 # --------------------------------------------------------------------------- #
-# 4. Synthetic dataset for --use_mock / --dry_run
+# 4. Synthetic dataset for TestRunTrainingLoop
 # --------------------------------------------------------------------------- #
 
 class TestBuildSyntheticImageDataset:
@@ -261,19 +257,3 @@ class TestComputeGradNorm:
         output = model(torch.rand(2, 4))
         output.sum().backward()
         assert compute_grad_norm(model) > 0.0
-
-
-# --------------------------------------------------------------------------- #
-# 6. --dry_run end-to-end (subprocess, exercises the real CLI)
-# --------------------------------------------------------------------------- #
-
-class TestDryRunSubprocess:
-    def test_dry_run_exits_zero_and_reports_success(self):
-        result = subprocess.run(
-            [sys.executable, "scripts/train.py", "--dry_run"],
-            cwd=Path(__file__).resolve().parent.parent.parent,
-            capture_output=True, text=True, timeout=300,
-        )
-        combined_output = result.stdout + result.stderr
-        assert result.returncode == 0, combined_output[-3000:]
-        assert "Dry run OK" in combined_output
