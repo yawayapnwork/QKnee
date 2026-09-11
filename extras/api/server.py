@@ -135,6 +135,14 @@ _config = load_config()
 PCA_ARTIFACT_PATH = _config.paths.pca_artifact
 TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 
+# Severity band thresholds on `risk_score` -- the single source of truth for
+# "Normal" / "Indeterminate" / "Urgent Surgical Consult", exposed on every
+# `PredictionResponse` (see `severity_band_normal_max`/`severity_band_urgent_min`
+# below) so the frontend (`lib/severity.ts`) never has to hardcode its own guess
+# at these boundaries.
+SEVERITY_BAND_NORMAL_MAX = 0.4
+SEVERITY_BAND_URGENT_MIN = 0.75
+
 # --------------------------------------------------------------------------- #
 # Serverless routing config — read once at import time (plain env vars,
 # no heavy dependency involved), used by `get_backend()` to decide which
@@ -408,6 +416,16 @@ class PredictionResponse(BaseModel):
                     "only, never for every slice, so the frontend must show the overlay for this slice alone and "
                     "say so, not imply every slice has one. `None` exactly when `gradcam_overlay` is `None`.",
     )
+    gradcam_degenerate: Optional[bool] = Field(
+        None,
+        description="True when the raw Grad-CAM heatmap behind `gradcam_overlay` is entirely zero -- "
+                    "`ReLU(sum_k(alpha_k * A_k))` can legitimately zero out every pixel for a given input "
+                    "(mathematically valid, not a computation failure), producing a blank-looking overlay a "
+                    "viewer could otherwise mistake for a normal 'no highlighted region' result. Observed for a "
+                    "meaningful fraction of real inputs with the current checkpoint. `False` means a real, "
+                    "non-empty heatmap was produced. `None` when no real Grad-CAM ran at all (mock mode) -- "
+                    "distinct from `False`, which asserts a genuine non-degenerate computation happened.",
+    )
     planes: Dict[str, PlaneInfo] = Field(
         default_factory=lambda: {
             plane: PlaneInfo(available=False, num_slices=0, slices=[]) for plane in ("axial", "coronal", "sagittal")
@@ -482,6 +500,19 @@ class PredictionResponse(BaseModel):
                     "'unavailable' means something is actually missing.",
     )
     quantum_execution_label: str = Field(..., description="Human-readable label for `quantum_execution`.")
+    severity_band_normal_max: float = Field(
+        SEVERITY_BAND_NORMAL_MAX,
+        description="Upper bound (exclusive) of the 'Normal' severity band on `risk_score` -- "
+                    "`risk_score < severity_band_normal_max` is 'Normal', "
+                    "`severity_band_normal_max <= risk_score < severity_band_urgent_min` is 'Indeterminate', "
+                    "`risk_score >= severity_band_urgent_min` is 'Urgent Surgical Consult'. Authoritative source "
+                    "for these boundaries -- the frontend must render them from here, never hardcode a guess.",
+    )
+    severity_band_urgent_min: float = Field(
+        SEVERITY_BAND_URGENT_MIN,
+        description="Lower bound (inclusive) of the 'Urgent Surgical Consult' severity band on `risk_score`. "
+                    "See `severity_band_normal_max` for the full band definition.",
+    )
 
 
 class CaseSummary(BaseModel):
@@ -568,6 +599,8 @@ class _PredictParts:
     primary_slice_index: int
     model_checkpoint_loaded: Optional[bool] = None  # None: no model forward pass ran for this
     # response (mock mode) -- see qknee.observability.provenance.classify's `model_checkpoint_loaded` arg.
+    gradcam_degenerate: Optional[bool] = None  # None: no real Grad-CAM ran (mock mode) -- see
+    # PredictionResponse.gradcam_degenerate's docstring for what True/False mean.
 
 
 @functools.lru_cache(maxsize=1)
@@ -886,6 +919,7 @@ class QKneeBackend:
             gradcam_overlay=parts.gradcam_overlay_b64,
             gradcam_plane=parts.gradcam_plane,
             gradcam_slice_index=parts.gradcam_slice_index,
+            gradcam_degenerate=parts.gradcam_degenerate,
             planes=parts.planes,
             primary_plane="axial",
             primary_slice_index=parts.primary_slice_index,
@@ -1013,6 +1047,7 @@ class QKneeBackend:
             gradcam_overlay=parts.gradcam_overlay_b64,
             gradcam_plane=parts.gradcam_plane,
             gradcam_slice_index=parts.gradcam_slice_index,
+            gradcam_degenerate=parts.gradcam_degenerate,
             planes=planes,
             primary_plane=primary_plane_key,
             primary_slice_index=parts.primary_slice_index,
@@ -1049,6 +1084,15 @@ class QKneeBackend:
             display_slice = self._normalize_uint8(central_slice_raw)
 
             result = self.runner.run(display_slice)  # DataIngestion -> ResNet18 -> PCA -> VQC -> GradCAM
+
+            # Grad-CAM is `ReLU(sum_k(alpha_k * A_k))` -- if every channel-
+            # weighted activation sum is <=0 for this input, the ReLU zeroes
+            # the entire map. That's mathematically valid (not a computation
+            # failure) but diagnostically empty -- surfaced explicitly here
+            # rather than silently shipping a blank-looking overlay a viewer
+            # could mistake for "no highlighted region because the model is
+            # confident," which is a different claim this data doesn't support.
+            gradcam_degenerate = bool(np.all(result.gradcam_heatmap == 0))
 
             # Legacy pre-blended composite -- unchanged, still what /explain
             # and /report return; not used by the current Next.js viewer,
@@ -1096,6 +1140,7 @@ class QKneeBackend:
                 planes=planes,
                 primary_slice_index=primary_slice_index,
                 model_checkpoint_loaded=self.runner.vqc_checkpoint_loaded,
+                gradcam_degenerate=gradcam_degenerate,
             )
         except HTTPException:
             raise

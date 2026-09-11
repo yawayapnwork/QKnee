@@ -71,7 +71,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy import Boolean, DateTime, String, create_engine, select
+from sqlalchemy import Boolean, DateTime, String, create_engine, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -642,10 +642,41 @@ class UserRepository:
                 )
                 role = DEFAULT_ROLE
 
+        return self._insert_user(
+            email=user_create.email, password=user_create.password,
+            full_name=user_create.full_name, role=role,
+        )
+
+    def create_user_unchecked(self, email: str, password: str, full_name: str, role: str) -> User:
+        """Inserts a user with `role` exactly as given -- deliberately
+        skipping `create_user`'s radiologist invite-code gate entirely.
+
+        NEVER call this from an HTTP-reachable code path (`extras/api/
+        server.py`'s routes, `register()` below) -- doing so would
+        reintroduce the self-service role-escalation hole the invite-code
+        check exists to close. This exists for exactly one caller:
+        `scripts/create_admin_user.py`, an operator-run CLI script (its own
+        `$ADMIN_SEED_TOKEN` check is the authorization proof here, not
+        anything in this method) -- see that script's module docstring and
+        `extras/README.md`'s "Admin bootstrap" section.
+        """
+        if role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}, got {role!r}")
+        return self._insert_user(email=email, password=password, full_name=full_name, role=role)
+
+    def count_users(self) -> int:
+        """Total number of accounts in the store -- used by
+        `scripts/create_admin_user.py` to refuse to run once any account
+        already exists (this bootstrap mechanism is for the very first
+        account only; see that script's docstring)."""
+        with self._session_factory() as session:  # type: Session
+            return session.execute(select(func.count()).select_from(User)).scalar_one()
+
+    def _insert_user(self, email: str, password: str, full_name: str, role: str) -> User:
         user = User(
-            email=user_create.email.strip().lower(),
-            hashed_password=hash_password(user_create.password),
-            full_name=user_create.full_name,
+            email=email.strip().lower(),
+            hashed_password=hash_password(password),
+            full_name=full_name,
             role=role,
         )
         with self._session_factory() as session:  # type: Session
@@ -654,7 +685,7 @@ class UserRepository:
                 session.commit()
             except IntegrityError as exc:
                 session.rollback()
-                raise UserAlreadyExistsError(f"An account already exists for '{user_create.email}'") from exc
+                raise UserAlreadyExistsError(f"An account already exists for '{email}'") from exc
             session.refresh(user)
         return user
 

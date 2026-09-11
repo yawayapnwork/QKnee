@@ -770,6 +770,166 @@ class RSNAKneeDataset:
         return iter(self._records)
 
 
+# Repo root, computed from this file's location (qknee/data/dataset.py ->
+# parents[2] is the repo root) -- used only by RSNAEffusionTrainDataset
+# below for its default real-data paths and to resolve scripts/ on
+# sys.path for its lazy _pick_series_dir import.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class RSNAEffusionTrainDataset(Dataset):
+    """`torch.utils.data.Dataset` adapter that lets `scripts/train.py`'s
+    existing full-batch training loop (`collect_resnet_features` /
+    `collect_image_tensor`, both built for `MRIDataset`'s `(tensor, label)`
+    contract) train directly on this project's real Effusion-labeled RSNA
+    Knee pool, instead of `MRIDataset`'s ImageFolder layout -- nothing in
+    this project's real dataset is laid out that way; see
+    `qknee/artifacts/effusion_expanded_manifest.csv`
+    (`scripts/build_effusion_expanded_manifest.py`) for how the real pool
+    below was actually built.
+
+    Internally wraps one `RSNAKneeDataset` instance, built from that
+    manifest -- the 58 ground-truth studies (`tier="GROUND_TRUTH"`) plus
+    every confidently weak-labeled study (no "MILD" coin-flip tier, no
+    `needs_review` flag -- the identical discipline
+    `scripts/run_effusion_weak_augmented_kfold.py` already uses). Ground-
+    truth and weak-labeled rows are deliberately NOT distinguished at this
+    layer -- `scripts/train.py`'s loop has no notion of provenance-aware
+    training; a caller that needs that distinction should read the
+    manifest CSV directly instead of going through this class.
+
+    `__getitem__` resolves each row's label from the wrapped
+    `RSNAStudyRecord.targets["Effusion"]` -- populated by `RSNAKneeDataset`
+    from a real `"Effusion"` target column (`RSNA_TARGET_COLUMNS`), the
+    same validated `load_rsna_labels_csv` machinery every other RSNA-CSV-
+    driven pipeline in this project goes through -- rows where this is
+    `None` are skipped, never coerced to a fabricated 0/1.
+
+    Series selection reuses `scripts/build_real_demo_cases.py`'s
+    `_pick_series_dir` directly (picks whichever series subdirectory has
+    the most `.dcm` files for the study) -- the exact selection this
+    session's PCA-reducer refit and real-demo-case regeneration already
+    proved correct, imported rather than reimplemented. This deliberately
+    bypasses `RSNAStudyRecord.plane_series_dirs` (which resolves plane via
+    `train_series.csv`) -- `_pick_series_dir` needs no plane at all, and
+    reconciling two different "which series" strategies buys nothing here.
+
+    Decoding matches this session's verified real-inference path exactly:
+    `DataIngestion.load_dicom_series` -> central slice -> `DataIngestion.
+    preprocess` -> squeezed down to one `(3, 224, 224)` tensor, so
+    `default_collate` batches this exactly like `MRIDataset`'s transformed
+    slices -- `collect_resnet_features`/`collect_image_tensor` need no
+    changes at all to consume this dataset. A study whose picked series
+    fails to decode, or has no usable series on disk, returns `None`
+    (skip) at `__getitem__` time -- pair with `collate_skip_invalid`,
+    exactly like `MRIDataset`.
+    """
+
+    DEFAULT_MANIFEST_CSV = _REPO_ROOT / "qknee" / "artifacts" / "effusion_expanded_manifest.csv"
+    DEFAULT_SERIES_ROOT = _REPO_ROOT.parent / "rsna-knee" / "train_series"
+    DEFAULT_SERIES_CSV = _REPO_ROOT / "train_series.csv"
+
+    def __init__(
+        self,
+        manifest_csv: Union[str, Path] = DEFAULT_MANIFEST_CSV,
+        series_root: Union[str, Path] = DEFAULT_SERIES_ROOT,
+        series_csv_path: Union[str, Path] = DEFAULT_SERIES_CSV,
+    ) -> None:
+        # Lazy import: qknee.data.ingestion imports IMAGE_EXTENSIONS/
+        # VOLUME_EXTENSIONS/build_transforms FROM this module at its own
+        # module scope, so a module-level `from qknee.data.ingestion import
+        # DataIngestion` here would be a circular import. Deferred to
+        # construction time, this is a plain, already-resolved import by
+        # the time any RSNAEffusionTrainDataset actually gets built.
+        from qknee.data.ingestion import DataIngestion
+
+        manifest_csv = Path(manifest_csv)
+        self.series_root = Path(series_root)
+        self._ingestion = DataIngestion(train=False)
+        self._pick_series_dir = self._import_pick_series_dir()
+
+        manifest = pd.read_csv(manifest_csv, dtype={"StudyInstanceUID": str})
+        effusion_csv = manifest[["StudyInstanceUID", "effusion_label"]].rename(
+            columns={"effusion_label": "Effusion"}
+        )
+
+        tmp_csv = manifest_csv.parent / "_effusion_train_dataset_tmp.csv"
+        effusion_csv.to_csv(tmp_csv, index=False)
+        try:
+            self._rsna_dataset = RSNAKneeDataset(
+                tmp_csv, self.series_root, series_csv_path=Path(series_csv_path), require_targets=False,
+            )
+        finally:
+            tmp_csv.unlink(missing_ok=True)
+
+    @staticmethod
+    def _import_pick_series_dir():
+        """Reuses `scripts/build_real_demo_cases.py`'s `_pick_series_dir`
+        rather than reimplementing it. Imported here (at instance
+        construction, not at module scope) because that script pulls in
+        cv2/torch/`PipelineRunner`/Grad-CAM at import time -- costs nothing
+        until an `RSNAEffusionTrainDataset` is actually constructed, never
+        on a plain `import qknee.data.dataset` (used by lightweight callers
+        like `extras/api/server.py` that must never pay that cost).
+        `scripts/` has no `__init__.py` (dev-tooling only, not an installed
+        package), so the repo root is added to `sys.path` here if it isn't
+        already."""
+        import sys
+
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
+        from scripts.build_real_demo_cases import _pick_series_dir
+
+        return _pick_series_dir
+
+    @staticmethod
+    def _normalize_uint8(slice_2d: np.ndarray) -> np.ndarray:
+        """Identical to `extras.api.server.QKneeBackend._normalize_uint8`/
+        `scripts/build_real_demo_cases.py`'s own copy -- duplicated here for
+        the same reason those two duplicate each other rather than cross-
+        import: a tiny, pure normalization helper isn't worth adding an
+        import edge for."""
+        slice_2d = slice_2d.astype(np.float32)
+        min_val, max_val = float(slice_2d.min()), float(slice_2d.max())
+        if max_val > min_val:
+            slice_2d = (slice_2d - min_val) / (max_val - min_val)
+        else:
+            slice_2d = np.zeros_like(slice_2d)
+        return (slice_2d * 255).astype(np.uint8)
+
+    def __len__(self) -> int:
+        return len(self._rsna_dataset)
+
+    def __getitem__(self, index: int) -> Optional[Tuple[torch.Tensor, float]]:
+        record = self._rsna_dataset[index]
+        effusion_label = record.targets["Effusion"] if record.targets is not None else None
+        if effusion_label is None:
+            return None
+
+        study_dir = self.series_root / record.study_instance_uid
+        if not study_dir.is_dir():
+            return None
+        series_dir = self._pick_series_dir(study_dir)
+        if series_dir is None:
+            return None
+
+        try:
+            volume = self._ingestion.load_dicom_series(series_dir)
+            primary_slice_index = volume.shape[0] // 2 if volume.ndim == 3 else 0
+            central_slice_raw = volume[primary_slice_index] if volume.ndim == 3 else volume
+            display_slice = self._normalize_uint8(central_slice_raw)
+            batch = self._ingestion.preprocess(display_slice)  # (1, 1, 3, 224, 224)
+        except Exception as exc:  # noqa: BLE001 - one bad study must not abort the whole epoch
+            logger.warning(
+                "RSNAEffusionTrainDataset: study %s series %s failed to decode (%s); skipping.",
+                record.study_instance_uid, series_dir, exc,
+            )
+            return None
+
+        tensor = batch.squeeze(0).squeeze(0)  # (3, 224, 224) -- matches MRIDataset's per-item shape
+        return tensor, float(effusion_label)
+
+
 # --------------------------------------------------------------------------- #
 # Multi-plane series fusion
 #

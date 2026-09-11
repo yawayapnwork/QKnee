@@ -52,6 +52,13 @@ quantum:
   device: "default.qubit"
   diff_method: "backprop"
   multi_target_head: "multi_observable"  # "multi_observable" | "ensemble" — see qknee.models.vqc_multitarget
+  features_per_qubit: 1  # 1 (default, backward-compatible) = angle_encoding's legacy RX+RY-same-value
+                          # per qubit; 2 or 3 = distinct PCA components loaded via RX/RY[/RZ] per qubit
+                          # (see qknee.models.vqc.angle_encoding), letting pca.n_components exceed
+                          # n_qubits without discarding ResNet variance at the PCA step. Changing this
+                          # requires pca.n_components == n_qubits * features_per_qubit (validated below)
+                          # and re-fitting/re-training the PCA reducer and VQC — not compatible with
+                          # existing checkpoints fit under features_per_qubit=1.
 
 training:
   learning_rate: 0.01

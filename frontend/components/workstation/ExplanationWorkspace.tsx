@@ -19,6 +19,7 @@ import { PipelineStepBadge } from "@/components/ui/PipelineStepBadge";
 import { ProvenanceBadge } from "@/components/workstation/ProvenanceBadge";
 import { QuantumTelemetry } from "@/components/workstation/QuantumTelemetry";
 import { PLANE_LABELS, sliceImageSrc, toImageSrc } from "@/lib/viewer";
+import { severityBounds } from "@/lib/severity";
 import { cn, formatLatency, formatPercent } from "@/lib/utils";
 import { GRADCAM_DISCLAIMER, LIMITATIONS } from "@/lib/explanation-copy";
 import type { DiagnosticResult } from "@/lib/types";
@@ -102,6 +103,7 @@ export function ExplanationWorkspace({
   const gradcamSliceIndex = volume.gradcamSliceIndex ?? 0;
   const baseAtGradcamSlice = hasOverlay && gradcamPlane ? sliceImageSrc(volume, gradcamPlane, gradcamSliceIndex) : null;
   const numSlicesAtPlane = gradcamPlane ? volume.planes[gradcamPlane].numSlices : 0;
+  const [severityLower, severityUpper] = severityBounds(result.severity, result.severityThresholds);
 
   function jumpTo(id: string) {
     sectionRefs.current[id]?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -174,7 +176,12 @@ export function ExplanationWorkspace({
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={baseAtGradcamSlice} alt="" aria-hidden="true" className="absolute inset-0 h-full w-full object-contain" />
                   )}
-                  {overlayOn && volume.gradcamOverlay && (
+                  {/* A degenerate (all-zero) heatmap composites to nothing visible
+                      regardless of opacity -- rendering it here would look
+                      identical to a real "no attention" overlay, which isn't what
+                      this is (see gradcamDegenerate branch below instead of this
+                      <img>). */}
+                  {!volume.gradcamDegenerate && overlayOn && volume.gradcamOverlay && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={toImageSrc(volume.gradcamOverlay)}
@@ -191,67 +198,97 @@ export function ExplanationWorkspace({
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-4">
-                  <div>
-                    <div className="mb-1.5 flex items-center justify-between gap-2">
-                      <span className="flex items-center gap-1.5 text-xs text-ink-muted">
-                        <Layers className="h-3.5 w-3.5" aria-hidden="true" />
-                        Grad-CAM overlay
-                      </span>
-                      <Switch checked={overlayOn} onChange={() => setOverlayOn((v) => !v)} label="Toggle Grad-CAM overlay" />
+                {volume.gradcamDegenerate ? (
+                  <div className="flex flex-col gap-4">
+                    <div className="rounded-md border border-severity-indeterminate bg-surface-0 px-3 py-2.5">
+                      <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-primary">
+                        <AlertTriangle
+                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-severity-indeterminate"
+                          aria-hidden="true"
+                        />
+                        <span>
+                          <strong>No salient region detected for this case.</strong> The model&apos;s Grad-CAM
+                          computation produced an entirely empty attention map for this input — a real, reproducible
+                          result (not a rendering error or missing data), but one with no spatial region to
+                          highlight. This is expected for some inputs with the current model and does not by itself
+                          indicate a normal or abnormal finding.
+                        </span>
+                      </p>
                     </div>
-                    <label htmlFor="workspace-opacity" className="mb-1 flex items-center justify-between text-2xs text-ink-faint">
-                      <span>Overlay opacity</span>
-                      <span className="font-mono text-ink-primary">{opacity}%</span>
-                    </label>
-                    <input
-                      id="workspace-opacity"
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={opacity}
-                      disabled={!overlayOn}
-                      onChange={(e) => setOpacity(Number(e.target.value))}
-                      aria-valuetext={`${opacity} percent`}
-                      className="w-full accent-accent disabled:opacity-40"
-                    />
+                    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
+                      <dt className="text-ink-faint">Target</dt>
+                      <dd className="text-right text-ink-primary">{result.diagnosis}</dd>
+                      <dt className="text-ink-faint">Explained slice</dt>
+                      <dd className="text-right font-mono text-ink-primary">
+                        {numSlicesAtPlane > 0 ? gradcamSliceIndex + 1 : 0} / {numSlicesAtPlane}
+                      </dd>
+                      <dt className="text-ink-faint">Plane</dt>
+                      <dd className="text-right text-ink-primary">{PLANE_LABELS[gradcamPlane]}</dd>
+                    </dl>
                   </div>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-xs text-ink-muted">
+                          <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+                          Grad-CAM overlay
+                        </span>
+                        <Switch checked={overlayOn} onChange={() => setOverlayOn((v) => !v)} label="Toggle Grad-CAM overlay" />
+                      </div>
+                      <label htmlFor="workspace-opacity" className="mb-1 flex items-center justify-between text-2xs text-ink-faint">
+                        <span>Overlay opacity</span>
+                        <span className="font-mono text-ink-primary">{opacity}%</span>
+                      </label>
+                      <input
+                        id="workspace-opacity"
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={opacity}
+                        disabled={!overlayOn}
+                        onChange={(e) => setOpacity(Number(e.target.value))}
+                        aria-valuetext={`${opacity} percent`}
+                        className="w-full accent-accent disabled:opacity-40"
+                      />
+                    </div>
 
-                  <div>
-                    <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Legend</p>
-                    {/* No color gradient bar here on purpose: the overlay's
-                        actual colormap is chosen server-side, and this
-                        frontend has no metadata describing it. A drawn
-                        blue-yellow-red bar would assert a specific,
-                        calibrated color scale this app cannot verify
-                        matches the pixels above it -- exactly the kind of
-                        "looks real, isn't backed by anything" claim a
-                        hostile review is built to catch. */}
-                    <p className="text-2xs leading-relaxed text-ink-muted">
-                      Grad-CAM intensity indicates relative model attention within this visualization, not a
-                      calibrated intensity scale — this frontend does not read back the overlay&apos;s colormap from
-                      the backend.
-                    </p>
+                    <div>
+                      <p className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Legend</p>
+                      {/* No color gradient bar here on purpose: the overlay's
+                          actual colormap is chosen server-side, and this
+                          frontend has no metadata describing it. A drawn
+                          blue-yellow-red bar would assert a specific,
+                          calibrated color scale this app cannot verify
+                          matches the pixels above it -- exactly the kind of
+                          "looks real, isn't backed by anything" claim a
+                          hostile review is built to catch. */}
+                      <p className="text-2xs leading-relaxed text-ink-muted">
+                        Grad-CAM intensity indicates relative model attention within this visualization, not a
+                        calibrated intensity scale — this frontend does not read back the overlay&apos;s colormap from
+                        the backend.
+                      </p>
+                    </div>
+
+                    <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
+                      <dt className="text-ink-faint">Target</dt>
+                      <dd className="text-right text-ink-primary">{result.diagnosis}</dd>
+                      <dt className="text-ink-faint">Explained slice</dt>
+                      <dd className="text-right font-mono text-ink-primary">
+                        {numSlicesAtPlane > 0 ? gradcamSliceIndex + 1 : 0} / {numSlicesAtPlane}
+                      </dd>
+                      <dt className="text-ink-faint">Plane</dt>
+                      <dd className="text-right text-ink-primary">{PLANE_LABELS[gradcamPlane]}</dd>
+                    </dl>
+
+                    <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5">
+                      <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-muted">
+                        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
+                        <span>{GRADCAM_DISCLAIMER}</span>
+                      </p>
+                    </div>
                   </div>
-
-                  <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
-                    <dt className="text-ink-faint">Target</dt>
-                    <dd className="text-right text-ink-primary">{result.diagnosis}</dd>
-                    <dt className="text-ink-faint">Explained slice</dt>
-                    <dd className="text-right font-mono text-ink-primary">
-                      {numSlicesAtPlane > 0 ? gradcamSliceIndex + 1 : 0} / {numSlicesAtPlane}
-                    </dd>
-                    <dt className="text-ink-faint">Plane</dt>
-                    <dd className="text-right text-ink-primary">{PLANE_LABELS[gradcamPlane]}</dd>
-                  </dl>
-
-                  <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5">
-                    <p className="flex items-start gap-1.5 text-2xs leading-relaxed text-ink-muted">
-                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" aria-hidden="true" />
-                      <span>{GRADCAM_DISCLAIMER}</span>
-                    </p>
-                  </div>
-                </div>
+                )}
               </div>
             ) : (
               <p className="text-xs text-ink-muted">No Grad-CAM overlay was computed for this result.</p>
@@ -266,6 +303,11 @@ export function ExplanationWorkspace({
               <Stat label="Inference latency" value={formatLatency(result.latencyMs)} />
               <Stat label="Model status" value={result.provenance.modelSourceLabel ?? "—"} />
             </div>
+            <p className="mt-2 text-2xs text-ink-muted">
+              This case&apos;s risk score of {formatPercent(result.riskScore, 0)} falls in the {result.severity} band
+              {" "}
+              ({formatPercent(severityLower, 0)}–{formatPercent(severityUpper, 0)}).
+            </p>
             <div className="mt-4">
               <ProvenanceBadge provenance={result.provenance} />
             </div>

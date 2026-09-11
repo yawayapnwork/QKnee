@@ -39,10 +39,15 @@ type ApiHealth = "checking" | "online" | "offline";
  * There is no second, "preset" conversion path: both sources return the
  * exact same wire shape, so both go through the exact same conversion. */
 function toDiagnosticResult(prediction: PredictionResponse): DiagnosticResult {
+  const severityThresholds = {
+    normalMax: prediction.severity_band_normal_max,
+    urgentMin: prediction.severity_band_urgent_min,
+  };
   return {
     riskScore: prediction.risk_score,
     diagnosis: prediction.diagnosis,
-    severity: severityFromRisk(prediction.risk_score),
+    severity: severityFromRisk(prediction.risk_score, severityThresholds),
+    severityThresholds,
     backend: prediction.backend,
     latencyMs: prediction.latency_ms,
     quantumTelemetry: quantumTelemetryFromPrediction(prediction),

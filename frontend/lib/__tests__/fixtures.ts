@@ -32,6 +32,9 @@ export function livePrediction(overrides: Partial<PredictionResponse> = {}): Pre
     model_source_label: "TRAINED MODEL",
     quantum_execution: "quantum_simulator",
     quantum_execution_label: "QUANTUM SIMULATOR",
+    gradcam_degenerate: false,
+    severity_band_normal_max: 0.4,
+    severity_band_urgent_min: 0.75,
     ...overrides,
   };
 }

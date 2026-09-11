@@ -112,11 +112,15 @@ class QKneeModel(nn.Module):
             quantum_dim_reduction.py). Required — the PCA stage cannot be
             trained jointly (it must be fit on a representative corpus of
             512-D ResNet features beforehand).
-        n_qubits: Number of qubits in the VQC (must equal `pca_reducer.n_components`).
+        n_qubits: Number of qubits in the VQC (must equal `pca_reducer.n_components
+            / features_per_qubit`).
         n_layers: Variational circuit depth.
         freeze_resnet: Whether to freeze the ResNet18 backbone (default True;
             this is the standard "frozen feature extractor" setup used
             throughout this project).
+        features_per_qubit: How many distinct PCA components `VQCClassifier`'s
+            angle encoding loads per qubit (see `VQCClassifier`/`angle_encoding`).
+            Defaults to `config.quantum.features_per_qubit` (1 = legacy).
     """
 
     def __init__(
@@ -126,13 +130,16 @@ class QKneeModel(nn.Module):
         n_layers: int = _config.quantum.n_layers,
         freeze_resnet: bool = _config.resnet.freeze_backbone,
         vqc: Optional[nn.Module] = None,
+        features_per_qubit: int = _config.quantum.features_per_qubit,
     ):
         super().__init__()
 
-        if pca_reducer.n_components != n_qubits:
+        expected_pca_dim = n_qubits * features_per_qubit
+        if pca_reducer.n_components != expected_pca_dim:
             raise ValueError(
                 f"pca_reducer produces {pca_reducer.n_components}-D output but "
-                f"n_qubits={n_qubits}; these must match."
+                f"n_qubits={n_qubits} * features_per_qubit={features_per_qubit} "
+                f"= {expected_pca_dim}; these must match."
             )
 
         self.resnet = ResNet18FeatureExtractor(freeze_backbone=freeze_resnet)
@@ -140,9 +147,11 @@ class QKneeModel(nn.Module):
         # `vqc` lets a caller swap in a different ansatz (e.g.
         # `VQCClassifier(ansatz="data_reuploading")` — see
         # `scripts/train.py --ansatz`) as long as it exposes the same
-        # `(B, n_qubits) -> (B, 1)` sigmoid-probability interface
-        # `VQCClassifier` does; defaults to the standard `VQCClassifier`.
-        self.vqc = vqc if vqc is not None else VQCClassifier(n_qubits=n_qubits, n_layers=n_layers)
+        # `(B, n_qubits * features_per_qubit) -> (B, 1)` sigmoid-probability
+        # interface `VQCClassifier` does; defaults to the standard `VQCClassifier`.
+        self.vqc = vqc if vqc is not None else VQCClassifier(
+            n_qubits=n_qubits, n_layers=n_layers, features_per_qubit=features_per_qubit,
+        )
 
         # PCA layer is a fixed, deterministic re-expression of a fitted
         # sklearn pipeline — never trainable, regardless of freeze_resnet.

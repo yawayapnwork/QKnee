@@ -60,6 +60,13 @@ export interface PredictionResponse {
    * `gradcam_overlay` was computed for — Grad-CAM exists for one representative
    * slice only, never every slice. `null` iff `gradcam_overlay` is `null`. */
   gradcam_slice_index: number | null;
+  /** True when the raw Grad-CAM heatmap behind `gradcam_overlay` is entirely zero —
+   * `ReLU(sum_k(alpha_k * A_k))` can legitimately zero out every pixel for a given
+   * input (mathematically valid, not a computation failure), producing a blank-
+   * looking overlay that could otherwise be mistaken for a normal "no highlighted
+   * region" result. `false` means a real, non-empty heatmap was produced. `null`
+   * when no real Grad-CAM ran at all (mock mode). */
+  gradcam_degenerate: boolean | null;
   /** Real per-plane volume metadata, keyed by plane — see `RawPlaneInfo`. Wire format
    * (snake_case field names), straight off the API — see `PlaneInfo`/`toVolumeView` in
    * `lib/viewer.ts` for the camelCase app-level shape derived from this. */
@@ -90,6 +97,16 @@ export interface PredictionResponse {
   quantum_execution: QuantumExecution;
   /** Exact display string for `quantum_execution` — render verbatim. */
   quantum_execution_label: string;
+  /** Upper bound (exclusive) of the "Normal" severity band on `risk_score` — the
+   * authoritative source for `lib/severity.ts`'s band boundaries. See
+   * `severity_band_urgent_min` for the full band definition. */
+  severity_band_normal_max: number;
+  /** Lower bound (inclusive) of the "Urgent Surgical Consult" severity band on
+   * `risk_score`. `risk_score < severity_band_normal_max` is "Normal",
+   * `severity_band_normal_max <= risk_score < severity_band_urgent_min` is
+   * "Indeterminate", `risk_score >= severity_band_urgent_min` is "Urgent Surgical
+   * Consult". */
+  severity_band_urgent_min: number;
 }
 
 export type Provenance = "live" | "precomputed_demo" | "mock_fallback" | "cached" | "proxy";
@@ -165,6 +182,9 @@ export interface VolumeView {
   gradcamOverlay: string | null;
   gradcamPlane: AnatomicalPlane | null;
   gradcamSliceIndex: number | null;
+  /** See `PredictionResponse.gradcam_degenerate` — true iff the raw heatmap behind
+   * `gradcamOverlay` is entirely zero (a real, empty result, not a rendering bug). */
+  gradcamDegenerate: boolean | null;
 }
 
 export interface HealthResponse {
@@ -246,6 +266,10 @@ export interface DiagnosticResult {
   riskScore: number;
   diagnosis: string;
   severity: SeverityTag;
+  /** The exact `risk_score` band boundaries the backend computed `severity` from
+   * (see `PredictionResponse.severity_band_normal_max`/`severity_band_urgent_min`) —
+   * never a value re-derived or guessed on the frontend. */
+  severityThresholds: { normalMax: number; urgentMin: number };
   /** Raw backend tag (e.g. "live", "mock", "cache-fallback/case_003") —
    * diagnostic/debug value only. Never branch UI behavior on this; use
    * `provenance` instead. */

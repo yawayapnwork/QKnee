@@ -137,6 +137,7 @@ class QuantumConfig:
     device: str
     diff_method: str
     multi_target_head: MultiTargetHeadType  # "multi_observable" | "ensemble" — see qknee.models.vqc_multitarget
+    features_per_qubit: int = 1  # >1 loads that many distinct PCA components per qubit in angle_encoding
 
 
 @dataclass(frozen=True)
@@ -363,10 +364,11 @@ def _build_config(raw: Dict[str, Any]) -> QKneeConfig:
     except (KeyError, TypeError) as exc:
         raise ConfigError(f"Malformed config.yaml section: {exc}") from exc
 
-    if pca.n_components != quantum.n_qubits:
+    if pca.n_components != quantum.n_qubits * quantum.features_per_qubit:
         raise ConfigError(
             f"pca.n_components ({pca.n_components}) must equal "
-            f"quantum.n_qubits ({quantum.n_qubits})"
+            f"quantum.n_qubits ({quantum.n_qubits}) * quantum.features_per_qubit "
+            f"({quantum.features_per_qubit}) = {quantum.n_qubits * quantum.features_per_qubit}"
         )
     if resnet.backend_engine not in ("pytorch", "onnx"):
         raise ConfigError(

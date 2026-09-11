@@ -306,10 +306,13 @@ class PipelineRunner:
                     f"Failed to load PCA artifact from {pca_artifact_path}: {exc}"
                 ) from exc
 
-            if self.reducer.n_components != self.config.quantum.n_qubits:
+            expected_pca_dim = self.config.quantum.n_qubits * self.config.quantum.features_per_qubit
+            if self.reducer.n_components != expected_pca_dim:
                 raise PipelineValidationError(
                     f"PCA artifact produces {self.reducer.n_components}-D output but "
-                    f"config.quantum.n_qubits={self.config.quantum.n_qubits}; these must match."
+                    f"config.quantum.n_qubits={self.config.quantum.n_qubits} * "
+                    f"features_per_qubit={self.config.quantum.features_per_qubit} "
+                    f"= {expected_pca_dim}; these must match."
                 )
 
             # Differentiable re-expression of the fitted (sklearn) reducer, used
@@ -353,6 +356,7 @@ class PipelineRunner:
             n_qubits=self.config.quantum.n_qubits,
             n_layers=self.config.quantum.n_layers,
             ansatz=classifier_ansatz,
+            features_per_qubit=self.config.quantum.features_per_qubit if classifier_ansatz == "angle" else 1,
         )
         checkpoint_path = Path(vqc_checkpoint_path or self.config.paths.model_checkpoint)
         if not checkpoint_path.exists() and vqc_checkpoint_path is None:

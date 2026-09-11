@@ -43,6 +43,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 
 # Allow `python scripts/train.py` to resolve the `qknee` package without
 # requiring the caller to set PYTHONPATH or invoke via `python -m`.
@@ -52,7 +53,7 @@ from sklearn.metrics import roc_auc_score
 
 from qknee.config.loader import QKneeConfig, load_config, load_config_with_overrides
 from qknee.config.logging_config import get_logger, setup_logging
-from qknee.data.dataset import build_dataloaders
+from qknee.data.dataset import RSNAEffusionTrainDataset, build_dataloaders, collate_skip_invalid
 from qknee.models.pca_reducer import QuantumDimReducer
 from qknee.models.qknee_model import QKneeModel, load_checkpoint, save_checkpoint
 from qknee.models.resnet_extractor import ResNet18FeatureExtractor
@@ -102,7 +103,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "configured epoch count, unlike --dry_run.")
     parser.add_argument("--dry_run", action="store_true",
                          help="Pipeline-integrity smoke test: 1 batch, 1 epoch, synthetic tensors. "
-                              "Overrides --epochs/--use_mock; does not require --dataset_dir.")
+                              "Overrides --epochs/--use_mock; does not require --dataset_dir. "
+                              "Mutually exclusive with --use_rsna_effusion.")
+    parser.add_argument("--use_rsna_effusion", action="store_true",
+                         help="Train on this project's real Effusion-labeled RSNA Knee pool "
+                              "(qknee.data.dataset.RSNAEffusionTrainDataset -- the 58 ground-truth studies "
+                              "plus every confidently weak-labeled study; see that class's docstring) instead of "
+                              "MRIDataset/--dataset_dir or synthetic --use_mock/--dry_run data. Runs the full "
+                              "configured epoch count with a real train/eval holdout split, same as the "
+                              "--dataset_dir path with no val/ directory. Mutually exclusive with --use_mock/"
+                              "--dry_run -- passing both is a configuration error, not a silent override, so "
+                              "nobody accidentally reproduces a synthetic-data smoke-test checkpoint again.")
 
     # --- Supporting flags (existing behavior, kept) ---
     parser.add_argument("--pca-artifact", type=str, default=None,
@@ -596,6 +607,14 @@ def main() -> None:
     setup_logging()
     args = build_arg_parser().parse_args()
 
+    if args.use_rsna_effusion and (args.use_mock or args.dry_run):
+        raise TrainingError(
+            "--use_rsna_effusion is mutually exclusive with --use_mock/--dry_run -- pass exactly one data "
+            "source. This is a hard error rather than a silent override so nobody accidentally reproduces the "
+            "synthetic-data, single-epoch --dry_run smoke-test checkpoint (worse than random on real data) "
+            "while believing --use_rsna_effusion's real pool was actually used."
+        )
+
     if args.dry_run:
         args.use_mock = True
         args.epochs = 1
@@ -609,7 +628,9 @@ def main() -> None:
     logger.info(
         "=== Q-Knee training run (device=%s, seed=%d, ansatz=%s, mode=%s) ===",
         device, args.seed, args.ansatz,
-        "dry_run" if args.dry_run else ("use_mock" if args.use_mock else "dataset"),
+        "dry_run" if args.dry_run else (
+            "use_mock" if args.use_mock else ("rsna_effusion" if args.use_rsna_effusion else "dataset")
+        ),
     )
 
     # ------------------------------------------------------------------ #
@@ -633,6 +654,27 @@ def main() -> None:
                 all_images, all_labels, config.training.val_holdout_fraction, args.seed,
             )
         pca_fit_images = train_images
+    elif args.use_rsna_effusion:
+        logger.info("Training on the real RSNA Knee Effusion pool (qknee.data.dataset.RSNAEffusionTrainDataset).")
+        rsna_dataset = RSNAEffusionTrainDataset()
+        rsna_loader = DataLoader(
+            rsna_dataset, batch_size=config.data.batch_size, num_workers=config.data.num_workers,
+            shuffle=False, collate_fn=collate_skip_invalid,
+        )
+        all_images, all_labels = collect_image_tensor(rsna_loader, max_samples=config.training.max_train_samples)
+        logger.info("Collected %d real Effusion-labeled images.", all_images.shape[0])
+
+        # RSNAEffusionTrainDataset has no val/ directory concept (it's a flat
+        # CSV-driven pool, not an ImageFolder tree) -- always holdout-split,
+        # exactly like the --dataset_dir path does when no val/ exists.
+        logger.warning("No val/ split concept for --use_rsna_effusion -- holding out %.0f%% for evaluation.",
+                        config.training.val_holdout_fraction * 100)
+        train_images, train_labels, eval_images, eval_labels = split_train_holdout(
+            all_images, all_labels, config.training.val_holdout_fraction, args.seed,
+        )
+        logger.info("Post-holdout: %d train images, %d eval images.", train_images.shape[0], eval_images.shape[0])
+
+        pca_fit_images = train_images[: config.training.pca_fit_max_samples] if config.training.pca_fit_max_samples else train_images
     else:
         dataset_dir = resolve_dataset_dir(Path(config.paths.data_root), args.plane)
         if not dataset_dir.exists():

@@ -32,6 +32,7 @@ export function volumeViewFromPrediction(prediction: PredictionResponse): Volume
     gradcamOverlay: prediction.gradcam_overlay,
     gradcamPlane: prediction.gradcam_plane,
     gradcamSliceIndex: prediction.gradcam_slice_index,
+    gradcamDegenerate: prediction.gradcam_degenerate,
   };
 }
 

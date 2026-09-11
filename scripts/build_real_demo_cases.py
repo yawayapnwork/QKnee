@@ -129,6 +129,11 @@ def build_one_case(study_uid: str, series_dir: Path, runner: PipelineRunner, ing
 
     overlay_rgba = colorize_heatmap_rgba(result.gradcam_heatmap, base_image_uint8.shape[:2])
     legacy_overlay = overlay_heatmap(result.gradcam_heatmap, display_slice)
+    # Grad-CAM's ReLU(sum_k(alpha_k * A_k)) can legitimately zero out every
+    # pixel for a given input -- see extras/api/server.py's
+    # PredictionResponse.gradcam_degenerate docstring for why this is
+    # surfaced explicitly rather than shipped as a blank-looking overlay.
+    gradcam_degenerate = bool(np.all(result.gradcam_heatmap == 0))
 
     risk_score = float(result.risk_score)
     diagnosis = "Tear Detected" if risk_score >= TEAR_RISK_THRESHOLD else "Normal"
@@ -154,6 +159,7 @@ def build_one_case(study_uid: str, series_dir: Path, runner: PipelineRunner, ing
         "gradcam_overlay": _encode_png_base64(_resize_max_dim(overlay_rgba)),
         "gradcam_plane": "axial",
         "gradcam_slice_index": primary_slice_index,
+        "gradcam_degenerate": gradcam_degenerate,
         "planes": {
             "axial": {
                 "available": True,

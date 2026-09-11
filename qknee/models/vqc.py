@@ -112,19 +112,55 @@ def load_quantum_device(device_name: str, n_qubits: int) -> "qml.Device":
         return qml.device("default.qubit", wires=n_qubits)
 
 
-def angle_encoding(features: torch.Tensor, wires: List[int]) -> None:
-    """Continuous angle encoding: maps each input scalar (in [0, 2*pi]) onto
-    one qubit via RX followed by RY. Used once, up front, by the "angle"
+MAX_FEATURES_PER_QUBIT = 3  # RX, RY, RZ — the 3 independent single-qubit rotation axes;
+                            # beyond this, extra rotations about an already-used axis
+                            # collapse into the earlier one (RX(a) . RX(b) == RX(a+b))
+                            # without an interleaving entangling gate, so they'd add no
+                            # information despite consuming an extra classical feature.
+_ENCODING_GATES = (qml.RX, qml.RY, qml.RZ)
+
+
+def angle_encoding(features: torch.Tensor, wires: List[int], features_per_qubit: int = 1) -> None:
+    """Continuous angle encoding: loads `features_per_qubit` classical scalars
+    (each in [0, 2*pi]) onto each qubit via `features_per_qubit` rotation
+    gates, then moves to the next qubit. Used once, up front, by the "angle"
     ansatz — see `reuploading_encoding` for the per-layer alternative the
     "data_reuploading" ansatz uses instead.
 
+    `features_per_qubit=1` (the default) is the original, checkpoint-
+    compatible behavior: one scalar per qubit, loaded via RX *and* RY with
+    the SAME value (a cheap way to fill more of the Bloch sphere than a
+    single rotation would from one input number). `features_per_qubit=2` or
+    `3` instead loads that many *distinct* scalars per qubit — one via RX,
+    the next via RY, the next (if 3) via RZ — so a fixed `n_qubits` circuit
+    can consume more of a PCA-reduced feature vector's variance without
+    discarding it at the dimensionality-reduction step (see
+    `qknee.models.pca_reducer.QuantumDimReducer` and
+    `config.quantum.features_per_qubit`).
+
     Args:
-        features: 1D tensor of length len(wires), values in [0, 2*pi].
-        wires: Qubit indices to encode onto, one feature per wire.
+        features: 1D tensor. Length `len(wires)` when `features_per_qubit=1`
+            (legacy); length `len(wires) * features_per_qubit` otherwise,
+            laid out as `[qubit0_feat0, qubit0_feat1, ..., qubit1_feat0, ...]`.
+            Values in [0, 2*pi].
+        wires: Qubit indices to encode onto.
+        features_per_qubit: How many distinct classical features (and
+            rotation gates) to load per qubit. Must be in `[1, MAX_FEATURES_PER_QUBIT]`.
     """
+    if features_per_qubit == 1:
+        for i, wire in enumerate(wires):
+            qml.RX(features[..., i], wires=wire)
+            qml.RY(features[..., i], wires=wire)
+        return
+
+    if not (1 <= features_per_qubit <= MAX_FEATURES_PER_QUBIT):
+        raise ValueError(
+            f"features_per_qubit must be in [1, {MAX_FEATURES_PER_QUBIT}], got {features_per_qubit}"
+        )
     for i, wire in enumerate(wires):
-        qml.RX(features[..., i], wires=wire)
-        qml.RY(features[..., i], wires=wire)
+        base = i * features_per_qubit
+        for g in range(features_per_qubit):
+            _ENCODING_GATES[g](features[..., base + g], wires=wire)
 
 
 def reuploading_encoding(features: torch.Tensor, enc_weights: torch.Tensor, wires: List[int]) -> None:
@@ -207,7 +243,12 @@ def _init_var_weights(tensor: torch.Tensor) -> torch.Tensor:
     return nn.init.uniform_(tensor, a=0.0, b=2 * torch.pi)
 
 
-def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers, ansatz: Ansatz = "angle"):
+def build_qnode(
+    n_qubits: int = N_QUBITS,
+    n_layers: int = _config.quantum.n_layers,
+    ansatz: Ansatz = "angle",
+    features_per_qubit: int = 1,
+):
     """Constructs the PennyLane QNode for `ansatz`:
 
         "angle":             encode once -> `n_layers` variational blocks
@@ -231,7 +272,7 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_laye
     if ansatz == "angle":
         @qml.qnode(dev, interface="torch", diff_method=_config.quantum.diff_method)
         def circuit(inputs: torch.Tensor, weights: torch.Tensor):
-            angle_encoding(inputs, wires)
+            angle_encoding(inputs, wires, features_per_qubit=features_per_qubit)
             for layer in range(n_layers):
                 variational_block(weights[layer], wires)
             return [qml.expval(qml.PauliZ(w)) for w in wires]
@@ -252,7 +293,10 @@ def build_qnode(n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_laye
 
 
 def build_inference_qnode(
-    n_qubits: int = N_QUBITS, n_layers: int = _config.quantum.n_layers, ansatz: Ansatz = "angle",
+    n_qubits: int = N_QUBITS,
+    n_layers: int = _config.quantum.n_layers,
+    ansatz: Ansatz = "angle",
+    features_per_qubit: int = 1,
 ):
     """Constructs a second, inference-only QNode for the same circuit —
     same gate sequence as `build_qnode` for the given `ansatz`, but on
@@ -278,7 +322,7 @@ def build_inference_qnode(
     if ansatz == "angle":
         @qml.qnode(dev, interface=None, diff_method=None)
         def circuit(inputs, weights):
-            angle_encoding(inputs, wires)
+            angle_encoding(inputs, wires, features_per_qubit=features_per_qubit)
             for layer in range(n_layers):
                 variational_block(weights[layer], wires)
             return [qml.expval(qml.PauliZ(w)) for w in wires]
@@ -311,9 +355,16 @@ class VQCClassifier(nn.Module):
             Changing this from the default changes which/how many
             parameters `self.quantum_layer` registers, so a checkpoint
             trained under one ansatz cannot be loaded under the other.
+        features_per_qubit: How many distinct classical features
+            `angle_encoding` loads per qubit (1-3; see `angle_encoding`'s
+            docstring). Only supported with `ansatz="angle"` — raises if
+            combined with `"data_reuploading"`, which has its own per-layer
+            re-encoding scheme. Input width becomes `n_qubits *
+            features_per_qubit` instead of `n_qubits`. Defaults to 1
+            (checkpoint-compatible legacy behavior).
 
     Forward:
-        x: (B, n_qubits) tensor, values in [0, 2*pi].
+        x: (B, n_qubits * features_per_qubit) tensor, values in [0, 2*pi].
         returns: (B, 1) tensor, values in [0, 1] — probability-like risk score.
     """
 
@@ -322,13 +373,21 @@ class VQCClassifier(nn.Module):
         n_qubits: int = N_QUBITS,
         n_layers: int = _config.quantum.n_layers,
         ansatz: Ansatz = "angle",
+        features_per_qubit: int = 1,
     ):
         super().__init__()
+        if features_per_qubit != 1 and ansatz != "angle":
+            raise ValueError(
+                f"features_per_qubit={features_per_qubit} is only supported with ansatz='angle' "
+                f"(got ansatz={ansatz!r}); 'data_reuploading' has its own per-layer re-encoding scheme."
+            )
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.ansatz: Ansatz = ansatz
+        self.features_per_qubit = features_per_qubit
+        self.input_dim = n_qubits * features_per_qubit
 
-        circuit = build_qnode(n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz)
+        circuit = build_qnode(n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz, features_per_qubit=features_per_qubit)
         shapes = weight_shapes_for(ansatz, n_qubits, n_layers)
 
         # qml.qnn.TorchLayer turns the QNode's weight argument(s) into
@@ -359,14 +418,16 @@ class VQCClassifier(nn.Module):
         # mismatch) — `predict_fast` catches that per-call and falls back
         # to the standard `forward()` path, so this is pure speedup, never
         # a correctness risk.
-        self._inference_circuit = build_inference_qnode(n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz)
+        self._inference_circuit = build_inference_qnode(
+            n_qubits=n_qubits, n_layers=n_layers, ansatz=ansatz, features_per_qubit=features_per_qubit,
+        )
         self._inference_cache: "OrderedDict[Tuple[float, ...], Tuple[float, Tuple[float, ...]]]" = OrderedDict()
         self._inference_cache_lock = threading.Lock()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() != 2 or x.shape[-1] != self.n_qubits:
+        if x.dim() != 2 or x.shape[-1] != self.input_dim:
             raise ValueError(
-                f"Expected input shape (B, {self.n_qubits}), got {tuple(x.shape)}"
+                f"Expected input shape (B, {self.input_dim}), got {tuple(x.shape)}"
             )
 
         expvals = self.quantum_layer(x)  # (B, n_qubits), each in [-1, 1]
@@ -403,8 +464,8 @@ class VQCClassifier(nn.Module):
         off `self.quantum_layer` and passed to `self._inference_circuit`.
         """
         angles = np.asarray(angles, dtype=np.float64).reshape(-1)
-        if angles.shape[0] != self.n_qubits:
-            raise ValueError(f"Expected {self.n_qubits} angles, got {angles.shape[0]}")
+        if angles.shape[0] != self.input_dim:
+            raise ValueError(f"Expected {self.input_dim} angles, got {angles.shape[0]}")
 
         cache_key = tuple(np.round(angles, cache_decimals).tolist())
         with self._inference_cache_lock:

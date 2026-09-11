@@ -66,6 +66,70 @@ the two-opt-in local-dev escape hatch), and
 `extras/tests/test_jwt_security.py` for the regression tests covering
 every branch of that logic.
 
+## Admin bootstrap (first account)
+
+The user store ships with **zero** pre-seeded accounts, and `POST
+/api/v1/auth/register` deliberately downgrades any self-service
+`role="radiologist"` request to `role="researcher"` (read-only, no
+inference access) unless the request also supplies an `invite_code`
+matching `$QKNEE_RADIOLOGIST_INVITE_CODE` (see `extras.api.auth.User`'s
+docstring). That's intentional lockdown against self-service privilege
+escalation — but it also means there is no way to get a working
+inference-capable account at all until *someone* already has one, or the
+invite-code env var is set. `scripts/create_admin_user.py` is the
+one-time, operator-run way to break that chicken-and-egg problem for the
+project owner's own first account, without weakening `/register`'s
+lockdown in any way (it calls a separate, non-HTTP-reachable code path —
+`UserRepository.create_user_unchecked` — that the invite-code check never
+touches).
+
+Run it once, from the same environment `extras/api/server.py` itself would
+use (same `$QKNEE_JWT_SECRET_KEY`/`$DATABASE_URL`):
+
+```bash
+# 1. Generate a one-time secret and export it — this is the proof that
+#    you (someone with shell/env access to this deployment) authorized
+#    the bootstrap, not the public internet.
+export ADMIN_SEED_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+# 2. Create your account. You'll be prompted for a password (hidden input) —
+#    pass --role researcher/clinical_auditor instead of the default
+#    'radiologist' if you don't need inference access.
+python scripts/create_admin_user.py \
+    --email you@example.com \
+    --full-name "Your Name" \
+    --token "$ADMIN_SEED_TOKEN"
+
+# 3. Log in with the account you just created to obtain a bearer token.
+curl -X POST http://localhost:8000/api/v1/auth/login \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "username=you@example.com&password=<the password you entered>"
+
+# 4. Bootstrap is done — unset the token so it isn't sitting in your shell
+#    environment indefinitely.
+unset ADMIN_SEED_TOKEN
+```
+
+Safety properties, enforced by the script itself (not just documented —
+see `scripts/create_admin_user.py`'s own tests/manual verification):
+
+- **Refuses to run** unless `$ADMIN_SEED_TOKEN` is set *and* `--token`
+  matches it exactly — the env var alone, or a plausible-looking
+  `--token` alone, is never enough.
+- **Refuses to run a second time**: if *any* account already exists in
+  the store, it exits immediately with an error rather than creating
+  another one. This is a bootstrap for the very first account only, not
+  a repeatable admin-account factory. For any additional radiologist
+  accounts after this, use the ordinary invite-code-gated `/register`
+  flow (`export QKNEE_RADIOLOGIST_INVITE_CODE=...`, then register with a
+  matching `invite_code`).
+- **Never reachable over HTTP** — it's a CLI script `extras/api/server.py`
+  never imports or calls; nothing about this bootstrap path is exposed to
+  the public internet.
+- The password is read via a hidden prompt by default (`--password` on
+  the command line is supported for scripted/CI use only, and logs a
+  warning, since it would otherwise leak into shell history).
+
 ## Deployment targets
 
 | Target | Entrypoint | Status |
