@@ -11,6 +11,9 @@ export const metadata: Metadata = {
   title: "Q-Knee Research Workstation",
   description:
     "Investigational knee MRI triage: ResNet18 feature extraction, PCA compression, and a 4-qubit variational quantum classifier, with Grad-CAM explanation.",
+  icons: {
+    icon: "/fabicon.png",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

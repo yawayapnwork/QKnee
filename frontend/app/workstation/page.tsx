@@ -224,7 +224,7 @@ export default function WorkstationPage() {
           keeps the more generous columns for viewports that have the
           room to spare. */}
       <div className="no-print grid flex-1 min-h-0 grid-cols-1 md:grid-cols-[minmax(0,1fr)_360px] lg:grid-cols-[220px_minmax(0,1fr)_340px] xl:grid-cols-[260px_minmax(0,1fr)_380px] md:grid-rows-[minmax(0,1fr)]">
-        <aside className="hidden lg:flex lg:flex-col min-h-0 overflow-y-auto lg:border-r lg:border-surface-3" aria-label="Case navigation">
+        <aside className="relative hidden lg:flex lg:flex-col min-h-0 overflow-y-auto lg:border-r lg:border-surface-3" aria-label="Case navigation">
           <CaseNav
             cases={cases}
             activeCaseId={activeCaseId}
