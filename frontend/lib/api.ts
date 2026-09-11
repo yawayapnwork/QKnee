@@ -47,7 +47,29 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse>
   return parseJsonOrThrow<HealthResponse>(res);
 }
 
+// Temporary institutional credential check for demo/hackathon access.
+// Isolated here so it can be cleanly removed once backend DB user accounts are provisioned.
+const INSTITUTIONAL_EMAIL = "vanshsaxenak456@gmail.com";
+const INSTITUTIONAL_PASSWORD = "12345678";
+
 export async function loginClinician(credentials: LoginCredentials): Promise<Token> {
+  const normalizedEmail = (credentials.username || "").trim().toLowerCase();
+  if (normalizedEmail === INSTITUTIONAL_EMAIL && credentials.password === INSTITUTIONAL_PASSWORD) {
+    return {
+      access_token: "institutional-demo-session-token",
+      token_type: "bearer",
+      expires_in_minutes: 1440,
+      user: {
+        id: "institutional-dr-vansh-saxena",
+        email: INSTITUTIONAL_EMAIL,
+        full_name: "Dr. Vansh Saxena",
+        role: "radiologist",
+        created_at: new Date().toISOString(),
+        is_active: true,
+      },
+    };
+  }
+
   const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -57,6 +79,11 @@ export async function loginClinician(credentials: LoginCredentials): Promise<Tok
 }
 
 export async function registerClinician(data: RegisterPayload): Promise<Token> {
+  const normalizedEmail = (data.email || "").trim().toLowerCase();
+  if (normalizedEmail === INSTITUTIONAL_EMAIL && data.password === INSTITUTIONAL_PASSWORD) {
+    return loginClinician({ username: data.email, password: data.password });
+  }
+
   const res = await fetch(`${API_BASE_URL}/api/v1/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

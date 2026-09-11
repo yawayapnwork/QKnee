@@ -70,20 +70,20 @@ export function QuantumTelemetry({
           Quantum Circuit
         </h3>
         {hasData && (
-          <span className="rounded-sm border border-surface-3 bg-surface-0 px-1.5 py-0.5 font-mono text-2xs tabular-nums text-ink-primary">
+          <span className="rounded-sm border border-surface-3 bg-white px-1.5 py-0.5 font-mono text-2xs tabular-nums text-ink-primary shadow-xs">
             {String(qubitCount).padStart(2, "0")} {qubitCount === 1 ? "QUBIT" : "QUBITS"}
           </span>
         )}
       </div>
 
       {!hasData ? (
-        <div className="flex items-center gap-2 rounded-md border border-surface-3 bg-surface-0 px-3 py-4 text-xs text-ink-muted">
+        <div className="flex items-center gap-2 rounded-md border border-surface-3 bg-surface-2/60 px-3 py-4 text-xs text-ink-muted">
           <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           Quantum telemetry unavailable
         </div>
       ) : (
         <>
-          <div className="rounded-md border border-surface-3 bg-surface-0 px-3 py-3">
+          <div className="rounded-md border border-surface-3 bg-surface-2/40 px-3 py-3">
             <div className="mb-2.5 flex items-center justify-between">
               <p className="text-2xs text-ink-faint">Pauli-Z expectation ⟨Z⟩, per qubit</p>
               <AxisLegend />
@@ -106,7 +106,7 @@ export function QuantumTelemetry({
               <span
                 className={cn(
                   "inline-flex items-center gap-1 rounded-sm border px-1.5 py-0.5",
-                  verified ? "border-accent/30 bg-accent/10 text-accent" : "border-surface-4 bg-surface-2 text-ink-muted",
+                  verified ? "border-accent/40 bg-accent-subtle font-medium text-accent-strong" : "border-surface-3 bg-surface-2 text-ink-muted",
                 )}
               >
                 {provenance.quantumExecutionLabel}
@@ -171,7 +171,7 @@ function QubitRow({ index, value }: { index: number; value: number }) {
           ))}
         </div>
 
-        <div className="absolute inset-x-0 bottom-0 h-1.5 rounded-sm bg-surface-0" aria-hidden="true">
+        <div className="absolute inset-x-0 bottom-0 h-1.5 rounded-sm bg-surface-2 border border-surface-3" aria-hidden="true">
           <div className="absolute inset-y-0 left-1/2 w-px bg-surface-4" />
           <div
             className={cn(
@@ -205,7 +205,7 @@ function CircuitArchitecture() {
   return (
     <div className="mt-4 border-t border-surface-3 pt-4">
       <h4 className="mb-3 text-2xs font-semibold uppercase tracking-wide text-ink-faint">Circuit Architecture</h4>
-      <ol className="flex flex-col rounded-md border border-surface-3 bg-surface-0 px-3 py-2.5">
+      <ol className="flex flex-col rounded-md border border-surface-3 bg-surface-2/40 px-3 py-2.5">
         {ARCHITECTURE_STAGES.map((stage, i) => (
           <li key={stage.name} className="flex gap-3">
             <div className="flex flex-col items-center">

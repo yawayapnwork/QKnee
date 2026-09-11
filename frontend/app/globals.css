@@ -12,66 +12,63 @@
 /* "looks advanced."                                                */
 /* ============================================================= */
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  /* --- Surface: layered dark neutrals, zero blur by default --- */
-  --color-surface-0: #0a0d12; /* app background */
-  --color-surface-1: #10141b; /* panel background */
-  --color-surface-2: #161b24; /* raised / hover */
-  --color-surface-3: #1e2530; /* border, divider */
-  --color-surface-4: #2a3341; /* strong border, focused input */
+  /* ============================================================= */
+  /* Q-KNEE PROFESSIONAL LIGHT CLINICAL MEDICAL THEME               */
+  /* Modern clinical SaaS, professional radiology workstation.     */
+  /* Calm, trustworthy, precise, minimal, highly readable.         */
+  /* ============================================================= */
 
-  /* --- Ink: text hierarchy, four steps, never five+ --- */
-  --color-ink-primary: #e8ebef;
-  --color-ink-secondary: #aab2bf;
-  --color-ink-muted: #7c8697;
-  /* #4d5563 measured ~2.6:1 against --color-surface-0 -- well under WCAG
-     AA's 4.5:1 for the small (11px) captions/disclaimers this token is
-     used for everywhere (limitations text, provenance detail lines, axis
-     labels). #737b8c measures ~4.6:1 against the same background -- one
-     token change fixes every consumer at once. */
-  --color-ink-faint: #737b8c;
+  /* --- Surface: clean light medical neutrals --- */
+  --color-surface-0: #F6F8F7; /* page background (very light calm neutral) */
+  --color-surface-1: #FFFFFF; /* main surfaces / cards / panel background */
+  --color-surface-2: #F1F5F4; /* secondary surfaces / raised / table headers / hover */
+  --color-surface-3: #DCE5E2; /* clean 1px borders, dividers, separators */
+  --color-surface-4: #C5D2CE; /* active borders, focused input rings, scrollbar thumb */
 
-  /* --- Accent: ONE interactive hue. Not a gradient pair. --- */
-  --color-accent: #2dd4bf;
-  --color-accent-strong: #14b8a6; /* hover/active */
-  --color-accent-subtle: rgba(45, 212, 191, 0.12); /* backgrounds only */
+  /* --- Ink: text hierarchy, high contrast & medical readability --- */
+  --color-ink-primary: #172321;   /* deep charcoal, primary text & values */
+  --color-ink-secondary: #52635F; /* cool slate, secondary descriptions */
+  --color-ink-muted: #627571;     /* subdued clinical text, WCAG AA >= 4.5:1 */
+  --color-ink-faint: #788783;     /* micro captions, table headers, metadata */
 
-  /* --- Semantic feedback: information / warning / danger --- */
-  --color-info: #38bdf8;
-  --color-success: #22c55e;
-  --color-warning: #eab308;
-  --color-danger: #ef4444;
-  --color-neutral: #64748b;
+  /* --- Accent: Restrained clinical mint/teal --- */
+  --color-accent: #0F9D8A;        /* Primary clinical mint/teal */
+  --color-accent-strong: #087F71; /* Dark teal (hover/active states) */
+  --color-accent-deep: #065F54;   /* Deep teal */
+  --color-accent-subtle: #E8F7F3; /* Soft mint background for active states / badges */
+  --color-accent-highlight: #F1FBF8; /* Very subtle mint tint */
 
-  /* Provenance/severity share the info-success-warning-danger hue
-     family on purpose (FRONTEND_REDESIGN.md: both answer "how much
-     should I trust this") -- aliased, not re-picked, so the two axes
-     can never silently drift apart in color. */
-  --color-status-live: var(--color-success);
+  /* --- Semantic feedback: muted professional status colors --- */
+  --color-info: #0369A1;
+  --color-success: #0F9D8A;
+  --color-warning: #B45309;
+  --color-danger: #DC2626;
+  --color-neutral: #64748B;
+
+  /* Provenance/severity mapped to clinical indicators */
+  --color-status-live: var(--color-accent);
   --color-status-demo: var(--color-warning);
   --color-status-fallback: var(--color-danger);
   --color-status-proxy: var(--color-neutral);
-  --color-severity-normal: var(--color-success);
+  --color-severity-normal: var(--color-accent);
   --color-severity-indeterminate: var(--color-warning);
   --color-severity-urgent: var(--color-danger);
 
-  /* --- Radius: four steps, no "giant rounded card" size --- */
+  /* --- Radius: 3px to 12px, precise clinical geometry --- */
   --radius-xs: 3px;  /* checkboxes, tiny chips */
-  --radius-sm: 5px;  /* inputs, buttons, badges */
+  --radius-sm: 6px;  /* inputs, buttons, badges */
   --radius-md: 8px;  /* panels, cards, tables */
   --radius-lg: 12px; /* modals, drawers */
   --radius-full: 999px; /* dots, pills -- status indicators only */
 
-  /* --- Elevation: restrained, four steps, one deliberate "alert" --- */
+  /* --- Elevation: soft, restrained, barely noticeable shadows --- */
   --elevation-0: none;
-  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.55);
-  --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.6);
-  /* The ONE deliberate glow-like effect in the entire system --
-     reserved exclusively for a MOCK/FALLBACK result, never decoration
-     and never a default/hover button state. */
-  --elevation-alert: 0 0 0 1px rgba(239, 68, 68, 0.45), 0 0 20px rgba(239, 68, 68, 0.2);
+  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --elevation-2: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+  --elevation-3: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.03);
+  --elevation-alert: 0 0 0 1px rgba(220, 38, 38, 0.25), 0 2px 8px rgba(220, 38, 38, 0.12);
 
   /* --- Motion: two durations, nothing else --- */
   --duration-fast: 120ms;
@@ -85,6 +82,7 @@ body {
 
 ::selection {
   background-color: var(--color-accent-subtle);
+  color: var(--color-ink-primary);
 }
 
 :focus-visible {
@@ -106,18 +104,21 @@ body {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-surface-4) var(--color-surface-1);
+  scrollbar-color: var(--color-surface-4) var(--color-surface-2);
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: var(--color-surface-1);
+  background: var(--color-surface-2);
 }
 *::-webkit-scrollbar-thumb {
   background: var(--color-surface-4);
   border-radius: var(--radius-full);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
 }
 
 /* Motion: two keyframes total, both tied to a real state transition

@@ -58,7 +58,7 @@ export function Tabs<T extends string>({
   }
 
   return (
-    <div role="tablist" aria-label={label} className="flex gap-1 rounded-md bg-surface-0 p-1">
+    <div role="tablist" aria-label={label} className="flex gap-1 rounded-md border border-surface-3 bg-surface-2 p-1">
       {items.map((item, index) => {
         const isActive = item.value === value;
         return (
@@ -79,8 +79,8 @@ export function Tabs<T extends string>({
             className={cn(
               "rounded px-3 py-1.5 text-xs font-medium transition-colors",
               item.disabled && "cursor-not-allowed text-ink-faint opacity-50",
-              !item.disabled && isActive && "bg-accent text-surface-0",
-              !item.disabled && !isActive && "text-ink-muted hover:text-ink-primary",
+              !item.disabled && isActive && "bg-white font-semibold text-accent-strong shadow-xs",
+              !item.disabled && !isActive && "text-ink-secondary hover:bg-white/60 hover:text-ink-primary",
             )}
           >
             {item.label}

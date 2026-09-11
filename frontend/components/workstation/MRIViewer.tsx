@@ -169,7 +169,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
 
   return (
     <div className="flex h-full flex-col min-h-0">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-3 px-4 py-3">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-3 bg-white px-4 py-2.5">
         <Tabs items={planeTabs} value={plane ?? "axial"} onChange={selectPlane} label="Anatomical plane" />
         {/* Stated inline, not hover-only -- a disabled tab isn't keyboard-
             focusable at all, so its `title` tooltip is unreachable without
@@ -180,7 +180,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
       </div>
 
       {baseImageSrc && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-surface-3 bg-surface-1 px-3 py-1.5" role="toolbar" aria-label="Viewer controls">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-surface-3 bg-white px-3 py-1.5" role="toolbar" aria-label="Viewer controls">
           <ToolButton label="Zoom out" onClick={() => applyZoom(zoom - ZOOM_STEP)} disabled={zoom <= MIN_ZOOM}>
             <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
           </ToolButton>
@@ -268,11 +268,11 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
               )}
             </div>
 
-            <div className="pointer-events-none absolute left-3 top-3 rounded-sm bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
+            <div className="pointer-events-none absolute left-3 top-3 rounded-sm border border-white/10 bg-black/80 px-2 py-1 font-mono text-[11px] leading-tight text-white/90">
               <div>
                 Slice {numSlices > 0 ? sliceIndex + 1 : 0} / {numSlices}
               </div>
-              <div className="text-ink-faint">Plane: {plane ? PLANE_LABELS[plane] : "—"}</div>
+              <div className="text-white/60">Plane: {plane ? PLANE_LABELS[plane] : "—"}</div>
             </div>
           </div>
         ) : (
@@ -287,7 +287,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
         )}
       </div>
 
-      <div className="shrink-0 space-y-4 border-t border-surface-3 px-4 py-4">
+      <div className="shrink-0 space-y-4 border-t border-surface-3 bg-white px-4 py-4">
         <div>
           <label htmlFor="slice-slider" className="mb-1.5 flex items-center justify-between text-xs text-ink-muted">
             <span>Slice</span>
@@ -368,7 +368,7 @@ function ToolButton({
       disabled={disabled}
       aria-label={label}
       title={label}
-      className="rounded-sm p-1.5 text-ink-muted transition-colors hover:bg-surface-2 hover:text-ink-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+      className="rounded-sm p-1.5 text-ink-secondary transition-colors hover:bg-surface-2 hover:text-ink-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
     >
       {children}
     </button>

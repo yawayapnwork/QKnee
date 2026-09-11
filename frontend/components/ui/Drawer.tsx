@@ -49,14 +49,14 @@ export function Drawer({
 
   return (
     <div
-      className="no-print fixed inset-0 z-50 flex bg-surface-0/85 animate-fade-in"
+      className="no-print fixed inset-0 z-50 flex bg-slate-900/40 backdrop-blur-xs animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="h-full w-72 max-w-[85vw] animate-slide-in-left border-r border-surface-3 bg-surface-1 shadow-3"
+        className="h-full w-72 max-w-[85vw] animate-slide-in-left border-r border-surface-3 bg-white shadow-3"
       >
         <div className="flex items-center justify-between border-b border-surface-3 px-4 py-3">
           <span className="text-sm font-semibold text-ink-primary">{title}</span>

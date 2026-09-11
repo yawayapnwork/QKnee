@@ -19,7 +19,7 @@ export function FinalCta() {
         </p>
         <Link
           href="/workstation"
-          className="mt-2 inline-flex items-center justify-center gap-2 rounded-sm bg-accent px-5 py-2.5 text-sm font-semibold text-surface-0 transition-colors hover:bg-accent-strong"
+          className="mt-2 inline-flex items-center justify-center gap-2 rounded-sm bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-xs transition-colors hover:bg-accent-strong"
         >
           Open the workstation
           <ArrowRight className="h-4 w-4" aria-hidden="true" />

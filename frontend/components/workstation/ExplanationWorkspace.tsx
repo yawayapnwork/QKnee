@@ -111,14 +111,14 @@ export function ExplanationWorkspace({
 
   return (
     <div
-      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-3 animate-fade-in sm:p-6"
+      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-3 animate-fade-in sm:p-6"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="explanation-workspace-title"
-        className="flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-surface-3 bg-surface-1 shadow-3"
+        className="flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-surface-3 bg-white shadow-3"
       >
         <div className="flex items-start justify-between gap-4 border-b border-surface-3 px-5 py-4 sm:px-6">
           <div>
@@ -148,7 +148,7 @@ export function ExplanationWorkspace({
 
         <nav
           aria-label="Explanation sections"
-          className="flex gap-1 overflow-x-auto border-b border-surface-3 bg-surface-0 px-3 py-2 sm:px-5"
+          className="flex gap-1 overflow-x-auto border-b border-surface-3 bg-surface-2 px-3 py-2 sm:px-5"
         >
           {SECTIONS.map((section) => (
             <button
@@ -190,11 +190,11 @@ export function ExplanationWorkspace({
                       style={{ opacity: opacity / 100 }}
                     />
                   )}
-                  <div className="pointer-events-none absolute left-3 top-3 rounded-sm bg-surface-0/85 px-2 py-1 font-mono text-[11px] leading-tight text-ink-primary">
+                  <div className="pointer-events-none absolute left-3 top-3 rounded-sm border border-white/10 bg-black/80 px-2 py-1 font-mono text-[11px] leading-tight text-white/90">
                     <div>
                       Explained slice {numSlicesAtPlane > 0 ? gradcamSliceIndex + 1 : 0} / {numSlicesAtPlane}
                     </div>
-                    <div className="text-ink-faint">Target: {result.diagnosis}</div>
+                    <div className="text-white/60">Target: {result.diagnosis}</div>
                   </div>
                 </div>
 
