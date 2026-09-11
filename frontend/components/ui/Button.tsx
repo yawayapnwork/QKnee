@@ -18,10 +18,10 @@ type Variant = "primary" | "secondary" | "tertiary" | "destructive";
 type Size = "sm" | "md";
 
 const variantClasses: Record<Variant, string> = {
-  primary: "bg-accent text-surface-0 font-semibold hover:bg-accent-strong transition-colors",
-  secondary: "bg-surface-1/60 text-accent ring-1 ring-inset ring-accent/30 hover:bg-accent/10 hover:ring-accent/60 transition-colors",
-  tertiary: "bg-transparent text-ink-muted hover:bg-surface-2/60 hover:text-accent transition-colors",
-  destructive: "bg-transparent text-danger ring-1 ring-inset ring-danger/40 hover:bg-danger/10 transition-colors",
+  primary: "bg-accent text-white font-medium hover:bg-accent-strong shadow-xs transition-colors",
+  secondary: "bg-white text-ink-primary border border-surface-3 hover:bg-surface-2 hover:border-surface-4 shadow-xs transition-colors",
+  tertiary: "bg-transparent text-ink-secondary hover:bg-surface-2 hover:text-ink-primary transition-colors",
+  destructive: "bg-transparent text-danger border border-danger/30 hover:bg-danger/5 transition-colors",
 };
 
 const sizeClasses: Record<Size, string> = {

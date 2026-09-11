@@ -24,7 +24,7 @@ export const Field = forwardRef<HTMLInputElement, FieldProps>(function Field(
         ref={ref}
         id={inputId}
         className={cn(
-          "w-full rounded-sm border border-surface-3 bg-surface-0 px-3 py-2 text-sm text-ink-primary outline-none focus:border-accent",
+          "w-full rounded-sm border border-surface-3 bg-white px-3 py-2 text-sm text-ink-primary outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent",
           className,
         )}
         {...props}
@@ -48,7 +48,7 @@ export function SelectField({ label, className, id, children, ...props }: Select
       <select
         id={selectId}
         className={cn(
-          "w-full rounded-sm border border-surface-3 bg-surface-0 px-3 py-2 text-sm text-ink-primary outline-none focus:border-accent",
+          "w-full rounded-sm border border-surface-3 bg-white px-3 py-2 text-sm text-ink-primary outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent",
           className,
         )}
         {...props}

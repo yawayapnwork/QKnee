@@ -64,8 +64,8 @@ export function CaseNav({
                   className={cn(
                     "rounded-md border px-3 py-2 text-left text-xs transition-colors",
                     isActive
-                      ? "border-accent bg-accent/10 text-ink-primary"
-                      : "border-surface-3 text-ink-muted hover:border-accent/40 hover:bg-surface-2 hover:text-ink-primary",
+                      ? "border-accent bg-accent-subtle font-medium text-ink-primary shadow-xs ring-1 ring-accent/30"
+                      : "border-surface-3 bg-white text-ink-secondary hover:border-surface-4 hover:bg-surface-2 hover:text-ink-primary",
                   )}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
@@ -94,7 +94,7 @@ export function CaseNav({
 
         <label
           className={cn(
-            "relative mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-4 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:border-accent/50 hover:bg-surface-2 hover:text-accent",
+            "relative mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-3 bg-surface-2/40 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:border-accent hover:bg-surface-2 hover:text-accent-strong",
           )}
         >
           <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

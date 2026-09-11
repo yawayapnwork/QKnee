@@ -12,42 +12,42 @@
 /* "looks advanced."                                                */
 /* ============================================================= */
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
   /* ============================================================= */
-  /* Q-KNEE MINT BREEZE THEME                                       */
-  /* Fresh, medical, modern, calm, scientific, premium, minimal.     */
-  /* Dark backgrounds with layered dark mint/teal surfaces.        */
+  /* Q-KNEE PROFESSIONAL LIGHT CLINICAL MEDICAL THEME               */
+  /* Modern clinical SaaS, professional radiology workstation.     */
+  /* Calm, trustworthy, precise, minimal, highly readable.         */
   /* ============================================================= */
 
-  /* --- Surface: layered dark mint & teal neutrals --- */
-  --color-surface-0: #071312; /* app background (darkest background) */
-  --color-surface-1: #0b1f1c; /* panel background (primary dark teal-green) */
-  --color-surface-2: #102e29; /* nested cards / raised / hover surface */
-  --color-surface-3: #143831; /* border, divider (muted teal-gray contrast) */
-  --color-surface-4: #183f37; /* strong border, active borders, focused inputs */
+  /* --- Surface: clean light medical neutrals --- */
+  --color-surface-0: #F6F8F7; /* page background (very light calm neutral) */
+  --color-surface-1: #FFFFFF; /* main surfaces / cards / panel background */
+  --color-surface-2: #F1F5F4; /* secondary surfaces / raised / table headers / hover */
+  --color-surface-3: #DCE5E2; /* clean 1px borders, dividers, separators */
+  --color-surface-4: #C5D2CE; /* active borders, focused input rings, scrollbar thumb */
 
-  /* --- Ink: text hierarchy, crisp and highly readable --- */
-  --color-ink-primary: #ecfdf5;   /* near-white / very light mint */
-  --color-ink-secondary: #a7beb7; /* muted cool gray-green */
-  --color-ink-muted: #829e97;     /* subdued gray-green body text */
-  --color-ink-faint: #77948d;     /* micro captions, WCAG AA compliant >= 4.5:1 */
+  /* --- Ink: text hierarchy, high contrast & medical readability --- */
+  --color-ink-primary: #172321;   /* deep charcoal, primary text & values */
+  --color-ink-secondary: #52635F; /* cool slate, secondary descriptions */
+  --color-ink-muted: #627571;     /* subdued clinical text, WCAG AA >= 4.5:1 */
+  --color-ink-faint: #788783;     /* micro captions, table headers, metadata */
 
-  /* --- Accent: Mint Breeze interactive hue --- */
-  --color-accent: #2dd4bf;        /* Primary Mint */
-  --color-accent-strong: #14b8a6; /* Deep Mint (hover/active) */
-  --color-accent-deep: #0f766e;   /* Deep Teal */
-  --color-accent-subtle: rgba(45, 212, 191, 0.12); /* subtle mint backgrounds */
-  --color-accent-highlight: #d1fae5; /* Very light mint highlight */
+  /* --- Accent: Restrained clinical mint/teal --- */
+  --color-accent: #0F9D8A;        /* Primary clinical mint/teal */
+  --color-accent-strong: #087F71; /* Dark teal (hover/active states) */
+  --color-accent-deep: #065F54;   /* Deep teal */
+  --color-accent-subtle: #E8F7F3; /* Soft mint background for active states / badges */
+  --color-accent-highlight: #F1FBF8; /* Very subtle mint tint */
 
-  /* --- Semantic feedback: information / warning / danger --- */
-  --color-info: #38bdf8;
-  --color-success: #22c55e;
-  --color-warning: #eab308;
-  --color-danger: #ef4444;
-  --color-neutral: #64748b;
+  /* --- Semantic feedback: muted professional status colors --- */
+  --color-info: #0369A1;
+  --color-success: #0F9D8A;
+  --color-warning: #B45309;
+  --color-danger: #DC2626;
+  --color-neutral: #64748B;
 
-  /* Provenance/severity mapped to Mint Breeze */
+  /* Provenance/severity mapped to clinical indicators */
   --color-status-live: var(--color-accent);
   --color-status-demo: var(--color-warning);
   --color-status-fallback: var(--color-danger);
@@ -56,19 +56,19 @@
   --color-severity-indeterminate: var(--color-warning);
   --color-severity-urgent: var(--color-danger);
 
-  /* --- Radius: four steps, minimal clinical precision --- */
+  /* --- Radius: 3px to 12px, precise clinical geometry --- */
   --radius-xs: 3px;  /* checkboxes, tiny chips */
-  --radius-sm: 5px;  /* inputs, buttons, badges */
+  --radius-sm: 6px;  /* inputs, buttons, badges */
   --radius-md: 8px;  /* panels, cards, tables */
   --radius-lg: 12px; /* modals, drawers */
   --radius-full: 999px; /* dots, pills -- status indicators only */
 
-  /* --- Elevation: restrained, four steps with subtle mint ambient sheen --- */
+  /* --- Elevation: soft, restrained, barely noticeable shadows --- */
   --elevation-0: none;
-  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(20, 184, 166, 0.08);
-  --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(20, 184, 166, 0.12);
-  --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(20, 184, 166, 0.16);
-  --elevation-alert: 0 0 0 1px rgba(239, 68, 68, 0.45), 0 0 20px rgba(239, 68, 68, 0.2);
+  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+  --elevation-2: 0 4px 6px -1px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.04);
+  --elevation-3: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.03);
+  --elevation-alert: 0 0 0 1px rgba(220, 38, 38, 0.25), 0 2px 8px rgba(220, 38, 38, 0.12);
 
   /* --- Motion: two durations, nothing else --- */
   --duration-fast: 120ms;
@@ -82,6 +82,7 @@ body {
 
 ::selection {
   background-color: var(--color-accent-subtle);
+  color: var(--color-ink-primary);
 }
 
 :focus-visible {
@@ -103,18 +104,21 @@ body {
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-surface-4) var(--color-surface-1);
+  scrollbar-color: var(--color-surface-4) var(--color-surface-2);
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-track {
-  background: var(--color-surface-1);
+  background: var(--color-surface-2);
 }
 *::-webkit-scrollbar-thumb {
   background: var(--color-surface-4);
   border-radius: var(--radius-full);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
 }
 
 /* Motion: two keyframes total, both tied to a real state transition

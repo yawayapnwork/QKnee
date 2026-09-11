@@ -9,11 +9,11 @@ import { cn } from "@/lib/utils";
 type BadgeTone = "accent" | "neutral" | "info" | "warning" | "danger";
 
 const toneClasses: Record<BadgeTone, string> = {
-  accent: "bg-accent-subtle text-accent ring-accent/30",
-  neutral: "bg-surface-2 text-ink-muted ring-surface-4",
-  info: "bg-info/10 text-info ring-info/30",
-  warning: "bg-warning/10 text-warning ring-warning/30",
-  danger: "bg-danger/10 text-danger ring-danger/30",
+  accent: "bg-accent-subtle text-accent-strong ring-accent/30",
+  neutral: "bg-surface-2 text-ink-secondary ring-surface-3",
+  info: "bg-info/10 text-info ring-info/25",
+  warning: "bg-warning/10 text-warning ring-warning/25",
+  danger: "bg-danger/10 text-danger ring-danger/25",
 };
 
 export function Badge({

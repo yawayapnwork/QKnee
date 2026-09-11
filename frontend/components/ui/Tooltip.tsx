@@ -18,7 +18,7 @@ export function Tooltip({ label, children }: { label: string; children: React.Re
         role="tooltip"
         id={id}
         className={cn(
-          "pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-max max-w-[220px] -translate-x-1/2 rounded-sm border border-surface-4 bg-surface-2 px-2 py-1 text-2xs text-ink-secondary opacity-0 shadow-2 transition-opacity duration-fast",
+          "pointer-events-none absolute bottom-full left-1/2 z-20 mb-1.5 w-max max-w-[220px] -translate-x-1/2 rounded-sm border border-surface-3 bg-white px-2.5 py-1 text-2xs text-ink-primary opacity-0 shadow-2 transition-opacity duration-fast",
           "group-hover:opacity-100 group-focus-within:opacity-100",
         )}
       >

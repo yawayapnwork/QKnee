@@ -63,14 +63,14 @@ export function Modal({
 
   return (
     <div
-      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-surface-0/85 p-4 animate-fade-in"
+      className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={cn("w-full max-w-md rounded-lg border border-surface-3 bg-surface-1 shadow-3", className)}
+        className={cn("w-full max-w-md rounded-lg border border-surface-3 bg-white shadow-3", className)}
       >
         <div className="flex items-center justify-between border-b border-surface-3 px-6 py-4">
           <h2 id={titleId} className="font-semibold text-ink-primary">
