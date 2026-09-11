@@ -1,6 +1,6 @@
 """
 Tests for the RSNA Knee dataset parser (`qknee.data.dataset`) and the
-Kaggle submission exporter (`scripts.generate_kaggle_submission`).
+Kaggle submission exporter (`extras.scripts.generate_kaggle_submission`).
 
 Covers:
     1. `load_rsna_labels_csv`: robust null-handling (missing/empty UID
@@ -20,13 +20,16 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from qknee.data.dataset import (
+    RSNA_PLANE_COLUMN,
     RSNA_PLANES,
+    RSNA_SERIES_UID_COLUMN,
     RSNA_TARGET_COLUMNS,
     RSNA_UID_COLUMN,
     RSNAKneeDataset,
@@ -110,25 +113,56 @@ class TestLoadRsnaLabelsCsv:
 # --------------------------------------------------------------------------- #
 
 class TestRSNAKneeDataset:
+    # (StudyInstanceUID, Anatomical_Plane, mock-series seed) -- the real
+    # competition layout nests series subdirectories by opaque
+    # SeriesInstanceUID, never by a literal plane-name folder (see
+    # `discover_rsna_plane_series`'s docstring), so `_series_uid` below is
+    # what actually names each on-disk directory; the plane is only ever
+    # resolved via the `series_to_plane` mapping (built from a companion
+    # `train_series.csv`/`test_series.csv`, exactly as production does).
+    _SERIES_LAYOUT = (
+        ("uid-full", "Sagittal", 1),
+        ("uid-full", "Coronal", 2),
+        ("uid-full", "Axial", 3),
+        ("uid-partial", "Sagittal", 4),
+    )
+
+    @staticmethod
+    def _series_uid(study_uid: str, plane: str) -> str:
+        return f"series-{study_uid}-{plane}"
+
     @pytest.fixture
-    def series_root(self, tmp_path: Path) -> Path:
+    def series_to_plane(self) -> Dict[str, str]:
+        return {self._series_uid(study, plane): plane for study, plane, _ in self._SERIES_LAYOUT}
+
+    @pytest.fixture
+    def series_root(self, tmp_path: Path, series_to_plane: Dict[str, str]) -> Path:
         root = tmp_path / "series"
-        generate_mock_dicom_series(root / "uid-full" / "Sagittal", num_slices=2, rows=16, columns=16, seed=1)
-        generate_mock_dicom_series(root / "uid-full" / "Coronal", num_slices=2, rows=16, columns=16, seed=2)
-        generate_mock_dicom_series(root / "uid-full" / "Axial", num_slices=2, rows=16, columns=16, seed=3)
-        generate_mock_dicom_series(root / "uid-partial" / "Sagittal", num_slices=2, rows=16, columns=16, seed=4)
+        rows = []
+        for study, plane, seed in self._SERIES_LAYOUT:
+            series_uid = self._series_uid(study, plane)
+            generate_mock_dicom_series(root / study / series_uid, num_slices=2, rows=16, columns=16, seed=seed)
+            rows.append({RSNA_UID_COLUMN: study, RSNA_SERIES_UID_COLUMN: series_uid, RSNA_PLANE_COLUMN: plane})
+
+        # `RSNAKneeDataset` derives its series CSV path from the labels
+        # CSV's own stem (`train.csv` -> `train_series.csv`, `test.csv` ->
+        # `test_series.csv`) -- different tests in this class use each, so
+        # both companions are written here with identical content rather
+        # than duplicating this fixture per labels-CSV stem.
+        _write_csv(tmp_path / "train_series.csv", rows)
+        _write_csv(tmp_path / "test_series.csv", rows)
         return root
 
-    def test_discover_finds_only_planes_with_dicom_files(self, series_root: Path):
-        found = discover_rsna_plane_series(series_root, "uid-full")
+    def test_discover_finds_only_planes_with_dicom_files(self, series_root: Path, series_to_plane: Dict[str, str]):
+        found = discover_rsna_plane_series(series_root, "uid-full", series_to_plane)
         assert set(found.keys()) == set(RSNA_PLANES)
 
-    def test_discover_partial_study(self, series_root: Path):
-        found = discover_rsna_plane_series(series_root, "uid-partial")
+    def test_discover_partial_study(self, series_root: Path, series_to_plane: Dict[str, str]):
+        found = discover_rsna_plane_series(series_root, "uid-partial", series_to_plane)
         assert set(found.keys()) == {"Sagittal"}
 
-    def test_discover_missing_study_returns_empty_dict(self, series_root: Path):
-        assert discover_rsna_plane_series(series_root, "no-such-study") == {}
+    def test_discover_missing_study_returns_empty_dict(self, series_root: Path, series_to_plane: Dict[str, str]):
+        assert discover_rsna_plane_series(series_root, "no-such-study", series_to_plane) == {}
 
     def test_every_csv_row_becomes_one_record_even_without_series(self, tmp_path: Path, series_root: Path):
         csv_path = _write_csv(tmp_path / "train.csv", [
@@ -172,7 +206,7 @@ class TestRSNAKneeDataset:
 class TestValidateSubmission:
     @pytest.fixture(autouse=True)
     def _import_validator(self):
-        from scripts.generate_kaggle_submission import SubmissionValidationError, validate_submission
+        from extras.scripts.generate_kaggle_submission import SubmissionValidationError, validate_submission
         self.validate_submission = validate_submission
         self.SubmissionValidationError = SubmissionValidationError
 
@@ -238,17 +272,26 @@ class TestGenerateSubmissionEndToEnd:
 
         series_dir = tmp_path / "test_series"
         uids = ["uid-0", "uid-1", "uid-no-series"]
+        # Series subdirectories are named by SeriesInstanceUID (never a
+        # literal plane-name folder -- see `discover_rsna_plane_series`'s
+        # docstring); the accompanying `test_series.csv` is what actually
+        # maps each one back to its Anatomical_Plane, exactly like the real
+        # competition layout `RSNAKneeDataset` expects.
+        series_rows = []
         for i, uid in enumerate(uids[:2]):
             for plane in RSNA_PLANES:
+                series_uid = f"series-{uid}-{plane}"
                 generate_mock_dicom_series(
-                    series_dir / uid / plane, num_slices=2, rows=32, columns=32, seed=i * 3 + hash(plane) % 5,
+                    series_dir / uid / series_uid, num_slices=2, rows=32, columns=32, seed=i * 3 + hash(plane) % 5,
                 )
+                series_rows.append({RSNA_UID_COLUMN: uid, RSNA_SERIES_UID_COLUMN: series_uid, RSNA_PLANE_COLUMN: plane})
         csv_path = _write_csv(tmp_path / "test.csv", [{RSNA_UID_COLUMN: uid} for uid in uids])
+        _write_csv(tmp_path / "test_series.csv", series_rows)
 
         # Patch the module-level `_config` object `generate_kaggle_submission`
         # imported at module load time, so it points at the test's fitted
         # PCA artifact instead of the real (possibly-missing) one.
-        import scripts.generate_kaggle_submission as submission_module
+        import extras.scripts.generate_kaggle_submission as submission_module
         import dataclasses
         patched_config = dataclasses.replace(
             submission_module._config,
@@ -267,7 +310,7 @@ class TestGenerateSubmissionEndToEnd:
         return _write_csv(tmp_path / name, rows)
 
     def test_generate_submission_produces_valid_csv(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -288,7 +331,7 @@ class TestGenerateSubmissionEndToEnd:
             assert (submission[column] >= 0.0).all() and (submission[column] <= 1.0).all()
 
     def test_study_with_no_series_falls_back_to_class_prior(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -305,7 +348,7 @@ class TestGenerateSubmissionEndToEnd:
             assert no_series_row[column] == pytest.approx(prior_value)
 
     def test_placeholder_columns_equal_class_prior(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import PLACEHOLDER_COLUMNS, generate_submission
+        from extras.scripts.generate_kaggle_submission import PLACEHOLDER_COLUMNS, generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -321,7 +364,7 @@ class TestGenerateSubmissionEndToEnd:
             assert submission[column].tolist() == pytest.approx([prior_value] * len(submission))
 
     def test_medial_and_lateral_meniscus_share_the_same_score(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -334,7 +377,7 @@ class TestGenerateSubmissionEndToEnd:
         )
 
     def test_limit_scores_only_the_first_n_studies(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -346,7 +389,7 @@ class TestGenerateSubmissionEndToEnd:
         assert submission.iloc[0][RSNA_UID_COLUMN] == uids[0]
 
     def test_compress_flag_writes_gzip_file(self, synthetic_test_set, tmp_path: Path):
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
         output_path = tmp_path / "submission.csv"
@@ -364,7 +407,7 @@ class TestGenerateSubmissionEndToEnd:
         """DataLoader batching/prefetching is purely an execution-strategy
         change — the scored values for a given (deterministic seed) run
         should be identical regardless of --batch_size/--num_workers."""
-        from scripts.generate_kaggle_submission import generate_submission
+        from extras.scripts.generate_kaggle_submission import generate_submission
 
         csv_path, series_dir, uids = synthetic_test_set
 
