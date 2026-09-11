@@ -46,7 +46,7 @@ from sklearn.model_selection import StratifiedKFold
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GT_SERIES_DIR = REPO_ROOT.parent / "rsna-knee" / "train_series"
-WEAK_SERIES_DIR = REPO_ROOT / "train_series"
+WEAK_SERIES_DIR = REPO_ROOT.parent / "rsna-knee" / "train_series"
 LABELS_CSV = REPO_ROOT / "qknee" / "artifacts" / "effusion_scaled_labels.csv"
 GT_CACHE = REPO_ROOT / "qknee" / "artifacts" / "rsna58_features_imagenet.npz"
 WEAK_CACHE = REPO_ROOT / "qknee" / "artifacts" / "effusion_weak_labeled_features_imagenet.npz"
