@@ -1,5 +1,4 @@
 import { Loader2, Upload } from "lucide-react";
-import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import type { CaseSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -7,27 +6,19 @@ import { cn } from "@/lib/utils";
 type ApiHealth = "checking" | "online" | "offline";
 
 /**
- * LEFT zone: case/study navigation, replacing `StudySelector.tsx`. Two
- * sections, not one — "Demo Cases" (real RSNA Knee studies, scored once
- * offline by `scripts/build_real_demo_cases.py` — see `GET /api/cases` —
- * every row tagged `PRECOMPUTED DEMO`, never presented as if it were a
- * live result) and "Upload Study" (the live-analysis entry point,
- * consolidated here instead of living separately in the header, so there
- * is exactly one place a viewer looks for "how do I get a result").
+ * LEFT zone: case/study navigation. Two sections:
+ * "Demo Cases" (real RSNA Knee studies, scored once offline)
+ * and "Upload Study" (the live-analysis entry point).
  *
- * The upload control's label only ever says "LIVE ANALYSIS" when BOTH a
- * real model is authorized for this viewer (`canDiagnose`, a radiologist
- * session) AND the API has actually confirmed reachable (`apiHealth ===
- * "online"`) — while health is still `"checking"` or has come back
- * `"offline"`, the control reads the honest, unclaimed "Upload Study"
- * instead. The upload input itself stays clickable either way; a failed
- * live request is handled by `ErrorState`, never a silent downgrade here.
+ * The upload control reads "Live Analysis — Upload .dcm / .npy" when
+ * the API has confirmed reachable (`apiHealth === "online"`), and
+ * "Upload .dcm / .npy" otherwise.
  */
 export function CaseNav({
   cases,
   activeCaseId,
   onSelectCase,
-  canDiagnose,
+  canDiagnose = true,
   apiHealth,
   onUpload,
   isUploading = false,
@@ -35,12 +26,12 @@ export function CaseNav({
   cases: CaseSummary[];
   activeCaseId: string | null;
   onSelectCase: (caseId: string) => void;
-  canDiagnose: boolean;
+  canDiagnose?: boolean;
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
   isUploading?: boolean;
 }) {
-  const liveAnalysisAvailable = canDiagnose && apiHealth === "online";
+  const liveAnalysisAvailable = apiHealth === "online";
 
   return (
     <div className="flex flex-col gap-6 p-4">
@@ -87,11 +78,9 @@ export function CaseNav({
       <section className="border-t border-surface-3 pt-4">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Upload Study</h2>
         <p className="mt-1 text-xs text-ink-muted">
-          {!canDiagnose
-            ? "Sign in with radiologist credentials to run a live upload against the model."
-            : apiHealth === "offline"
-              ? "The API is currently unreachable — live analysis is not available right now."
-              : "Runs a live model inference against the uploaded volume."}
+          {apiHealth === "offline"
+            ? "The API is currently unreachable — live analysis is not available right now."
+            : "Runs a live model inference against the uploaded volume."}
         </p>
 
         <label
@@ -125,12 +114,6 @@ export function CaseNav({
             }}
           />
         </label>
-
-        {!canDiagnose && (
-          <Alert tone="info" className="mt-2">
-            Demo cases remain available to everyone without signing in.
-          </Alert>
-        )}
       </section>
     </div>
   );

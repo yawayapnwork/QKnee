@@ -1860,13 +1860,12 @@ def _decode_png_base64(png_base64: str) -> "np.ndarray":
 async def predict(
     request: Request,
     file: UploadFile = File(..., description="DICOM (.dcm/.dicom) or NumPy (.npy) MRI slice/volume"),
-    current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
 ) -> PredictionResponse:
     """Runs one MRI slice (or the middle slice of a volume) through the
     Q-Knee pipeline and returns the tear-risk score, diagnosis label, and a
-    base64-encoded Grad-CAM overlay for visual explainability. Requires a
-    bearer token for a `radiologist` account — 401 with no token, 403 for
-    a `researcher`/`clinical_auditor` token.
+    base64-encoded Grad-CAM overlay for visual explainability. Intentionally
+    public endpoint — requires no authentication token or radiologist login;
+    accepts direct uploads from public/guest users and clinical workflows.
 
     The expensive part of this call (ResNet18 forward pass + Grad-CAM
     backward pass) is routed through `CacheService`, keyed on the
@@ -1876,14 +1875,13 @@ async def predict(
 
     On a lightweight/serverless deployment (`get_backend()` returns a
     `ProxyBackend`), this call is forwarded to `$BACKEND_API_URL` instead
-    of running locally — the inbound `Authorization` header is passed
-    through unchanged so the upstream deployment's own auth gate sees the
-    same bearer token."""
+    of running locally — any inbound `Authorization` header is passed
+    through if present."""
     raw_bytes = await file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    logger.info("POST /predict by user=%r role=%r file=%r", current_user.email, current_user.role, file.filename)
+    logger.info("POST /predict file=%r", file.filename)
     cache_key = _predict_cache_key(raw_bytes)
     cached = await cache_service.get(cache_key)
     if cached is not None:

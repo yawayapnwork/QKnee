@@ -7,11 +7,10 @@ const CASE_NAV = join(__dirname, "..", "..", "components", "workstation", "CaseN
 const API_FILE = join(__dirname, "..", "api.ts");
 const ERROR_STATE = join(__dirname, "..", "..", "components", "shared", "ErrorState.tsx");
 
-describe("Q-Knee Workstation Upload Flow & Error Differentiation", () => {
-  it("WorkstationPage defines the 5 distinct error categories", () => {
+describe("Q-Knee Workstation Upload Flow & Public Access", () => {
+  it("WorkstationPage defines functional error categories", () => {
     const source = readFileSync(WORKSTATION_PAGE, "utf-8");
     expect(source).toMatch(/"initialization"/);
-    expect(source).toMatch(/"credentials"/);
     expect(source).toMatch(/"file_selection"/);
     expect(source).toMatch(/"upload_request"/);
     expect(source).toMatch(/"inference"/);
@@ -29,15 +28,17 @@ describe("Q-Knee Workstation Upload Flow & Error Differentiation", () => {
     expect(source).toMatch(/file\.size === 0/);
   });
 
-  it("WorkstationPage retains pending file when unauthenticated and auto-resumes on sign in", () => {
+  it("WorkstationPage executes upload directly without requiring authentication", () => {
     const source = readFileSync(WORKSTATION_PAGE, "utf-8");
-    expect(source).toMatch(/pendingFileRef\.current\s*=\s*file/);
-    expect(source).toMatch(/token\s*&&\s*canDiagnose\s*&&\s*pendingFileRef\.current/);
+    expect(source).not.toMatch(/useAuth/);
+    expect(source).not.toMatch(/canDiagnose/);
+    expect(source).toMatch(/void runInference\(file\)/);
   });
 
-  it("WorkstationPage clears stale token with signOut() upon HTTP 401", () => {
+  it("WorkstationPage handles upload errors gracefully without credential blockers or auth modals", () => {
     const source = readFileSync(WORKSTATION_PAGE, "utf-8");
-    expect(source).toMatch(/err\.status === 401[\s\S]*?signOut\(\)/);
+    expect(source).not.toMatch(/signOut\(\)/);
+    expect(source).not.toMatch(/AuthModal/);
   });
 
   it("CaseNav preserves cases: CaseSummary[] prop and upload input accept attribute", () => {
@@ -58,12 +59,10 @@ describe("Q-Knee Workstation Upload Flow & Error Differentiation", () => {
     const source = readFileSync(API_FILE, "utf-8");
     expect(source).toMatch(/export async function fetchCurrentUser/);
     expect(source).toMatch(/\/api\/v1\/auth\/me/);
-    expect(source).toMatch(/Bearer \$\{token\}/);
   });
 
-  it("api.ts predictScanVolume sends multipart FormData with the file and Bearer authorization", () => {
+  it("api.ts predictScanVolume sends multipart FormData with the file", () => {
     const source = readFileSync(API_FILE, "utf-8");
     expect(source).toMatch(/formData\.append\("file",\s*file\)/);
-    expect(source).toMatch(/Authorization:\s*`Bearer \$\{token\}`/);
   });
 });

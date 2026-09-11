@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
 import { StudyHeader } from "@/components/workstation/StudyHeader";
 import { CaseNav } from "@/components/workstation/CaseNav";
 import { MRIViewer } from "@/components/workstation/MRIViewer";
@@ -14,15 +13,6 @@ import { LoadingState } from "@/components/shared/LoadingState";
 import { ErrorState } from "@/components/shared/ErrorState";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { Drawer } from "@/components/ui/Drawer";
-
-// Same code-split rationale as `AppShell.tsx`'s "Sign In" trigger: most
-// visits never hit the "upload without being signed in" path, so the auth
-// form's JS shouldn't be part of the workstation page's initial bundle.
-const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) => m.AuthModal), {
-  ssr: false,
-  loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
-});
-import { useAuth } from "@/lib/auth-context";
 import { ApiError, fetchCase, fetchCases, fetchHealth, predictScanVolume } from "@/lib/api";
 import { severityFromRisk } from "@/lib/severity";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
@@ -81,7 +71,6 @@ function toDiagnosticResult(prediction: PredictionResponse): DiagnosticResult {
  */
 export type WorkstationErrorKind =
   | "initialization"
-  | "credentials"
   | "file_selection"
   | "upload_request"
   | "inference";
@@ -94,7 +83,6 @@ export interface WorkstationError {
 }
 
 export default function WorkstationPage() {
-  const { token, user, isReady, signOut } = useAuth();
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
   const [result, setResult] = useState<DiagnosticResult | null>(null);
@@ -102,18 +90,14 @@ export default function WorkstationPage() {
   const [status, setStatus] = useState<Status>("idle");
   const [activeError, setActiveError] = useState<WorkstationError | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [authOpen, setAuthOpen] = useState(false);
   const [casesOpen, setCasesOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
   const lastFileRef = useRef<File | null>(null);
-  const pendingFileRef = useRef<File | null>(null);
   // The in-flight `/predict` or `/api/cases/{id}` request, if any -- aborted
   // whenever a newer one supersedes it (another upload, a demo-case switch,
   // or the page unmounting) so a slow first response can never land after
   // and clobber whatever the viewer is looking at by then.
   const requestAbortRef = useRef<AbortController | null>(null);
-
-  const canDiagnose = isReady && user?.role === "radiologist";
 
   useEffect(() => {
     const controller = new AbortController();
@@ -155,17 +139,6 @@ export default function WorkstationPage() {
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Auto-resume pending upload once a radiologist token becomes ready
-  useEffect(() => {
-    if (token && canDiagnose && pendingFileRef.current) {
-      const file = pendingFileRef.current;
-      pendingFileRef.current = null;
-      setActiveError(null);
-      void runInference(file);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, canDiagnose]);
 
   // Cancel any in-flight request on unmount -- otherwise its `.then`/`.catch`
   // could still fire after the page is gone.
@@ -211,7 +184,7 @@ export default function WorkstationPage() {
     setStatus("loading");
     setActiveError(null);
     try {
-      const prediction = await predictScanVolume(file, token!, controller.signal);
+      const prediction = await predictScanVolume(file, undefined, controller.signal);
       if (controller.signal.aborted) return;
       setResult(toDiagnosticResult(prediction));
       setResultSource("live");
@@ -226,33 +199,20 @@ export default function WorkstationPage() {
       setIsUploading(false);
 
       if (err instanceof ApiError) {
-        if (err.status === 401) {
-          // Credential validation failure: expired or invalid token
-          signOut();
-          pendingFileRef.current = file;
-          setActiveError({
-            kind: "credentials",
-            title: "Credential Validation Failed",
-            message: "Your session has expired or credentials could not be validated. Please sign in with radiologist credentials.",
-            detail: err.detail,
-          });
-          setAuthOpen(true);
-        } else if (err.status === 403) {
-          // Role restriction
-          pendingFileRef.current = file;
-          setActiveError({
-            kind: "credentials",
-            title: "Insufficient Permissions",
-            message: "Live model inference requires a radiologist account. Please sign in with radiologist credentials.",
-            detail: err.detail,
-          });
-          setAuthOpen(true);
-        } else if (err.status >= 500 || err.status === 404) {
+        if (err.status >= 500 || err.status === 404) {
           // Server / network failure
           setActiveError({
             kind: "upload_request",
             title: "Upload Request Failed",
             message: "The Q-Knee server returned an error during upload. If the server is cold-starting, please retry in a moment.",
+            detail: err.detail,
+          });
+        } else if (err.status === 401 || err.status === 403) {
+          // Backend service limitation
+          setActiveError({
+            kind: "upload_request",
+            title: "Inference Service Unavailable",
+            message: "Live model inference is currently restricted by the backend service.",
             detail: err.detail,
           });
         } else {
@@ -303,21 +263,6 @@ export default function WorkstationPage() {
       return;
     }
 
-    // 3. Credential check at request time
-    if (!token || !canDiagnose) {
-      pendingFileRef.current = file;
-      setActiveError({
-        kind: "credentials",
-        title: !token ? "Authentication Required" : "Radiologist Access Required",
-        message: !token
-          ? "Please sign in with radiologist credentials to perform live model inference against uploaded scans."
-          : "Your current account does not have radiologist permissions for live model inference. Please sign in with an authorized account.",
-      });
-      setStatus("error");
-      setAuthOpen(true);
-      return;
-    }
-
     setActiveError(null);
     void runInference(file);
   }
@@ -365,7 +310,6 @@ export default function WorkstationPage() {
             cases={cases}
             activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
-            canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
             isUploading={isUploading}
@@ -377,7 +321,6 @@ export default function WorkstationPage() {
             cases={cases}
             activeCaseId={activeCaseId}
             onSelectCase={handleSelectCase}
-            canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
             isUploading={isUploading}
@@ -396,15 +339,12 @@ export default function WorkstationPage() {
               title={activeError?.title}
               message={activeError?.message ?? "An unexpected error occurred."}
               onRetry={
-                activeError?.kind !== "credentials" &&
                 activeError?.kind !== "file_selection" &&
                 (lastFileRef.current || activeCaseId)
                   ? handleRetry
                   : undefined
               }
               onLoadDemo={cases.length > 0 ? handleLoadDemo : undefined}
-              actionLabel={activeError?.kind === "credentials" ? "Sign In" : undefined}
-              onAction={activeError?.kind === "credentials" ? () => setAuthOpen(true) : undefined}
             />
           )}
 
@@ -434,8 +374,6 @@ export default function WorkstationPage() {
           there is a real result to report; an error/empty state has
           nothing honest to print. */}
       {visibleResult && <PrintReport result={visibleResult} caseLabel={caseLabel} />}
-
-      {authOpen && <AuthModal open onClose={() => setAuthOpen(false)} />}
     </div>
   );
 }
