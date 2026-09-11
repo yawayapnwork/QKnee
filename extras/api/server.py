@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import gc
 import hashlib
 import os
@@ -172,6 +173,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 PRECOMPUTED_CACHE_PATH = _REPO_ROOT / "qknee" / "artifacts" / "precomputed_cache.json"
 BENCHMARK_RESULTS_PATH = _REPO_ROOT / "qknee" / "artifacts" / "benchmark_results.json"
 REAL_DEMO_CASES_DIR = _REPO_ROOT / "qknee" / "artifacts" / "real_demo_cases"
+
+# The real, raw RSNA Knee DICOM tree + its series-to-plane index -- like
+# `train_series/` itself (see `REAL_DEMO_CASES_DIR`'s docstring above),
+# `.gitignore`d and only ever present on a machine that actually downloaded
+# the competition data. `GET /api/studies/{study_uid}/predict` (see
+# `QKneeBackend.predict_study`) is a local-dev-only capability that 503s
+# honestly when `TRAIN_SERIES_DIR` doesn't exist, rather than pretending a
+# deployed backend has this data (it never does).
+TRAIN_SERIES_DIR = _REPO_ROOT / "train_series"
+TRAIN_SERIES_CSV = _REPO_ROOT / "train_series.csv"
 
 
 # --------------------------------------------------------------------------- #
@@ -559,6 +570,46 @@ class _PredictParts:
     # response (mock mode) -- see qknee.observability.provenance.classify's `model_checkpoint_loaded` arg.
 
 
+@functools.lru_cache(maxsize=1)
+def _load_series_to_plane_map() -> Dict[str, str]:
+    """`{SeriesInstanceUID: Anatomical_Plane}` for every series in
+    `TRAIN_SERIES_CSV`, via `qknee.data.dataset.load_rsna_series_csv` --
+    the exact same map `qknee.data.dataset.RSNAKneeDataset` builds for the
+    offline batch pipeline (`extras/scripts/generate_kaggle_submission.py`),
+    so `QKneeBackend.predict_study`'s notion of "this series is Coronal"
+    matches the batch pipeline's exactly.
+
+    `lru_cache(maxsize=1)`: this file (~650 studies' worth of series rows)
+    changes only when the competition data is re-fetched, never per-request
+    -- read once per process, not once per `/api/studies/{uid}/predict`
+    call. Raises the same `FileNotFoundError`/`ValueError`
+    `load_rsna_series_csv` raises if `TRAIN_SERIES_CSV` is missing or
+    malformed; `predict_study` lets that surface as a 503, it doesn't
+    pre-check here (this function has no request context to raise an
+    `HTTPException` usefully from)."""
+    from qknee.data.dataset import RSNA_PLANE_COLUMN, RSNA_SERIES_UID_COLUMN, load_rsna_series_csv
+
+    series_frame = load_rsna_series_csv(TRAIN_SERIES_CSV)
+    return dict(zip(series_frame[RSNA_SERIES_UID_COLUMN], series_frame[RSNA_PLANE_COLUMN]))
+
+
+def _pick_fullest_series(series_dirs: List[Path]) -> Path:
+    """Picks the series directory with the most `.dcm` files -- a plane can
+    map to more than one series (e.g. distinct fluid-sensitive/fat-sat
+    sequences; see `discover_rsna_plane_series`'s docstring), and this
+    backend serves exactly one series per plane per response, same as
+    `scripts/build_real_demo_cases.py`'s `_pick_series_dir` (duplicated
+    here rather than imported, since that script is a standalone offline
+    tool this module doesn't otherwise depend on)."""
+    best = series_dirs[0]
+    best_count = -1
+    for series_dir in series_dirs:
+        count = sum(1 for _ in series_dir.glob("*.dcm"))
+        if count > best_count:
+            best, best_count = series_dir, count
+    return best
+
+
 # --------------------------------------------------------------------------- #
 # Backend loading (mirrors app.py's mock-fallback pattern, so the API stays
 # usable for frontend development even without a fitted PCA artifact)
@@ -841,7 +892,144 @@ class QKneeBackend:
             **info.as_dict(),
         )
 
-    def _predict_live(self, raw_array: np.ndarray) -> _PredictParts:
+    def predict_study(self, study_uid: str, series_dir: Path = TRAIN_SERIES_DIR) -> PredictionResponse:
+        """Same `PredictionResponse` shape as `predict()`, but for a known
+        on-disk `StudyInstanceUID` instead of one ad-hoc uploaded array --
+        resolves which plane series this study actually has via
+        `qknee.data.dataset.discover_rsna_plane_series` (the same function
+        `RSNAKneeDataset`/`extras/scripts/generate_kaggle_submission.py`
+        use for the offline batch pipeline), runs the SAME `_predict_live`/
+        `_predict_mock` this class always uses for its risk_score/
+        diagnosis/Grad-CAM -- just on whichever plane it picks as primary --
+        and then, unlike `predict()`, also decodes the study's OTHER real
+        on-disk plane series (if any) into honest `PlaneInfo` entries. A
+        plane this study genuinely doesn't have on disk stays
+        `available=False` -- never invented; see `discover_rsna_plane_series`'s
+        own "never raises for a missing/incomplete study" contract.
+
+        Raises:
+            HTTPException: 503 if `series_dir` doesn't exist on this
+                deployment (see `TRAIN_SERIES_DIR`'s module docstring) or
+                the ingestion engine failed to load; 404 if the study has
+                zero usable plane series on disk under `series_dir`.
+        """
+        if not series_dir.is_dir():
+            raise HTTPException(
+                status_code=503,
+                detail=f"No local RSNA series data at {series_dir} — per-study prediction requires the "
+                       "real train_series/ directory, which isn't part of this deployment.",
+            )
+        if self._ingestion is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Ingestion engine unavailable ({self.load_error or 'unknown reason'}).",
+            )
+
+        from qknee.data.dataset import RSNA_PLANES, discover_rsna_plane_series
+
+        series_to_plane = _load_series_to_plane_map()
+        plane_dirs = discover_rsna_plane_series(series_dir, study_uid, series_to_plane, RSNA_PLANES)
+        if not plane_dirs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Study {study_uid!r} has no on-disk DICOM series under {series_dir}.",
+            )
+
+        # Axial is the plane every other prediction path in this file
+        # (the upload path's default, `build_real_demo_cases.py`) computes
+        # risk_score/Grad-CAM from -- kept consistent here when the study
+        # has it, so a study's risk score doesn't silently depend on which
+        # plane happened to be picked. Falls back to whichever plane the
+        # study actually has when Axial itself is missing.
+        primary_plane_name = "Axial" if "Axial" in plane_dirs else next(iter(plane_dirs))
+        primary_plane_key = primary_plane_name.lower()
+        primary_series_dir = _pick_fullest_series(plane_dirs[primary_plane_name])
+
+        try:
+            raw_array = self._ingestion.load_dicom_series(primary_series_dir)
+        except Exception as exc:  # noqa: BLE001 - IngestionError or any DICOM read failure
+            raise HTTPException(
+                status_code=422,
+                detail=f"Failed to load {primary_plane_name} series for study {study_uid!r}: {exc}",
+            ) from exc
+
+        t0_ns = time.perf_counter_ns()
+        # Identical live/mock gating to `predict()` -- a missing/invalid
+        # VQC checkpoint routes here to the same honest `_predict_mock`
+        # path, never a real forward pass through random weights.
+        live_ready = self.backend_ready and bool(getattr(self.runner, "vqc_checkpoint_loaded", False))
+        if live_ready:
+            parts = self._predict_live(raw_array, primary_plane=primary_plane_key)
+            backend = "live"
+        else:
+            parts = self._predict_mock(raw_array)
+            backend = "mock"
+        latency_ms = (time.perf_counter_ns() - t0_ns) / 1e6
+
+        # Every OTHER plane this study actually has on disk: decode its
+        # real slices (same `_all_axial_slices_uint8` normalization the
+        # primary plane's slices went through) and report it honestly as
+        # `available=True` -- one bad/unreadable plane series is logged and
+        # skipped (stays `available=False`), never allowed to fail the
+        # whole study.
+        planes = dict(parts.planes)
+        for plane_name, dirs in plane_dirs.items():
+            plane_key = plane_name.lower()
+            if plane_key == primary_plane_key:
+                continue
+            other_series_dir = _pick_fullest_series(dirs)
+            try:
+                plane_array = self._ingestion.load_dicom_series(other_series_dir)
+                plane_slices = self._all_axial_slices_uint8(plane_array)
+            except Exception as exc:  # noqa: BLE001 - one bad plane series must not fail the whole study
+                logger.warning(
+                    "Study %s, plane %s: failed to decode series at %s: %s",
+                    study_uid, plane_name, other_series_dir, exc,
+                )
+                continue
+            planes[plane_key] = PlaneInfo(
+                available=True,
+                num_slices=len(plane_slices),
+                slices=[self._encode_png_base64(cv2.cvtColor(s, cv2.COLOR_GRAY2BGR)) for s in plane_slices],
+            )
+
+        diagnosis = "Tear Detected" if parts.risk_score >= TEAR_RISK_THRESHOLD else "Normal"
+        info = provenance_module.classify(
+            backend_tag=backend,
+            model_checkpoint_loaded=parts.model_checkpoint_loaded,
+            quantum_expectations_present=parts.quantum_expectations is not None,
+        )
+
+        return PredictionResponse(
+            risk_score=parts.risk_score,
+            diagnosis=diagnosis,
+            gradcam_heatmap=parts.gradcam_heatmap_b64,
+            backend=backend,
+            latency_ms=latency_ms,
+            quantum_expectations=parts.quantum_expectations,
+            n_qubits=len(parts.quantum_expectations) if parts.quantum_expectations is not None else None,
+            quantum_backend=_config.quantum.device if parts.quantum_expectations is not None else None,
+            base_image=parts.base_image_b64,
+            gradcam_overlay=parts.gradcam_overlay_b64,
+            gradcam_plane=parts.gradcam_plane,
+            gradcam_slice_index=parts.gradcam_slice_index,
+            planes=planes,
+            primary_plane=primary_plane_key,
+            primary_slice_index=parts.primary_slice_index,
+            **info.as_dict(),
+        )
+
+    def _predict_live(self, raw_array: np.ndarray, primary_plane: str = "axial") -> _PredictParts:
+        """`primary_plane` names which of `planes`' three keys `raw_array`'s
+        own decomposed slices are reported under (and which `gradcam_plane`
+        is set to) -- always `"axial"` for the single-array upload path
+        (`predict()`, which never knows/claims any other plane), but
+        `predict_study()` passes the study's actual resolved plane name
+        (e.g. `"coronal"`) when `raw_array` came from that plane's own
+        on-disk DICOM series instead of an axial-only upload. The other two
+        plane keys stay `available=False` here either way -- `predict_study`
+        is the one that fills them in afterward, from that study's other
+        real on-disk series, never by inventing one from this array."""
         from qknee.data.ingestion import IngestionError
         from qknee.xai.gradcam import colorize_heatmap_rgba, overlay_heatmap
 
@@ -876,21 +1064,26 @@ class QKneeBackend:
             )
 
             planes = {
-                "axial": PlaneInfo(
-                    available=True,
-                    num_slices=len(axial_slices),
-                    slices=[self._encode_png_base64(cv2.cvtColor(s, cv2.COLOR_GRAY2BGR)) for s in axial_slices],
-                ),
-                # Coronal/Sagittal are NOT produced: reslicing a typical
-                # single-series MRI along its in-plane pixel axes isn't a
-                # real anatomical view (those axes are in-plane resolution,
-                # not independently acquired depth) -- see
-                # `_all_axial_slices_uint8`'s docstring. Reporting them
-                # unavailable (rather than fabricating slices) is the fix
-                # for AUDIT.md B1/C4a's "pretends every plane works".
-                "coronal": PlaneInfo(available=False, num_slices=0, slices=[]),
-                "sagittal": PlaneInfo(available=False, num_slices=0, slices=[]),
+                plane: PlaneInfo(available=False, num_slices=0, slices=[])
+                for plane in ("axial", "coronal", "sagittal")
             }
+            # `raw_array` is honestly only ever ONE plane's data -- for the
+            # single-array upload path (the default `primary_plane="axial"`)
+            # that's because reslicing a single-series MRI along its
+            # in-plane pixel axes isn't a real anatomical view (those axes
+            # are in-plane resolution, not independently acquired depth;
+            # see `_all_axial_slices_uint8`'s docstring) -- for
+            # `predict_study()`'s per-plane call, it's because this call
+            # only decoded that one plane's own on-disk series. Either way,
+            # only `primary_plane` is populated here; the other two stay
+            # `available=False` (the fix for AUDIT.md B1/C4a's "pretends
+            # every plane works") unless `predict_study` fills them in
+            # afterward from the study's other real series.
+            planes[primary_plane] = PlaneInfo(
+                available=True,
+                num_slices=len(axial_slices),
+                slices=[self._encode_png_base64(cv2.cvtColor(s, cv2.COLOR_GRAY2BGR)) for s in axial_slices],
+            )
 
             return _PredictParts(
                 risk_score=result.risk_score,
@@ -898,7 +1091,7 @@ class QKneeBackend:
                 quantum_expectations=quantum_expectations,
                 base_image_b64=self._encode_png_base64(cv2.cvtColor(base_image_uint8, cv2.COLOR_GRAY2BGR)),
                 gradcam_overlay_b64=gradcam_overlay_b64,
-                gradcam_plane="axial",
+                gradcam_plane=primary_plane,
                 gradcam_slice_index=primary_slice_index,
                 planes=planes,
                 primary_slice_index=primary_slice_index,
@@ -1872,6 +2065,50 @@ async def get_case(case_id: str) -> PredictionResponse:
         **{k: v for k, v in case.items() if k != "model_checkpoint_loaded"},
         **info.as_dict(),
     )
+
+
+@app.get("/api/studies/{study_uid}/predict", response_model=PredictionResponse, tags=["Inference"])
+@app.get("/api/v1/studies/{study_uid}/predict", response_model=PredictionResponse, tags=["Inference"], include_in_schema=False)
+async def predict_study(
+    study_uid: str,
+    current_user: UserResponse = Depends(require_role(INFERENCE_ROLES)),
+) -> PredictionResponse:
+    """Live, per-plane prediction for a known on-disk RSNA-Knee
+    `StudyInstanceUID` -- distinct from both `/predict` (one ad-hoc
+    uploaded array, honestly only ever one plane) and `GET
+    /api/cases/{case_id}` (a precomputed, offline-scored, single-plane
+    case). This endpoint resolves whichever Axial/Coronal/Sagittal series
+    the study actually has under `TRAIN_SERIES_DIR` (via
+    `qknee.data.dataset.discover_rsna_plane_series`) and returns a
+    `PredictionResponse` whose `planes` field reports each one honestly:
+    `available=True` with real decoded slices for a plane genuinely on
+    disk, `available=False` for one genuinely missing -- same contract as
+    every other `PredictionResponse` producer in this file.
+
+    Local-development-only: the real DICOM tree this needs is
+    `.gitignore`d and never part of a deployed backend (see
+    `TRAIN_SERIES_DIR`'s module docstring), so this 503s on any deployment
+    that doesn't have it, and only ever runs against `QKneeBackend`
+    directly -- proxying wouldn't help, since the upstream deployment
+    doesn't have the data either.
+
+    Requires the same bearer-token role `/predict` requires. `study_uid`
+    is validated against RSNA `StudyInstanceUID`'s own charset (digits and
+    dots only) before touching the filesystem, so it can't be used for
+    path traversal. 404s for a study with no on-disk series at all
+    (distinct from the 503 for "no local data directory whatsoever")."""
+    del current_user
+    if not _CASE_ID_PATTERN.match(study_uid):
+        raise HTTPException(status_code=404, detail="Study not found")
+
+    active_backend = get_backend()
+    if not isinstance(active_backend, QKneeBackend):
+        raise HTTPException(
+            status_code=503,
+            detail="Per-study prediction requires a local QKneeBackend with on-disk RSNA series data; "
+                   "this deployment is running a proxy/cache backend instead.",
+        )
+    return active_backend.predict_study(study_uid)
 
 
 if __name__ == "__main__":
