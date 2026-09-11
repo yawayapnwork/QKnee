@@ -461,15 +461,23 @@ class TestAuthEndpointsAndRouteProtection:
     def test_me_without_a_token_returns_401(self, client):
         assert client.get("/api/v1/auth/me").status_code == 401
 
-    def test_predict_without_a_token_returns_401(self, client):
-        response = client.post("/predict", files={"file": ("slice.npy", b"irrelevant")})
-        assert response.status_code == 401
+    def test_predict_without_a_token_is_permitted(self, client):
+        """Proves the public inference endpoint /predict accepts unauthenticated
+        requests without requiring any bearer token — passes the auth layer
+        directly to file parsing/inference rather than 401ing."""
+        response = client.post("/predict", files={"file": ("slice.npy", b"not a real npy file")})
+        assert response.status_code not in (401, 403)
+
+    def test_api_v1_predict_without_a_token_is_permitted(self, client):
+        """Proves the /api/v1/predict alias also accepts unauthenticated requests."""
+        response = client.post("/api/v1/predict", files={"file": ("slice.npy", b"not a real npy file")})
+        assert response.status_code not in (401, 403)
 
     def test_explain_without_a_token_returns_401(self, client):
         response = client.post("/explain", files={"file": ("slice.npy", b"irrelevant")})
         assert response.status_code == 401
 
-    def test_predict_with_researcher_token_returns_403(self, client):
+    def test_explain_with_researcher_token_returns_403(self, client):
         client.post(
             "/api/v1/auth/register",
             json={"email": "oscar@hospital.org", "password": "password123!", "full_name": "Oscar", "role": "researcher"},
@@ -479,11 +487,11 @@ class TestAuthEndpointsAndRouteProtection:
         ).json()["access_token"]
 
         response = client.post(
-            "/predict", files={"file": ("slice.npy", b"irrelevant")}, headers={"Authorization": f"Bearer {token}"},
+            "/explain", files={"file": ("slice.npy", b"irrelevant")}, headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
 
-    def test_predict_with_clinical_auditor_token_returns_403(self, client):
+    def test_explain_with_clinical_auditor_token_returns_403(self, client):
         client.post(
             "/api/v1/auth/register",
             json={"email": "penny@hospital.org", "password": "password123!", "full_name": "Penny", "role": "clinical_auditor"},
@@ -493,13 +501,13 @@ class TestAuthEndpointsAndRouteProtection:
         ).json()["access_token"]
 
         response = client.post(
-            "/predict", files={"file": ("slice.npy", b"irrelevant")}, headers={"Authorization": f"Bearer {token}"},
+            "/explain", files={"file": ("slice.npy", b"irrelevant")}, headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
 
-    def test_predict_with_a_radiologist_token_passes_the_auth_gate(self, client):
-        """Proves the RBAC gate lets the radiologist role through to the
-        actual inference logic — the request still fails downstream (422,
+    def test_explain_with_a_radiologist_token_passes_the_auth_gate(self, client):
+        """Proves the RBAC gate lets the radiologist role through on endpoints
+        requiring radiologist auth — the request still fails downstream (422,
         bad .npy content), but critically NOT with 401/403, proving auth
         passed before file parsing ran."""
         client.post(
@@ -514,7 +522,7 @@ class TestAuthEndpointsAndRouteProtection:
         ).json()["access_token"]
 
         response = client.post(
-            "/predict", files={"file": ("slice.npy", b"not a real npy file")},
+            "/explain", files={"file": ("slice.npy", b"not a real npy file")},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code not in (401, 403)

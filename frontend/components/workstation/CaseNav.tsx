@@ -1,5 +1,4 @@
-import { Upload } from "lucide-react";
-import { Alert } from "@/components/ui/Alert";
+import { Loader2, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import type { CaseSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -7,44 +6,32 @@ import { cn } from "@/lib/utils";
 type ApiHealth = "checking" | "online" | "offline";
 
 /**
- * LEFT zone: case/study navigation, replacing `StudySelector.tsx`. Two
- * sections, not one — "Demo Cases" (real RSNA Knee studies, scored once
- * offline by `scripts/build_real_demo_cases.py` — see `GET /api/cases` —
- * every row tagged `PRECOMPUTED DEMO`, never presented as if it were a
- * live result) and "Upload Study" (the live-analysis entry point,
- * consolidated here instead of living separately in the header, so there
- * is exactly one place a viewer looks for "how do I get a result").
+ * LEFT zone: case/study navigation. Two sections:
+ * "Demo Cases" (real RSNA Knee studies, scored once offline)
+ * and "Upload Study" (the live-analysis entry point).
  *
- * The upload control's label only ever says "LIVE ANALYSIS" when BOTH a
- * real model is authorized for this viewer (`canDiagnose`, a radiologist
- * session) AND the API has actually confirmed reachable (`apiHealth ===
- * "online"`) — while health is still `"checking"` or has come back
- * `"offline"`, the control reads the honest, unclaimed "Upload Study"
- * instead. The upload input itself stays clickable either way; a failed
- * live request is handled by `ErrorState`, never a silent downgrade here.
+ * The upload control reads "Live Analysis — Upload .dcm / .npy" when
+ * the API has confirmed reachable (`apiHealth === "online"`), and
+ * "Upload .dcm / .npy" otherwise.
  */
 export function CaseNav({
   cases,
   activeCaseId,
   onSelectCase,
-  canDiagnose,
+  canDiagnose = true,
   apiHealth,
   onUpload,
-  loadingNotice,
+  isUploading = false,
 }: {
   cases: CaseSummary[];
   activeCaseId: string | null;
   onSelectCase: (caseId: string) => void;
-  canDiagnose: boolean;
+  canDiagnose?: boolean;
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
-  /** Non-null while the case list is still retrying through a Render
-   * free-tier cold start, or once that retry has given up -- see
-   * `withColdStartRetry` in `lib/api.ts`. Shown in place of the plain
-   * "no demo cases" copy so a cold start doesn't read as a missing feature. */
-  loadingNotice?: string | null;
+  isUploading?: boolean;
 }) {
-  const liveAnalysisAvailable = canDiagnose && apiHealth === "online";
+  const liveAnalysisAvailable = apiHealth === "online";
 
   return (
     <div className="flex flex-col gap-6 p-4">
@@ -55,9 +42,7 @@ export function CaseNav({
         </p>
 
         {cases.length === 0 ? (
-          <p className="mt-3 text-xs text-ink-faint">
-            {loadingNotice ?? "No demo cases available right now."}
-          </p>
+          <p className="mt-3 text-xs text-ink-faint">No demo cases available right now.</p>
         ) : (
           <div role="radiogroup" aria-label="Demo case" className="mt-3 flex flex-col gap-1.5">
             {cases.map((c) => {
@@ -93,37 +78,42 @@ export function CaseNav({
       <section className="border-t border-surface-3 pt-4">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Upload Study</h2>
         <p className="mt-1 text-xs text-ink-muted">
-          {!canDiagnose
-            ? "Sign in with radiologist credentials to run a live upload against the model."
-            : apiHealth === "offline"
-              ? "The API is currently unreachable — live analysis is not available right now."
-              : "Runs a live model inference against the uploaded volume."}
+          {apiHealth === "offline"
+            ? "The API is currently unreachable — live analysis is not available right now."
+            : "Runs a live model inference against the uploaded volume."}
         </p>
 
         <label
           className={cn(
-            "relative mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-3 bg-surface-2/40 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:border-accent hover:bg-surface-2 hover:text-accent-strong",
+            "relative mt-3 flex items-center justify-center gap-2 rounded-md border border-dashed border-surface-3 bg-surface-2/40 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors",
+            isUploading
+              ? "cursor-wait opacity-70"
+              : "cursor-pointer hover:border-accent hover:bg-surface-2 hover:text-accent-strong",
           )}
         >
-          <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          {liveAnalysisAvailable ? "Live Analysis — Upload .dcm / .npy" : "Upload .dcm / .npy"}
+          {isUploading ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" aria-hidden="true" />
+          ) : (
+            <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          )}
+          {isUploading
+            ? "Analyzing scan volume..."
+            : liveAnalysisAvailable
+              ? "Live Analysis — Upload .dcm / .npy"
+              : "Upload .dcm / .npy"}
           <input
             type="file"
             accept=".dcm,.dicom,.npy"
+            disabled={isUploading}
             className="sr-only"
             onChange={(e) => {
+              e.stopPropagation();
               const file = e.target.files?.[0];
               if (file) onUpload(file);
               e.target.value = "";
             }}
           />
         </label>
-
-        {!canDiagnose && (
-          <Alert tone="info" className="mt-2">
-            Demo cases remain available to everyone without signing in.
-          </Alert>
-        )}
       </section>
     </div>
   );

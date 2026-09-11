@@ -25,11 +25,33 @@ export function ModelStatusPanel() {
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetchHealth(controller.signal)
-      .then((health) => setStatus(health.model_status ?? {}))
-      .catch(() => setFailed(true));
-    return () => controller.abort();
+    let isMounted = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let abortCtrl: AbortController | null = null;
+
+    async function loadStatus() {
+      abortCtrl?.abort();
+      const controller = new AbortController();
+      abortCtrl = controller;
+      try {
+        const health = await fetchHealth(controller.signal);
+        if (!isMounted) return;
+        setStatus(health.model_status ?? {});
+        setFailed(false);
+      } catch {
+        if (!isMounted) return;
+        setFailed(true);
+        // Retry after 5s while unreachable to automatically recover
+        timer = setTimeout(() => void loadStatus(), 5000);
+      }
+    }
+
+    void loadStatus();
+    return () => {
+      isMounted = false;
+      if (timer) clearTimeout(timer);
+      abortCtrl?.abort();
+    };
   }, []);
 
   return (

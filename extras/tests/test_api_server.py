@@ -90,6 +90,8 @@ def live_client(pca_artifact_path: Path, tmp_path: Path, monkeypatch: pytest.Mon
     `mock`-backend test uploading the same bytes."""
     live_backend = server_module.QKneeBackend(pca_artifact_path=pca_artifact_path)
     assert live_backend.backend_ready, f"expected live backend to load: {live_backend.load_error}"
+    if live_backend.runner is not None:
+        monkeypatch.setattr(live_backend.runner, "vqc_checkpoint_loaded", True)
     monkeypatch.setattr(server_module, "backend", live_backend)
     monkeypatch.setattr(server_module, "cache_service", server_module.CacheService())
     return _authenticated_as_radiologist(TestClient(server_module.app), tmp_path, monkeypatch)
@@ -177,6 +179,23 @@ class TestHealthEndpoint:
 
 
 class TestPredictEndpointPayload:
+    def test_predict_without_authorization_header_succeeds(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
+        """Specifically verifies that POST /api/v1/predict accepts an unauthenticated
+        request (no Authorization header at all) and returns a complete, successful
+        PredictionResponse payload."""
+        unauthenticated_client = TestClient(server_module.app)
+        response = unauthenticated_client.post(
+            "/api/v1/predict",
+            files={"file": ("slice.npy", _npy_bytes(dummy_slice_2d), "application/octet-stream")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert 0.0 <= payload["risk_score"] <= 1.0
+        assert payload["diagnosis"] in {"Tear Detected", "Normal"}
+        assert payload["backend"] == "live"
+        assert isinstance(payload["gradcam_heatmap"], str) and len(payload["gradcam_heatmap"]) > 0
+        assert "provenance" in payload
+
     def test_predict_with_npy_slice_live(self, live_client: TestClient, dummy_slice_2d: np.ndarray):
         response = live_client.post(
             "/predict",
