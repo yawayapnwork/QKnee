@@ -99,17 +99,69 @@ export default function WorkstationPage() {
   // and clobber whatever the viewer is looking at by then.
   const requestAbortRef = useRef<AbortController | null>(null);
 
+  const casesLoadedRef = useRef(false);
+
+  // Poll health and keep status updated; automatically reload cases when backend comes online
   useEffect(() => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    fetchHealth(controller.signal)
-      .then(() => setApiHealth("online"))
-      .catch(() => setApiHealth("offline"))
-      .finally(() => clearTimeout(timeout));
+    let isMounted = true;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeHealthAbort: AbortController | null = null;
+
+    async function checkHealthAndSync() {
+      activeHealthAbort?.abort();
+      const controller = new AbortController();
+      activeHealthAbort = controller;
+
+      // Allow up to 20s per check to tolerate free-tier Render backend cold starts
+      const timeout = setTimeout(() => controller.abort(), 20000);
+
+      try {
+        const health = await fetchHealth(controller.signal);
+        clearTimeout(timeout);
+        if (!isMounted) return;
+
+        if (health.status === "ok" || health.backend_ready) {
+          setApiHealth("online");
+
+          // If demo cases have not loaded yet (e.g. backend was cold starting when page mounted), fetch them now
+          if (!casesLoadedRef.current) {
+            try {
+              const fetched = await fetchCases(controller.signal);
+              if (isMounted && fetched.length > 0) {
+                casesLoadedRef.current = true;
+                setCases(fetched);
+                setActiveError((prev) => (prev?.kind === "initialization" ? null : prev));
+                void loadCase(fetched[0].case_id);
+              }
+            } catch {
+              // Retry cases on subsequent health cycle
+            }
+          }
+
+          // Periodic heartbeat every 30s while online
+          pollTimer = setTimeout(() => void checkHealthAndSync(), 30000);
+        } else {
+          setApiHealth("offline");
+          // Fast retry every 5s while offline
+          pollTimer = setTimeout(() => void checkHealthAndSync(), 5000);
+        }
+      } catch {
+        clearTimeout(timeout);
+        if (!isMounted) return;
+        setApiHealth("offline");
+        // Fast retry every 5s while offline
+        pollTimer = setTimeout(() => void checkHealthAndSync(), 5000);
+      }
+    }
+
+    void checkHealthAndSync();
+
     return () => {
-      clearTimeout(timeout);
-      controller.abort();
+      isMounted = false;
+      if (pollTimer) clearTimeout(pollTimer);
+      activeHealthAbort?.abort();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetches the real case list once, then auto-loads the first case so the
@@ -122,6 +174,7 @@ export default function WorkstationPage() {
     fetchCases(controller.signal)
       .then((fetched) => {
         if (controller.signal.aborted) return;
+        casesLoadedRef.current = true;
         setCases(fetched);
         if (fetched.length > 0) void loadCase(fetched[0].case_id);
       })
@@ -191,6 +244,7 @@ export default function WorkstationPage() {
       setActiveCaseId(null);
       setStatus("idle");
       setIsUploading(false);
+      setApiHealth("online");
     } catch (err) {
       // A newer request superseded this one -- that request's own
       // success/error handling owns the UI now, so this stale rejection

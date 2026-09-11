@@ -13,7 +13,8 @@ import type {
 // this must match whatever Render shows on the service's own dashboard --
 // currently https://qknee-8dv8.onrender.com. Override via
 // $NEXT_PUBLIC_API_URL (see frontend/vercel.json) for any other deployment.
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "https://qknee-8dv8.onrender.com").replace(/\/$/, "");
+const rawApiUrl = (process.env.NEXT_PUBLIC_API_URL || "https://qknee-8dv8.onrender.com").trim();
+export const API_BASE_URL = (rawApiUrl.length > 0 ? rawApiUrl : "https://qknee-8dv8.onrender.com").replace(/\/+$/, "");
 
 export class ApiError extends Error {
   status: number;
@@ -40,12 +41,29 @@ async function parseJsonOrThrow<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** GET /api/v1/health — used both for the workstation's live status badge
- * and to detect a Render free-tier cold start (a timeout/network failure)
- * so the UI can fall back to preset/mock data instead of hanging. */
+/** GET /api/v1/health (with fallback to /health) — used both for the workstation's live status badge
+ * and to detect a Render free-tier cold start. Checks for status=ok or backend_ready=true. */
 export async function fetchHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/health`, { signal, cache: "no-store" });
-  return parseJsonOrThrow<HealthResponse>(res);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/health`, { signal, cache: "no-store" });
+    if (res.ok) {
+      const data = await parseJsonOrThrow<HealthResponse>(res);
+      if (data.status === "ok" || data.backend_ready === true) {
+        return data;
+      }
+      throw new ApiError(res.status, data.detail || "Backend not ready");
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    // Attempt fallback to /health below if /api/v1/health failed with network/status issue
+  }
+
+  const fallbackRes = await fetch(`${API_BASE_URL}/health`, { signal, cache: "no-store" });
+  const data = await parseJsonOrThrow<HealthResponse>(fallbackRes);
+  if (data.status === "ok" || data.backend_ready === true) {
+    return data;
+  }
+  throw new ApiError(fallbackRes.status, data.detail || "Backend not ready");
 }
 
 export async function loginClinician(credentials: LoginCredentials): Promise<Token> {
