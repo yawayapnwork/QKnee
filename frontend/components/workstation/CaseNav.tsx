@@ -1,4 +1,4 @@
-import { Upload } from "lucide-react";
+import { Loader2, Upload } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import type { CaseSummary } from "@/lib/types";
@@ -30,6 +30,7 @@ export function CaseNav({
   canDiagnose,
   apiHealth,
   onUpload,
+  isUploading = false,
 }: {
   cases: CaseSummary[];
   activeCaseId: string | null;
@@ -37,6 +38,7 @@ export function CaseNav({
   canDiagnose: boolean;
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
+  isUploading?: boolean;
 }) {
   const liveAnalysisAvailable = canDiagnose && apiHealth === "online";
 
@@ -94,16 +96,29 @@ export function CaseNav({
 
         <label
           className={cn(
-            "relative mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-3 bg-surface-2/40 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:border-accent hover:bg-surface-2 hover:text-accent-strong",
+            "relative mt-3 flex items-center justify-center gap-2 rounded-md border border-dashed border-surface-3 bg-surface-2/40 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors",
+            isUploading
+              ? "cursor-wait opacity-70"
+              : "cursor-pointer hover:border-accent hover:bg-surface-2 hover:text-accent-strong",
           )}
         >
-          <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          {liveAnalysisAvailable ? "Live Analysis — Upload .dcm / .npy" : "Upload .dcm / .npy"}
+          {isUploading ? (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" aria-hidden="true" />
+          ) : (
+            <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          )}
+          {isUploading
+            ? "Analyzing scan volume..."
+            : liveAnalysisAvailable
+              ? "Live Analysis — Upload .dcm / .npy"
+              : "Upload .dcm / .npy"}
           <input
             type="file"
             accept=".dcm,.dicom,.npy"
+            disabled={isUploading}
             className="sr-only"
             onChange={(e) => {
+              e.stopPropagation();
               const file = e.target.files?.[0];
               if (file) onUpload(file);
               e.target.value = "";

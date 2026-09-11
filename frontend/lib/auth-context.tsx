@@ -38,6 +38,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const storedToken = getCookie(TOKEN_COOKIE);
     const storedUser = window.localStorage.getItem(USER_STORAGE_KEY);
+
+    // Purge deprecated mock session token if present from prior builds
+    if (storedToken === "institutional-demo-session-token") {
+      clearCookie(TOKEN_COOKIE);
+      window.localStorage.removeItem(USER_STORAGE_KEY);
+      setIsReady(true);
+      return;
+    }
+
     if (storedToken && storedUser) {
       try {
         setToken(storedToken);

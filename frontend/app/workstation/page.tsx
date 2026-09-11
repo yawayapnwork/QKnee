@@ -79,17 +79,34 @@ function toDiagnosticResult(prediction: PredictionResponse): DiagnosticResult {
  * `toDiagnosticResult` conversion a live upload uses — there is no
  * separate fabricated-data code path left in this page.
  */
+export type WorkstationErrorKind =
+  | "initialization"
+  | "credentials"
+  | "file_selection"
+  | "upload_request"
+  | "inference";
+
+export interface WorkstationError {
+  kind: WorkstationErrorKind;
+  title: string;
+  message: string;
+  detail?: string;
+}
+
 export default function WorkstationPage() {
-  const { token, user, isReady } = useAuth();
+  const { token, user, isReady, signOut } = useAuth();
   const [cases, setCases] = useState<CaseSummary[]>([]);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
   const [result, setResult] = useState<DiagnosticResult | null>(null);
+  const [resultSource, setResultSource] = useState<"demo" | "live" | null>(null);
   const [status, setStatus] = useState<Status>("idle");
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [activeError, setActiveError] = useState<WorkstationError | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [casesOpen, setCasesOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
   const lastFileRef = useRef<File | null>(null);
+  const pendingFileRef = useRef<File | null>(null);
   // The in-flight `/predict` or `/api/cases/{id}` request, if any -- aborted
   // whenever a newer one supersedes it (another upload, a demo-case switch,
   // or the page unmounting) so a slow first response can never land after
@@ -125,11 +142,30 @@ export default function WorkstationPage() {
         if (fetched.length > 0) void loadCase(fetched[0].case_id);
       })
       .catch(() => {
-        if (!controller.signal.aborted) setCases([]);
+        if (!controller.signal.aborted) {
+          setCases([]);
+          setActiveError({
+            kind: "initialization",
+            title: "Workstation Initialization Failed",
+            message: "Unable to load demo cases. The Q-Knee API may be offline or starting up.",
+          });
+          setStatus("error");
+        }
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-resume pending upload once a radiologist token becomes ready
+  useEffect(() => {
+    if (token && canDiagnose && pendingFileRef.current) {
+      const file = pendingFileRef.current;
+      pendingFileRef.current = null;
+      setActiveError(null);
+      void runInference(file);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, canDiagnose]);
 
   // Cancel any in-flight request on unmount -- otherwise its `.then`/`.catch`
   // could still fire after the page is gone.
@@ -143,15 +179,20 @@ export default function WorkstationPage() {
     requestAbortRef.current = controller;
     setActiveCaseId(caseId);
     setStatus("loading");
-    setErrorMessage(null);
+    setActiveError(null);
     try {
       const prediction = await fetchCase(caseId, controller.signal);
       if (controller.signal.aborted) return;
       setResult(toDiagnosticResult(prediction));
+      setResultSource("demo");
       setStatus("idle");
     } catch (err) {
       if (controller.signal.aborted) return;
-      setErrorMessage(err instanceof ApiError ? err.detail : "Failed to load this demo case.");
+      setActiveError({
+        kind: "initialization",
+        title: "Failed to Load Demo Case",
+        message: err instanceof ApiError ? err.detail : "Failed to load this demo case.",
+      });
       setStatus("error");
     }
   }
@@ -166,50 +207,140 @@ export default function WorkstationPage() {
     requestAbortRef.current?.abort();
     const controller = new AbortController();
     requestAbortRef.current = controller;
+    setIsUploading(true);
     setStatus("loading");
-    setErrorMessage(null);
+    setActiveError(null);
     try {
       const prediction = await predictScanVolume(file, token!, controller.signal);
       if (controller.signal.aborted) return;
       setResult(toDiagnosticResult(prediction));
+      setResultSource("live");
+      setActiveCaseId(null);
       setStatus("idle");
+      setIsUploading(false);
     } catch (err) {
       // A newer request superseded this one -- that request's own
       // success/error handling owns the UI now, so this stale rejection
       // (a `DOMException` named "AbortError") must render nothing.
       if (controller.signal.aborted) return;
-      // Execution mandate rule 13: a failed request must never silently
-      // become a mock prediction. No `DiagnosticResult` is produced here —
-      // the analysis column renders `ErrorState` instead, with an
-      // explicit, viewer-initiated "Load Demo Case" action rather than an
-      // automatic substitution.
-      setErrorMessage(
-        err instanceof ApiError ? err.detail : "The Q-Knee API is unreachable (a Render cold start can take up to a minute).",
-      );
+      setIsUploading(false);
+
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          // Credential validation failure: expired or invalid token
+          signOut();
+          pendingFileRef.current = file;
+          setActiveError({
+            kind: "credentials",
+            title: "Credential Validation Failed",
+            message: "Your session has expired or credentials could not be validated. Please sign in with radiologist credentials.",
+            detail: err.detail,
+          });
+          setAuthOpen(true);
+        } else if (err.status === 403) {
+          // Role restriction
+          pendingFileRef.current = file;
+          setActiveError({
+            kind: "credentials",
+            title: "Insufficient Permissions",
+            message: "Live model inference requires a radiologist account. Please sign in with radiologist credentials.",
+            detail: err.detail,
+          });
+          setAuthOpen(true);
+        } else if (err.status >= 500 || err.status === 404) {
+          // Server / network failure
+          setActiveError({
+            kind: "upload_request",
+            title: "Upload Request Failed",
+            message: "The Q-Knee server returned an error during upload. If the server is cold-starting, please retry in a moment.",
+            detail: err.detail,
+          });
+        } else {
+          // 400 / 422 - Inference input processing failure
+          setActiveError({
+            kind: "inference",
+            title: "Model Inference Failed",
+            message: err.detail || "The model could not process this scan volume.",
+            detail: err.detail,
+          });
+        }
+      } else {
+        // Network / connection timeout
+        setActiveError({
+          kind: "upload_request",
+          title: "API Unreachable",
+          message: "The Q-Knee API is unreachable or timed out (a Render cold start can take up to a minute). Please retry.",
+        });
+      }
       setStatus("error");
     }
   }
 
   function handleUpload(file: File) {
+    if (!file) return;
+
+    // 1. File-selection check: format validation (.dcm, .dicom, .npy)
+    const fileName = file.name.toLowerCase();
+    const isValidExt = fileName.endsWith(".dcm") || fileName.endsWith(".dicom") || fileName.endsWith(".npy");
+    if (!isValidExt) {
+      setActiveError({
+        kind: "file_selection",
+        title: "Unsupported File Format",
+        message: `"${file.name}" is not a supported format. Please upload a DICOM (.dcm, .dicom) or NumPy (.npy) volume.`,
+      });
+      setStatus("error");
+      return;
+    }
+
+    // 2. File-selection check: non-empty file
+    if (file.size === 0) {
+      setActiveError({
+        kind: "file_selection",
+        title: "Empty File",
+        message: `The selected file "${file.name}" is empty (0 bytes). Please upload a valid MRI scan volume.`,
+      });
+      setStatus("error");
+      return;
+    }
+
+    // 3. Credential check at request time
     if (!token || !canDiagnose) {
+      pendingFileRef.current = file;
+      setActiveError({
+        kind: "credentials",
+        title: !token ? "Authentication Required" : "Radiologist Access Required",
+        message: !token
+          ? "Please sign in with radiologist credentials to perform live model inference against uploaded scans."
+          : "Your current account does not have radiologist permissions for live model inference. Please sign in with an authorized account.",
+      });
+      setStatus("error");
       setAuthOpen(true);
       return;
     }
+
+    setActiveError(null);
     void runInference(file);
   }
 
   function handleRetry() {
-    if (lastFileRef.current) void runInference(lastFileRef.current);
+    if (lastFileRef.current) {
+      void runInference(lastFileRef.current);
+    } else if (activeCaseId) {
+      void loadCase(activeCaseId);
+    }
   }
 
   function handleLoadDemo() {
     const caseId = activeCaseId ?? cases[0]?.case_id;
-    if (caseId) void loadCase(caseId);
+    if (caseId) {
+      setActiveError(null);
+      void loadCase(caseId);
+    }
   }
 
   const visibleResult = status === "error" ? null : result;
   const activeCase = cases.find((c) => c.case_id === activeCaseId) ?? null;
-  const caseLabel = activeCase?.label ?? (result ? "Live Upload" : "");
+  const caseLabel = activeCase?.label ?? (resultSource === "live" ? "Live Upload" : result ? "Live Upload" : "");
 
   return (
     <div className="flex flex-1 flex-col min-h-0 md:h-full md:overflow-hidden">
@@ -237,6 +368,7 @@ export default function WorkstationPage() {
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
+            isUploading={isUploading}
           />
         </aside>
 
@@ -248,6 +380,7 @@ export default function WorkstationPage() {
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
+            isUploading={isUploading}
           />
         </Drawer>
 
@@ -259,7 +392,20 @@ export default function WorkstationPage() {
           {status === "loading" && <LoadingState />}
 
           {status === "error" && (
-            <ErrorState message={errorMessage ?? "Unknown error."} onRetry={handleRetry} onLoadDemo={handleLoadDemo} />
+            <ErrorState
+              title={activeError?.title}
+              message={activeError?.message ?? "An unexpected error occurred."}
+              onRetry={
+                activeError?.kind !== "credentials" &&
+                activeError?.kind !== "file_selection" &&
+                (lastFileRef.current || activeCaseId)
+                  ? handleRetry
+                  : undefined
+              }
+              onLoadDemo={cases.length > 0 ? handleLoadDemo : undefined}
+              actionLabel={activeError?.kind === "credentials" ? "Sign In" : undefined}
+              onAction={activeError?.kind === "credentials" ? () => setAuthOpen(true) : undefined}
+            />
           )}
 
           {status === "idle" && result && (

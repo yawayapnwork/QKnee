@@ -5,6 +5,7 @@ import type {
   PredictionResponse,
   RegisterPayload,
   Token,
+  UserProfile,
 } from "./types";
 
 // Render assigns the live service's actual hostname independently of the
@@ -66,6 +67,17 @@ export async function registerClinician(data: RegisterPayload): Promise<Token> {
   // /register returns the created profile, not a token — log the clinician
   // in immediately afterward so registration doubles as sign-in.
   return loginClinician({ username: data.email, password: data.password });
+}
+
+/** GET /api/v1/auth/me — proves the bearer token round-trips and returns
+ * the authenticated caller's profile. Throws ApiError(401) on invalid/expired token. */
+export async function fetchCurrentUser(token: string, signal?: AbortSignal): Promise<UserProfile> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+    cache: "no-store",
+  });
+  return parseJsonOrThrow<UserProfile>(res);
 }
 
 /** POST /api/v1/predict — multipart upload of a DICOM (.dcm/.dicom) or

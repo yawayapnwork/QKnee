@@ -8,20 +8,31 @@ import { Button } from "@/components/ui/Button";
  * at all when this is shown; there is no "successful-looking" fallback UI.
  */
 export function ErrorState({
+  title = "Analysis unavailable",
   message,
   onRetry,
   onLoadDemo,
+  actionLabel,
+  onAction,
 }: {
+  title?: string;
   message: string;
   onRetry?: () => void;
   onLoadDemo?: () => void;
+  actionLabel?: string;
+  onAction?: () => void;
 }) {
   return (
     <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-12 text-center">
       <AlertTriangle className="h-5 w-5 text-danger" aria-hidden="true" />
-      <p className="text-sm font-medium text-ink-primary">Analysis unavailable</p>
+      <p className="text-sm font-medium text-ink-primary">{title}</p>
       <p className="max-w-sm text-xs text-ink-muted">{message}</p>
-      <div className="mt-2 flex gap-2">
+      <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+        {onAction && actionLabel && (
+          <Button variant="primary" size="sm" onClick={onAction}>
+            {actionLabel}
+          </Button>
+        )}
         {onRetry && (
           <Button variant="secondary" size="sm" onClick={onRetry}>
             Retry
