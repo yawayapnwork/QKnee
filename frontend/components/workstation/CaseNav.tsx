@@ -94,7 +94,7 @@ export function CaseNav({
 
         <label
           className={cn(
-            "mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-4 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:bg-surface-2",
+            "relative mt-3 flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-surface-4 px-3 py-3 text-center text-xs font-medium text-ink-primary transition-colors hover:bg-surface-2",
           )}
         >
           <Upload className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />

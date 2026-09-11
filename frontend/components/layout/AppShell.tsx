@@ -38,15 +38,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [authOpen, setAuthOpen] = useState(false);
   const pathname = usePathname();
 
+  const isWorkstation = pathname === "/workstation";
+
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="no-print sticky top-0 z-40 border-b border-surface-3 bg-surface-0/95">
+    <div className={cn("flex min-h-screen flex-col", isWorkstation && "md:h-dvh md:max-h-dvh md:overflow-hidden")}>
+      <header className="no-print sticky top-0 z-40 shrink-0 border-b border-surface-3 bg-surface-0/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
           <Link href="/" className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-xs font-bold text-surface-0">
-              QK
-            </span>
-            <span className="font-semibold tracking-tight text-ink-primary">Q-Knee</span>
+            <span className="text-base font-semibold tracking-tight text-ink-primary">QKnee</span>
           </Link>
 
           <nav aria-label="Primary" className="flex items-center gap-1 sm:gap-4">
@@ -85,7 +84,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <main className="flex flex-1 flex-col">{children}</main>
+      <main className={cn("flex flex-1 flex-col", isWorkstation && "md:min-h-0 md:overflow-hidden")}>{children}</main>
 
       {/* Mounted only once actually opened -- `dynamic()` above triggers
           its chunk fetch on first mount, so gating the mount on `authOpen`

@@ -168,8 +168,8 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
   const viewAdjusted = zoom !== 1 || pan.x !== 0 || pan.y !== 0 || brightness !== 100 || contrast !== 100;
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-3 px-4 py-3">
+    <div className="flex h-full flex-col min-h-0">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-surface-3 px-4 py-3">
         <Tabs items={planeTabs} value={plane ?? "axial"} onChange={selectPlane} label="Anatomical plane" />
         {/* Stated inline, not hover-only -- a disabled tab isn't keyboard-
             focusable at all, so its `title` tooltip is unreachable without
@@ -180,7 +180,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
       </div>
 
       {baseImageSrc && (
-        <div className="flex flex-wrap items-center gap-1 border-b border-surface-3 bg-surface-1 px-3 py-1.5" role="toolbar" aria-label="Viewer controls">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-surface-3 bg-surface-1 px-3 py-1.5" role="toolbar" aria-label="Viewer controls">
           <ToolButton label="Zoom out" onClick={() => applyZoom(zoom - ZOOM_STEP)} disabled={zoom <= MIN_ZOOM}>
             <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
           </ToolButton>
@@ -228,7 +228,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
         </div>
       )}
 
-      <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-black">
+      <div className="relative flex flex-1 min-h-0 items-center justify-center overflow-hidden bg-black">
         {baseImageSrc ? (
           <div
             role="img"
@@ -287,7 +287,7 @@ export function MRIViewer({ result }: { result: DiagnosticResult | null }) {
         )}
       </div>
 
-      <div className="space-y-4 border-t border-surface-3 px-4 py-4">
+      <div className="shrink-0 space-y-4 border-t border-surface-3 px-4 py-4">
         <div>
           <label htmlFor="slice-slider" className="mb-1.5 flex items-center justify-between text-xs text-ink-muted">
             <span>Slice</span>

@@ -21,7 +21,7 @@ import type { DiagnosticResult } from "@/lib/types";
 export function StatusBar({ result }: { result: DiagnosticResult | null }) {
   if (!result) {
     return (
-      <div className="no-print border-t border-surface-3 bg-surface-1 px-4 py-1.5 text-2xs text-ink-faint sm:px-6">
+      <div className="no-print shrink-0 border-t border-surface-3 bg-surface-1 px-4 py-1.5 text-2xs text-ink-faint sm:px-6">
         No study loaded — acquisition metadata appears here once a result is available.
       </div>
     );
@@ -39,7 +39,7 @@ export function StatusBar({ result }: { result: DiagnosticResult | null }) {
     <div
       role="contentinfo"
       aria-label="Technical status and acquisition metadata"
-      className="no-print flex flex-wrap items-center gap-x-6 gap-y-1 border-t border-surface-3 bg-surface-1 px-4 py-1.5 font-mono text-2xs text-ink-muted sm:px-6"
+      className="no-print flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 border-t border-surface-3 bg-surface-1 px-4 py-1.5 font-mono text-2xs text-ink-muted sm:px-6"
     >
       {items.map((item) => (
         <span key={item.label}>
