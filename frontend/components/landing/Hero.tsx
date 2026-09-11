@@ -62,7 +62,7 @@ export function Hero() {
             </Link>
             <Link
               href="#pipeline"
-              className="inline-flex items-center justify-center gap-2 rounded-sm px-4 py-2 text-sm font-medium text-ink-primary ring-1 ring-inset ring-surface-4 transition-colors hover:bg-surface-2"
+              className="inline-flex items-center justify-center gap-2 rounded-sm bg-surface-1/60 px-4 py-2 text-sm font-medium text-accent ring-1 ring-inset ring-accent/30 transition-colors hover:bg-accent/10 hover:ring-accent/60"
             >
               Explore Architecture
             </Link>

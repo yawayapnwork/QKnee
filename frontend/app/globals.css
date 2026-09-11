@@ -14,28 +14,31 @@
 :root {
   color-scheme: dark;
 
-  /* --- Surface: layered dark neutrals, zero blur by default --- */
-  --color-surface-0: #0a0d12; /* app background */
-  --color-surface-1: #10141b; /* panel background */
-  --color-surface-2: #161b24; /* raised / hover */
-  --color-surface-3: #1e2530; /* border, divider */
-  --color-surface-4: #2a3341; /* strong border, focused input */
+  /* ============================================================= */
+  /* Q-KNEE MINT BREEZE THEME                                       */
+  /* Fresh, medical, modern, calm, scientific, premium, minimal.     */
+  /* Dark backgrounds with layered dark mint/teal surfaces.        */
+  /* ============================================================= */
 
-  /* --- Ink: text hierarchy, four steps, never five+ --- */
-  --color-ink-primary: #e8ebef;
-  --color-ink-secondary: #aab2bf;
-  --color-ink-muted: #7c8697;
-  /* #4d5563 measured ~2.6:1 against --color-surface-0 -- well under WCAG
-     AA's 4.5:1 for the small (11px) captions/disclaimers this token is
-     used for everywhere (limitations text, provenance detail lines, axis
-     labels). #737b8c measures ~4.6:1 against the same background -- one
-     token change fixes every consumer at once. */
-  --color-ink-faint: #737b8c;
+  /* --- Surface: layered dark mint & teal neutrals --- */
+  --color-surface-0: #071312; /* app background (darkest background) */
+  --color-surface-1: #0b1f1c; /* panel background (primary dark teal-green) */
+  --color-surface-2: #102e29; /* nested cards / raised / hover surface */
+  --color-surface-3: #143831; /* border, divider (muted teal-gray contrast) */
+  --color-surface-4: #183f37; /* strong border, active borders, focused inputs */
 
-  /* --- Accent: ONE interactive hue. Not a gradient pair. --- */
-  --color-accent: #2dd4bf;
-  --color-accent-strong: #14b8a6; /* hover/active */
-  --color-accent-subtle: rgba(45, 212, 191, 0.12); /* backgrounds only */
+  /* --- Ink: text hierarchy, crisp and highly readable --- */
+  --color-ink-primary: #ecfdf5;   /* near-white / very light mint */
+  --color-ink-secondary: #a7beb7; /* muted cool gray-green */
+  --color-ink-muted: #829e97;     /* subdued gray-green body text */
+  --color-ink-faint: #77948d;     /* micro captions, WCAG AA compliant >= 4.5:1 */
+
+  /* --- Accent: Mint Breeze interactive hue --- */
+  --color-accent: #2dd4bf;        /* Primary Mint */
+  --color-accent-strong: #14b8a6; /* Deep Mint (hover/active) */
+  --color-accent-deep: #0f766e;   /* Deep Teal */
+  --color-accent-subtle: rgba(45, 212, 191, 0.12); /* subtle mint backgrounds */
+  --color-accent-highlight: #d1fae5; /* Very light mint highlight */
 
   /* --- Semantic feedback: information / warning / danger --- */
   --color-info: #38bdf8;
@@ -44,33 +47,27 @@
   --color-danger: #ef4444;
   --color-neutral: #64748b;
 
-  /* Provenance/severity share the info-success-warning-danger hue
-     family on purpose (FRONTEND_REDESIGN.md: both answer "how much
-     should I trust this") -- aliased, not re-picked, so the two axes
-     can never silently drift apart in color. */
-  --color-status-live: var(--color-success);
+  /* Provenance/severity mapped to Mint Breeze */
+  --color-status-live: var(--color-accent);
   --color-status-demo: var(--color-warning);
   --color-status-fallback: var(--color-danger);
   --color-status-proxy: var(--color-neutral);
-  --color-severity-normal: var(--color-success);
+  --color-severity-normal: var(--color-accent);
   --color-severity-indeterminate: var(--color-warning);
   --color-severity-urgent: var(--color-danger);
 
-  /* --- Radius: four steps, no "giant rounded card" size --- */
+  /* --- Radius: four steps, minimal clinical precision --- */
   --radius-xs: 3px;  /* checkboxes, tiny chips */
   --radius-sm: 5px;  /* inputs, buttons, badges */
   --radius-md: 8px;  /* panels, cards, tables */
   --radius-lg: 12px; /* modals, drawers */
   --radius-full: 999px; /* dots, pills -- status indicators only */
 
-  /* --- Elevation: restrained, four steps, one deliberate "alert" --- */
+  /* --- Elevation: restrained, four steps with subtle mint ambient sheen --- */
   --elevation-0: none;
-  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.55);
-  --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.6);
-  /* The ONE deliberate glow-like effect in the entire system --
-     reserved exclusively for a MOCK/FALLBACK result, never decoration
-     and never a default/hover button state. */
+  --elevation-1: 0 1px 3px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(20, 184, 166, 0.08);
+  --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(20, 184, 166, 0.12);
+  --elevation-3: 0 16px 48px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(20, 184, 166, 0.16);
   --elevation-alert: 0 0 0 1px rgba(239, 68, 68, 0.45), 0 0 20px rgba(239, 68, 68, 0.2);
 
   /* --- Motion: two durations, nothing else --- */

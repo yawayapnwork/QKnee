@@ -79,8 +79,8 @@ export function Tabs<T extends string>({
             className={cn(
               "rounded px-3 py-1.5 text-xs font-medium transition-colors",
               item.disabled && "cursor-not-allowed text-ink-faint opacity-50",
-              !item.disabled && isActive && "bg-accent text-surface-0",
-              !item.disabled && !isActive && "text-ink-muted hover:text-ink-primary",
+              !item.disabled && isActive && "bg-accent font-semibold text-surface-0",
+              !item.disabled && !isActive && "text-ink-muted hover:bg-surface-2/60 hover:text-accent",
             )}
           >
             {item.label}
