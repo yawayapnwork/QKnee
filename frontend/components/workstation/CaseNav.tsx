@@ -31,6 +31,7 @@ export function CaseNav({
   apiHealth,
   onUpload,
   isUploading = false,
+  isGuest = false,
 }: {
   cases: CaseSummary[];
   activeCaseId: string | null;
@@ -39,8 +40,9 @@ export function CaseNav({
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
   isUploading?: boolean;
+  isGuest?: boolean;
 }) {
-  const liveAnalysisAvailable = canDiagnose && apiHealth === "online";
+  const liveAnalysisAvailable = (isGuest || canDiagnose) && apiHealth === "online";
 
   return (
     <div className="flex flex-col gap-6 p-4">
@@ -87,11 +89,9 @@ export function CaseNav({
       <section className="border-t border-surface-3 pt-4">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Upload Study</h2>
         <p className="mt-1 text-xs text-ink-muted">
-          {!canDiagnose
-            ? "Sign in with radiologist credentials to run a live upload against the model."
-            : apiHealth === "offline"
-              ? "The API is currently unreachable — live analysis is not available right now."
-              : "Runs a live model inference against the uploaded volume."}
+          {apiHealth === "offline"
+            ? "The API is currently unreachable — live analysis is not available right now."
+            : "Runs a live model inference against the uploaded volume."}
         </p>
 
         <label
@@ -125,12 +125,6 @@ export function CaseNav({
             }}
           />
         </label>
-
-        {!canDiagnose && (
-          <Alert tone="info" className="mt-2">
-            Demo cases remain available to everyone without signing in.
-          </Alert>
-        )}
       </section>
     </div>
   );

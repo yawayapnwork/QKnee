@@ -61,9 +61,62 @@ describe("Q-Knee Workstation Upload Flow & Error Differentiation", () => {
     expect(source).toMatch(/Bearer \$\{token\}/);
   });
 
-  it("api.ts predictScanVolume sends multipart FormData with the file and Bearer authorization", () => {
+  it("api.ts predictScanVolume sends multipart FormData with the file and conditional Bearer authorization", () => {
     const source = readFileSync(API_FILE, "utf-8");
     expect(source).toMatch(/formData\.append\("file",\s*file\)/);
     expect(source).toMatch(/Authorization:\s*`Bearer \$\{token\}`/);
+    expect(source).toMatch(/token\?: string \| null/);
+  });
+});
+
+describe("Q-Knee Dual-Mode Entry & Guest Access Flow", () => {
+  const AUTH_CONTEXT = join(__dirname, "..", "auth-context.tsx");
+  const HERO_FILE = join(__dirname, "..", "..", "components", "landing", "Hero.tsx");
+  const FINAL_CTA = join(__dirname, "..", "..", "components", "landing", "FinalCta.tsx");
+  const APP_SHELL = join(__dirname, "..", "..", "components", "layout", "AppShell.tsx");
+
+  it("auth-context.tsx defines AuthMode and exports continueAsGuest", () => {
+    const source = readFileSync(AUTH_CONTEXT, "utf-8");
+    expect(source).toMatch(/export type AuthMode\s*=\s*"guest"\s*\|\s*"authenticated"/);
+    expect(source).toMatch(/continueAsGuest:\s*\(\)\s*=>\s*void/);
+    expect(source).toMatch(/authMode:\s*AuthMode/);
+    expect(source).toMatch(/setAuthMode\("guest"\)/);
+    expect(source).toMatch(/setAuthMode\("authenticated"\)/);
+  });
+
+  it("Hero.tsx renders both Continue as Guest and Sign In entry options", () => {
+    const source = readFileSync(HERO_FILE, "utf-8");
+    expect(source).toMatch(/Continue as Guest/);
+    expect(source).toMatch(/Sign In/);
+    expect(source).toMatch(/continueAsGuest/);
+  });
+
+  it("FinalCta.tsx renders both Continue as Guest and Sign In entry options", () => {
+    const source = readFileSync(FINAL_CTA, "utf-8");
+    expect(source).toMatch(/Continue as Guest/);
+    expect(source).toMatch(/Sign In/);
+    expect(source).toMatch(/continueAsGuest/);
+  });
+
+  it("AppShell.tsx displays Guest badge and Sign In button when unauthenticated", () => {
+    const source = readFileSync(APP_SHELL, "utf-8");
+    expect(source).toMatch(/authMode === "authenticated"/);
+    expect(source).toMatch(/Guest/);
+    expect(source).toMatch(/Sign In/);
+    expect(source).toMatch(/Sign Out/);
+  });
+
+  it("CaseNav.tsx enables Live Analysis for guests and accepts isGuest prop", () => {
+    const source = readFileSync(CASE_NAV, "utf-8");
+    expect(source).toMatch(/isGuest\s*=\s*false/);
+    expect(source).toMatch(/\(isGuest\s*\|\|\s*canDiagnose\)\s*&&\s*apiHealth === "online"/);
+    expect(source).toMatch(/Live Analysis — Upload \.dcm \/ \.npy/);
+  });
+
+  it("WorkstationPage provides isGuest to CaseNav and does not block guest uploads", () => {
+    const source = readFileSync(WORKSTATION_PAGE, "utf-8");
+    expect(source).toMatch(/isGuest\s*=\s*authMode === "guest"/);
+    expect(source).toMatch(/isGuest=\{isGuest\}/);
+    expect(source).toMatch(/authMode === "authenticated" && !canDiagnose/);
   });
 });
