@@ -56,6 +56,41 @@ OUTPUT_DIR = REPO_ROOT / "qknee" / "artifacts" / "real_demo_cases"
 TEAR_RISK_THRESHOLD = 0.5
 
 
+def _build_diagnosis_reason(
+    risk_score: float,
+    threshold: float,
+    quantum_expectations: Optional[List[float]],
+    gradcam_heatmap: Optional[np.ndarray],
+) -> str:
+    """Identical to `extras.api.server._build_diagnosis_reason` — duplicated
+    here (rather than imported) so this offline script never pays that
+    module's FastAPI/auth import chain just to build one sentence. See that
+    function's docstring for the full rationale."""
+    margin_pct = abs(risk_score - threshold) * 100
+    side = "above" if risk_score >= threshold else "below"
+    sentence = (
+        f"Risk score {risk_score * 100:.1f}% is {margin_pct:.1f} percentage points {side} "
+        f"the {threshold * 100:.0f}% detection threshold."
+    )
+
+    if quantum_expectations:
+        dominant_idx = max(range(len(quantum_expectations)), key=lambda i: abs(quantum_expectations[i]))
+        sentence += (
+            f" Qubit {dominant_idx} contributed the strongest signal "
+            f"(⟨Z⟩ = {quantum_expectations[dominant_idx]:+.3f})."
+        )
+
+    if gradcam_heatmap is not None and float(gradcam_heatmap.max()) > 0:
+        row_idx, col_idx = np.unravel_index(np.argmax(gradcam_heatmap), gradcam_heatmap.shape)
+        height, width = gradcam_heatmap.shape
+        vertical = "upper" if row_idx < height / 3 else ("lower" if row_idx > 2 * height / 3 else "central")
+        horizontal = "left" if col_idx < width / 3 else ("right" if col_idx > 2 * width / 3 else "center")
+        region = "center" if vertical == "central" and horizontal == "center" else f"{vertical}-{horizontal}"
+        sentence += f" Grad-CAM attention peaks in the {region} of the analyzed slice."
+
+    return sentence
+
+
 def _normalize_uint8(slice_2d: np.ndarray) -> np.ndarray:
     """Identical to `extras.api.server.QKneeBackend._normalize_uint8` —
     duplicated here (rather than imported) so this offline script never
@@ -146,6 +181,10 @@ def build_one_case(study_uid: str, series_dir: Path, runner: PipelineRunner, ing
         "label": f"Study {study_uid[-8:]}",
         "risk_score": risk_score,
         "diagnosis": diagnosis,
+        "reason": _build_diagnosis_reason(
+            risk_score, TEAR_RISK_THRESHOLD, quantum_expectations,
+            None if gradcam_degenerate else result.gradcam_heatmap,
+        ),
         "gradcam_heatmap": _encode_png_base64(_resize_max_dim(legacy_overlay)),
         # "cache-fallback/<id>" -> qknee.observability.provenance.classify
         # maps this to provenance="precomputed_demo" -- real model, real

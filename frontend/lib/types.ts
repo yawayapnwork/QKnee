@@ -33,6 +33,12 @@ export interface RegisterPayload {
 export interface PredictionResponse {
   risk_score: number;
   diagnosis: string;
+  /** One-sentence explanation of THIS response's own numbers — threshold margin,
+   * plus (when available) the dominant qubit's Pauli-Z expectation and the
+   * Grad-CAM peak's rough location in the slice. See
+   * `extras.api.server._build_diagnosis_reason`'s docstring — built only from
+   * values already in this response, never a canned template. */
+  reason: string;
   gradcam_heatmap: string;
   backend: string;
   latency_ms: number | null;
@@ -265,6 +271,9 @@ export interface QuantumTelemetry {
 export interface DiagnosticResult {
   riskScore: number;
   diagnosis: string;
+  /** See `PredictionResponse.reason` — a real, per-result sentence, never
+   * a canned string. */
+  reason: string;
   severity: SeverityTag;
   /** The exact `risk_score` band boundaries the backend computed `severity` from
    * (see `PredictionResponse.severity_band_normal_max`/`severity_band_urgent_min`) —

@@ -6,10 +6,24 @@ services:
     plan: free
     region: oregon
     branch: main
+    # `qknee/artifacts/qknee_model.pt`/`pca_scaler.pkl` are gitignored (large
+    # binary model weights, not source) -- Render's build never has them
+    # unless this step fetches them. Downloads from $MODEL_CHECKPOINT_URL/
+    # $PCA_ARTIFACT_URL (e.g. GitHub Release asset URLs -- free, no extra
+    # service) only when the file is missing, so a local/Docker build that
+    # already has the artifact bind-mounted is unaffected; `-f` makes curl
+    # fail the build loudly on a bad URL instead of writing an HTML error
+    # page in place of the checkpoint. Both env vars are optional -- unset,
+    # the build just proceeds without them and `/predict` falls back to
+    # mock/cache mode exactly as it already does when no checkpoint exists.
     buildCommand: >-
       pip install --upgrade pip &&
       pip install -r requirements.txt -r extras/api/requirements.txt &&
-      pip install -e .
+      pip install -e . &&
+      (test -z "$MODEL_CHECKPOINT_URL" || test -f qknee/artifacts/qknee_model.pt ||
+       curl -fL "$MODEL_CHECKPOINT_URL" -o qknee/artifacts/qknee_model.pt) &&
+      (test -z "$PCA_ARTIFACT_URL" || test -f qknee/artifacts/pca_scaler.pkl ||
+       curl -fL "$PCA_ARTIFACT_URL" -o qknee/artifacts/pca_scaler.pkl)
     startCommand: python -m uvicorn extras.api.server:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
@@ -24,4 +38,8 @@ services:
       - key: QKNEE_RADIOLOGIST_INVITE_CODE
         sync: false
       - key: REDIS_URL
+        sync: false
+      - key: MODEL_CHECKPOINT_URL
+        sync: false
+      - key: PCA_ARTIFACT_URL
         sync: false

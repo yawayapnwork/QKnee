@@ -135,6 +135,57 @@ _config = load_config()
 PCA_ARTIFACT_PATH = _config.paths.pca_artifact
 TEAR_RISK_THRESHOLD = _config.api.tear_risk_threshold
 
+
+def _build_diagnosis_reason(
+    risk_score: float,
+    threshold: float,
+    quantum_expectations: Optional[List[float]],
+    gradcam_heatmap: Optional["np.ndarray"],
+) -> str:
+    """One-sentence, real explanation for this specific prediction -- built
+    only from numbers this response already computed (never a canned
+    template string unrelated to the actual output). Three real signals,
+    each included only when actually available:
+
+        1. How far `risk_score` sits from the decision threshold (always
+           available).
+        2. Which qubit's Pauli-Z expectation had the largest magnitude for
+           this input -- `None`/omitted in mock mode, where no real
+           circuit ran (see `PredictionResponse.quantum_expectations`).
+        3. Roughly where in the slice the Grad-CAM heatmap peaked --
+           `None`/omitted when no real heatmap was computed, or when it's
+           degenerate (all-zero; see `gradcam_degenerate`), since a
+           genuinely empty map has no meaningful peak to point at.
+
+    Deliberately does NOT name an anatomical structure ("medial meniscus",
+    "ACL origin") -- this pipeline has no per-region anatomical labeling,
+    only pixel coordinates in an unregistered slice, so claiming anatomy
+    here would be fabricating precision the model doesn't have.
+    """
+    margin_pct = abs(risk_score - threshold) * 100
+    side = "above" if risk_score >= threshold else "below"
+    sentence = (
+        f"Risk score {risk_score * 100:.1f}% is {margin_pct:.1f} percentage points {side} "
+        f"the {threshold * 100:.0f}% detection threshold."
+    )
+
+    if quantum_expectations:
+        dominant_idx = max(range(len(quantum_expectations)), key=lambda i: abs(quantum_expectations[i]))
+        sentence += (
+            f" Qubit {dominant_idx} contributed the strongest signal "
+            f"(⟨Z⟩ = {quantum_expectations[dominant_idx]:+.3f})."
+        )
+
+    if gradcam_heatmap is not None and float(gradcam_heatmap.max()) > 0:
+        row_idx, col_idx = np.unravel_index(np.argmax(gradcam_heatmap), gradcam_heatmap.shape)
+        height, width = gradcam_heatmap.shape
+        vertical = "upper" if row_idx < height / 3 else ("lower" if row_idx > 2 * height / 3 else "central")
+        horizontal = "left" if col_idx < width / 3 else ("right" if col_idx > 2 * width / 3 else "center")
+        region = "center" if vertical == "central" and horizontal == "center" else f"{vertical}-{horizontal}"
+        sentence += f" Grad-CAM attention peaks in the {region} of the analyzed slice."
+
+    return sentence
+
 # Severity band thresholds on `risk_score` -- the single source of truth for
 # "Normal" / "Indeterminate" / "Urgent Surgical Consult", exposed on every
 # `PredictionResponse` (see `severity_band_normal_max`/`severity_band_urgent_min`
@@ -391,6 +442,14 @@ class PlaneInfo(BaseModel):
 class PredictionResponse(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=1.0, description="Predicted tear risk probability, in [0, 1].")
     diagnosis: str = Field(..., description="'Tear Detected' if risk_score >= 0.5, else 'Normal'.")
+    reason: str = Field(
+        ...,
+        description="One-sentence explanation of THIS response's own numbers -- threshold margin, plus (when "
+                    "available) the dominant qubit's Pauli-Z expectation and the Grad-CAM peak's rough location "
+                    "in the slice. Built only from values already in this response, never a canned template "
+                    "unrelated to the actual output. Never names a specific anatomical structure -- this "
+                    "pipeline has no per-region anatomical labeling to draw one from.",
+    )
     gradcam_heatmap: str = Field(..., description="Base64-encoded PNG of the Grad-CAM overlay on the input slice.")
     backend: str = Field(..., description="'live' if PipelineRunner ran, 'mock' if a fallback was used.")
     base_image: str = Field(
@@ -589,6 +648,7 @@ class _PredictParts:
     original risk score/pre-blended heatmap."""
 
     risk_score: float
+    reason: str
     gradcam_heatmap_b64: str  # legacy pre-blended composite (unchanged field/consumers)
     quantum_expectations: Optional[List[float]]
     base_image_b64: str
@@ -909,6 +969,7 @@ class QKneeBackend:
         return PredictionResponse(
             risk_score=parts.risk_score,
             diagnosis=diagnosis,
+            reason=parts.reason,
             gradcam_heatmap=parts.gradcam_heatmap_b64,
             backend=backend,
             latency_ms=latency_ms,
@@ -1037,6 +1098,7 @@ class QKneeBackend:
         return PredictionResponse(
             risk_score=parts.risk_score,
             diagnosis=diagnosis,
+            reason=parts.reason,
             gradcam_heatmap=parts.gradcam_heatmap_b64,
             backend=backend,
             latency_ms=latency_ms,
@@ -1131,6 +1193,10 @@ class QKneeBackend:
 
             return _PredictParts(
                 risk_score=result.risk_score,
+                reason=_build_diagnosis_reason(
+                    result.risk_score, TEAR_RISK_THRESHOLD, quantum_expectations,
+                    None if gradcam_degenerate else result.gradcam_heatmap,
+                ),
                 gradcam_heatmap_b64=gradcam_heatmap_b64,
                 quantum_expectations=quantum_expectations,
                 base_image_b64=self._encode_png_base64(cv2.cvtColor(base_image_uint8, cv2.COLOR_GRAY2BGR)),
@@ -1200,6 +1266,7 @@ class QKneeBackend:
 
         return _PredictParts(
             risk_score=risk_score,
+            reason=_build_diagnosis_reason(risk_score, TEAR_RISK_THRESHOLD, None, None),
             gradcam_heatmap_b64=self._encode_png_base64(legacy_overlay),
             quantum_expectations=None,  # no quantum circuit ran in mock mode
             base_image_b64=base_image_b64,
@@ -1328,6 +1395,11 @@ class CachedFallbackBackend:
         return PredictionResponse(
             risk_score=risk_score,
             diagnosis=diagnosis,
+            # No raw heatmap array is stored in precomputed_cache.json (only
+            # the pre-blended `heatmap_base64` composite) -- the location
+            # signal is unavailable here, same reason `base_image`/
+            # `gradcam_overlay` are empty/None below.
+            reason=_build_diagnosis_reason(risk_score, TEAR_RISK_THRESHOLD, quantum_expectations, None),
             quantum_expectations=quantum_expectations,
             n_qubits=len(quantum_expectations) if quantum_expectations is not None else None,
             quantum_backend=_config.quantum.device if quantum_expectations is not None else None,

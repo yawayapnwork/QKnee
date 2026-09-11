@@ -26,6 +26,7 @@ export function PredictionPanel({ result }: { result: DiagnosticResult }) {
             the ring (see `components/ui/Gauge.tsx`) -- do not repeat it here. */}
         <Gauge value={result.riskScore} severity={result.severity} />
         <p className="text-lg font-semibold text-ink-primary">{result.diagnosis}</p>
+        <p className="max-w-[26rem] text-xs leading-relaxed text-ink-muted">{result.reason}</p>
       </div>
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">

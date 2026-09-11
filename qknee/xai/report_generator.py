@@ -104,13 +104,6 @@ _TIER_COLORS = {
 }
 _INK = colors.HexColor("#16222A")
 
-# Heuristic confidence-interval half-width used when a caller doesn't
-# supply an explicit `acl_risk_ci`/`meniscus_risk_ci`/`overall_risk_ci` —
-# see `_confidence_interval`'s docstring for why this is a heuristic, not a
-# statistically derived interval.
-DEFAULT_CI_MARGIN = 0.08
-
-
 # --------------------------------------------------------------------------- #
 # Small formatting / clinical-derivation helpers
 # --------------------------------------------------------------------------- #
@@ -187,30 +180,28 @@ def _overall_risk(risks: Sequence[Optional[float]]) -> Optional[float]:
 def _confidence_interval(
     risk: Optional[float],
     explicit_ci: Optional[Sequence[float]],
-    margin: float = DEFAULT_CI_MARGIN,
 ) -> Optional[Tuple[float, float]]:
-    """Resolves a `(low, high)` confidence interval for one risk score.
+    """Resolves a `(low, high)` confidence interval for one risk score —
+    ONLY when the caller supplies a real one (`explicit_ci`, e.g. computed
+    upstream from a genuine ensemble of checkpoints or bootstrap
+    resampling). Returns `None` otherwise, rendered as "N/A" by
+    `_format_ci`.
 
     The trained VQC (`qknee.models.vqc.VQCClassifier`) produces a single
     deterministic point estimate from an exact state-vector simulation
     (`default.qubit`, no shot noise) — there is no sampling distribution to
-    derive a statistical confidence interval from without additional
-    machinery (e.g. an ensemble of checkpoints, bootstrap resampling, or a
-    real shot-based NISQ backend). So:
-
-        - If the caller supplies `explicit_ci` (e.g. computed upstream
-          from such an ensemble/bootstrap), it's used directly.
-        - Otherwise, a symmetric `±margin` heuristic band is used instead,
-          and every place this interval is rendered is labeled
-          "(heuristic)" so it is never mistaken for a statistically
-          derived interval.
+    derive a statistical confidence interval from without such additional
+    machinery, which nothing in this codebase currently computes. This
+    used to fall back to a fabricated symmetric `±8pp` band labeled
+    "(heuristic)" when no real interval was supplied; that manufactured a
+    number with no statistical basis for every report, so it's gone —
+    "N/A" is the honest answer until a real interval-producing method
+    exists upstream.
     """
-    if risk is None:
+    if risk is None or explicit_ci is None:
         return None
-    if explicit_ci is not None:
-        low, high = explicit_ci
-        return max(0.0, float(low)), min(1.0, float(high))
-    return max(0.0, risk - margin), min(1.0, risk + margin)
+    low, high = explicit_ci
+    return max(0.0, float(low)), min(1.0, float(high))
 
 
 def _format_ci(ci: Optional[Tuple[float, float]]) -> str:
@@ -385,12 +376,11 @@ def _clinical_impression_table(prediction_results: Dict[str, Any]) -> Table:
     predicted_condition = _predicted_condition(risks)
 
     overall_ci = _confidence_interval(overall_risk, _get(prediction_results, "overall_risk_ci"))
-    ci_source = "caller-supplied" if _get(prediction_results, "overall_risk_ci") is not None else "heuristic ±{:.0f}pp".format(DEFAULT_CI_MARGIN * 100)
 
     rows = [
         ["Overall Risk Score", _format_percent(overall_risk), overall_tier],
         ["Predicted Condition", predicted_condition, ""],
-        [f"Confidence Interval ({ci_source})", _format_ci(overall_ci), ""],
+        ["Confidence Interval", _format_ci(overall_ci), ""],
     ]
     table = Table(rows, colWidths=[2.3 * inch, 2.2 * inch, 1.2 * inch])
     table.setStyle(TableStyle([

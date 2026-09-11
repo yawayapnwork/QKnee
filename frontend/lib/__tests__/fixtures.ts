@@ -5,6 +5,7 @@ export function livePrediction(overrides: Partial<PredictionResponse> = {}): Pre
   return {
     risk_score: 0.42,
     diagnosis: "Normal",
+    reason: "Risk score 42.0% is 8.0 percentage points below the 50% detection threshold.",
     gradcam_heatmap: "",
     backend: "live",
     latency_ms: 12.3,

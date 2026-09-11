@@ -48,6 +48,9 @@ export function ExplanationPanel({ result }: { result: DiagnosticResult | null }
         <p className="font-medium text-ink-primary">Explanation unavailable</p>
       ) : (
         <>
+          <p className="font-medium text-ink-primary">{result.diagnosis}</p>
+          <p className="text-2xs leading-relaxed text-ink-muted">{result.reason}</p>
+
           {hasOverlay && volume && volume.gradcamOverlay ? (
             <div className="relative aspect-square w-full max-w-[180px] overflow-hidden rounded-sm border border-surface-3 bg-black">
               {baseAtGradcamSlice && (

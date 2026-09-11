@@ -30,6 +30,7 @@ export function CaseNav({
   canDiagnose,
   apiHealth,
   onUpload,
+  loadingNotice,
 }: {
   cases: CaseSummary[];
   activeCaseId: string | null;
@@ -37,6 +38,11 @@ export function CaseNav({
   canDiagnose: boolean;
   apiHealth: ApiHealth;
   onUpload: (file: File) => void;
+  /** Non-null while the case list is still retrying through a Render
+   * free-tier cold start, or once that retry has given up -- see
+   * `withColdStartRetry` in `lib/api.ts`. Shown in place of the plain
+   * "no demo cases" copy so a cold start doesn't read as a missing feature. */
+  loadingNotice?: string | null;
 }) {
   const liveAnalysisAvailable = canDiagnose && apiHealth === "online";
 
@@ -49,7 +55,9 @@ export function CaseNav({
         </p>
 
         {cases.length === 0 ? (
-          <p className="mt-3 text-xs text-ink-faint">No demo cases available right now.</p>
+          <p className="mt-3 text-xs text-ink-faint">
+            {loadingNotice ?? "No demo cases available right now."}
+          </p>
         ) : (
           <div role="radiogroup" aria-label="Demo case" className="mt-3 flex flex-col gap-1.5">
             {cases.map((c) => {

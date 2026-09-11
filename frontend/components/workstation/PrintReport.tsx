@@ -67,6 +67,8 @@ export function PrintReport({ result, caseLabel }: { result: DiagnosticResult; c
         <dd>{formatPercent(result.riskScore)}</dd>
         <dt>Diagnosis</dt>
         <dd>{result.diagnosis}</dd>
+        <dt>Reason</dt>
+        <dd>{result.reason}</dd>
         <dt>Severity</dt>
         <dd>{result.severity}</dd>
         <dt>Inference latency</dt>

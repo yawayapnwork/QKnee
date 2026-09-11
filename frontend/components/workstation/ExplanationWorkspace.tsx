@@ -308,6 +308,7 @@ export function ExplanationWorkspace({
               {" "}
               ({formatPercent(severityLower, 0)}–{formatPercent(severityUpper, 0)}).
             </p>
+            <p className="mt-2 text-2xs font-medium text-ink-primary">{result.reason}</p>
             <div className="mt-4">
               <ProvenanceBadge provenance={result.provenance} />
             </div>

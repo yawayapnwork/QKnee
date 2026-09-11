@@ -40,6 +40,7 @@ function buildMarkdown(result: DiagnosticResult, caseLabel: string): string {
 
 - **Tear Risk Probability:** ${formatPercent(result.riskScore)}
 - **Diagnosis:** ${result.diagnosis}
+- **Reason:** ${result.reason}
 - **Clinical Severity:** ${result.severity}
 - **Inference Latency:** ${formatLatency(result.latencyMs)}
 

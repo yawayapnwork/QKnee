@@ -23,7 +23,7 @@ const AuthModal = dynamic(() => import("@/components/auth/AuthModal").then((m) =
   loading: () => <div className="fixed inset-0 z-50 bg-surface-0/85" aria-hidden="true" />,
 });
 import { useAuth } from "@/lib/auth-context";
-import { ApiError, fetchCase, fetchCases, fetchHealth, predictScanVolume } from "@/lib/api";
+import { ApiError, fetchCase, fetchCases, fetchHealth, predictScanVolume, withColdStartRetry } from "@/lib/api";
 import { severityFromRisk } from "@/lib/severity";
 import { quantumTelemetryFromPrediction } from "@/lib/quantum-telemetry";
 import { provenanceFromPrediction } from "@/lib/provenance";
@@ -46,6 +46,7 @@ function toDiagnosticResult(prediction: PredictionResponse): DiagnosticResult {
   return {
     riskScore: prediction.risk_score,
     diagnosis: prediction.diagnosis,
+    reason: prediction.reason,
     severity: severityFromRisk(prediction.risk_score, severityThresholds),
     severityThresholds,
     backend: prediction.backend,
@@ -89,6 +90,11 @@ export default function WorkstationPage() {
   const [authOpen, setAuthOpen] = useState(false);
   const [casesOpen, setCasesOpen] = useState(false);
   const [apiHealth, setApiHealth] = useState<ApiHealth>("checking");
+  // Non-null only while `fetchCases`/`fetchHealth` are retrying through a
+  // Render free-tier cold start (see `withColdStartRetry`) -- surfaced in
+  // `CaseNav` so the empty case list reads as "still waking up" instead of
+  // "no demo cases exist".
+  const [coldStartNotice, setColdStartNotice] = useState<string | null>(null);
   const lastFileRef = useRef<File | null>(null);
   // The in-flight `/predict` or `/api/cases/{id}` request, if any -- aborted
   // whenever a newer one supersedes it (another upload, a demo-case switch,
@@ -100,32 +106,50 @@ export default function WorkstationPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    fetchHealth(controller.signal)
-      .then(() => setApiHealth("online"))
-      .catch(() => setApiHealth("offline"))
-      .finally(() => clearTimeout(timeout));
-    return () => {
-      clearTimeout(timeout);
-      controller.abort();
+    // Each attempt gets its own short per-request timeout; the retry loop
+    // (not this timeout) is what rides out a cold start.
+    const attempt = (signal: AbortSignal) => {
+      const attemptController = new AbortController();
+      const timeout = setTimeout(() => attemptController.abort(), 8000);
+      signal.addEventListener("abort", () => attemptController.abort());
+      return fetchHealth(attemptController.signal).finally(() => clearTimeout(timeout));
     };
+    withColdStartRetry(attempt, controller.signal)
+      .then(() => setApiHealth("online"))
+      .catch(() => {
+        if (!controller.signal.aborted) setApiHealth("offline");
+      });
+    return () => controller.abort();
   }, []);
 
   // Fetches the real case list once, then auto-loads the first case so the
-  // page never opens empty when real demo data exists. An empty list (no
-  // `qknee/artifacts/real_demo_cases/` built yet) or a failed fetch just
-  // leaves the page on its "No result yet" empty state -- never falls back
-  // to any fabricated data.
+  // page never opens empty when real demo data exists. Retries through a
+  // Render free-tier cold start (`withColdStartRetry`) instead of giving up
+  // after one failed request -- an empty list only means the fetch never
+  // succeeded even after ~50s of retrying, never a fabricated fallback.
   useEffect(() => {
     const controller = new AbortController();
-    fetchCases(controller.signal)
+    withColdStartRetry(
+      (signal) => fetchCases(signal),
+      controller.signal,
+      (attempt, maxAttempts) =>
+        setColdStartNotice(
+          `Waking up the demo backend (free-tier cold start) — retry ${attempt}/${maxAttempts}...`,
+        ),
+    )
       .then((fetched) => {
         if (controller.signal.aborted) return;
+        setColdStartNotice(null);
         setCases(fetched);
         if (fetched.length > 0) void loadCase(fetched[0].case_id);
       })
       .catch(() => {
-        if (!controller.signal.aborted) setCases([]);
+        if (!controller.signal.aborted) {
+          setCases([]);
+          setColdStartNotice(
+            "The demo backend didn't respond after about a minute of retrying — it may still be waking up. Try refreshing shortly.",
+          );
+        }
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -237,6 +261,7 @@ export default function WorkstationPage() {
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
+            loadingNotice={coldStartNotice}
           />
         </aside>
 
@@ -248,6 +273,7 @@ export default function WorkstationPage() {
             canDiagnose={Boolean(canDiagnose)}
             apiHealth={apiHealth}
             onUpload={handleUpload}
+            loadingNotice={coldStartNotice}
           />
         </Drawer>
 

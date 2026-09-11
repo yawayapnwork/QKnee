@@ -14,6 +14,37 @@ import type {
 // $NEXT_PUBLIC_API_URL (see frontend/vercel.json) for any other deployment.
 export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "https://qknee-8dv8.onrender.com").replace(/\/$/, "");
 
+/** Render's free tier spins the backend down after ~15 min idle. The first
+ * request after that can take 30-60s to come back (a network timeout, or a
+ * `/health` 503 while the process is still booting) before the backend is
+ * actually reachable. Without this, a cold start looked identical to a
+ * genuinely broken backend -- one failed request and the caller gave up,
+ * so the workstation showed "No demo cases available" / no diagnosis
+ * instead of just waiting out the boot. Retries with backoff (~50s total)
+ * before surfacing a real failure. */
+export async function withColdStartRetry<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  signal: AbortSignal,
+  onRetry?: (attempt: number, maxAttempts: number) => void,
+): Promise<T> {
+  const retryDelaysMs = [3000, 5000, 8000, 13000, 20000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn(signal);
+    } catch (err) {
+      if (signal.aborted || attempt >= retryDelaysMs.length) throw err;
+      onRetry?.(attempt + 1, retryDelaysMs.length);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, retryDelaysMs[attempt]);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+    }
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   detail: string;
